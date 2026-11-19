@@ -63,12 +63,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.HorizontalDivider
+import com.example.R
 import com.example.model.BotExpression
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
 import com.example.ui.avatar.BotVectorAvatar
 import com.example.ui.avatar.MultiBotRoomIcon
 import com.example.ui.avatar.NeonPinkPurpleBrush
+import com.example.ui.components.SectionSettingsIconButton
 import com.example.viewmodel.UiState
 import com.google.firebase.Timestamp
 import java.text.SimpleDateFormat
@@ -79,7 +82,7 @@ import java.util.Locale
 private enum class HomeFilter(val label: String) {
   ALL("All"),
   ROOMS("Rooms"),
-  BOTS("Bots"),
+  BOTS("Bot Dudes"),
 }
 
 private sealed interface InboxItem {
@@ -115,6 +118,7 @@ fun ChatsHomeScreen(
   var filter by remember { mutableStateOf(HomeFilter.ALL) }
   var showCreateMenu by remember { mutableStateOf(false) }
   var showNewRoomDialog by remember { mutableStateOf(false) }
+  var showSectionSettings by remember { mutableStateOf(false) }
   var missionEditingBot by remember { mutableStateOf<CompanionBot?>(null) }
   var deleteTargetBot by remember { mutableStateOf<CompanionBot?>(null) }
   var deleteTargetRoom by remember { mutableStateOf<ChatRoom?>(null) }
@@ -184,7 +188,7 @@ fun ChatsHomeScreen(
     ) {
       Spacer(Modifier.height(8.dp))
 
-      // Top Header (matches screenshot: circular initials left, + action right)
+      // Slim, uncluttered Top Header with minimalist title + little corner Settings icon
       Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -196,52 +200,65 @@ fun ChatsHomeScreen(
           color = Color(0x663B115E),
           border = BorderStroke(1.2.dp, Color(0xAAFF73CE)),
           modifier = Modifier
-            .size(48.dp)
+            .size(44.dp)
             .testTag("home_profile_button"),
         ) {
           Box(contentAlignment = Alignment.Center) {
             Text(
               text = initials,
-              style = MaterialTheme.typography.titleSmall,
+              style = MaterialTheme.typography.labelLarge,
               color = Color.White,
               fontWeight = FontWeight.Bold,
             )
           }
         }
 
-        Surface(
-          shape = RoundedCornerShape(50),
-          color = Color(0x442A0745),
-          border = BorderStroke(1.dp, Color(0x66FF6EC7)),
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+          Icon(
+            painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_min_bot_dudes),
+            contentDescription = null,
+            tint = Color(0xFFFFB2EB),
+            modifier = Modifier.size(22.dp),
+          )
           Text(
             text = when (filter) {
-              HomeFilter.ALL -> "Claw Dudebro • ${rooms.size} Rooms • ${bots.size} Bots"
-              HomeFilter.ROOMS -> "Cafe Chat Rooms (${rooms.size})"
-              HomeFilter.BOTS -> "Companion Bots (${bots.size})"
+              HomeFilter.ALL -> "Bot Dudes"
+              HomeFilter.ROOMS -> "Forum Rooms"
+              HomeFilter.BOTS -> "Bot Dudes"
             },
-            style = MaterialTheme.typography.labelLarge,
-            color = Color(0xFFFFD8F3),
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.ExtraBold,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
           )
         }
 
-        Surface(
-          onClick = { showCreateMenu = true },
-          shape = CircleShape,
-          color = Color(0x88FF2E93),
-          border = BorderStroke(1.2.dp, Color(0xFFFF9DE2)),
-          modifier = Modifier
-            .size(48.dp)
-            .testTag("home_add_menu_button"),
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-          Box(contentAlignment = Alignment.Center) {
+          IconButton(
+            onClick = { showCreateMenu = true },
+            modifier = Modifier
+              .size(44.dp)
+              .testTag("home_add_menu_button"),
+          ) {
             Icon(
               imageVector = Icons.Rounded.Add,
               contentDescription = "New Bot or Chat Room",
               tint = Color.White,
             )
           }
+          SectionSettingsIconButton(
+            contentDescription = "Bot Dudes & OpenClaw Settings",
+            onClick = { showSectionSettings = true },
+            tint = Color(0xFFFFB2EB),
+            modifier = Modifier.testTag("home_section_settings_button"),
+          )
         }
       }
 
@@ -418,6 +435,67 @@ fun ChatsHomeScreen(
         }
       }
     }
+  }
+
+  if (showSectionSettings) {
+    AlertDialog(
+      onDismissRequest = { showSectionSettings = false },
+      title = { Text("Bot Dudes Settings") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Text("Show in Directory", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+          HomeFilter.entries.forEach { option ->
+            val picked = filter == option
+            Surface(
+              onClick = { filter = option },
+              shape = RoundedCornerShape(12.dp),
+              color = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Text(
+                text = if (picked) "✓ ${option.label}" else option.label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (picked) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+              )
+            }
+          }
+          HorizontalDivider()
+          Button(
+            onClick = {
+              showSectionSettings = false
+              onAddNewBot()
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text("Create New Bot Dude")
+          }
+          OutlinedButton(
+            onClick = {
+              showSectionSettings = false
+              showNewRoomDialog = true
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text("Create Multi-Bot Forum Room")
+          }
+          HorizontalDivider()
+          Text("General & OpenClaw Settings", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+          OutlinedButton(
+            onClick = {
+              showSectionSettings = false
+              onOpenHostSettings()
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text("Open OpenClaw & Host Settings")
+          }
+        }
+      },
+      confirmButton = {
+        TextButton(onClick = { showSectionSettings = false }) { Text("Done") }
+      },
+    )
   }
 
   if (showCreateMenu) {

@@ -353,6 +353,41 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "roomId", "senderType", "senderBotName", "rawText", "expression", "createdAt", "updatedAt"]
+    },
+    "GeneralChatThread": {
+      "title": "GeneralChatThread",
+      "description": "General everyday Q&A chat thread (non-specialized, accessible like Gemini chat history).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Authenticated owner UID." },
+        "title": { "type": "string", "description": "Chat thread title." },
+        "pinned": { "type": "boolean", "description": "Whether this general chat is pinned at top." },
+        "lastMessagePreview": { "type": "string", "description": "Latest message preview." },
+        "wheelModel": {
+          "type": "string",
+          "enum": ["OPENCLAW_DEFAULT", "OPENCLAW_LOCAL", "OPENCLAW_THIRD_PARTY"],
+          "description": "Selected OpenClaw rotary wheel LLM option."
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "pinned", "lastMessagePreview", "wheelModel", "createdAt", "updatedAt"]
+    },
+    "GeneralChatMessage": {
+      "title": "GeneralChatMessage",
+      "description": "Message inside a general everyday Q&A chat thread.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "chatId": { "type": "string" },
+        "sender": { "type": "string", "enum": ["USER", "BOT", "SYSTEM"] },
+        "rawText": { "type": "string" },
+        "modelLabel": { "type": "string" },
+        "status": { "type": "string", "enum": ["IDLE", "PARSING", "DISPATCHED", "COMPLETED", "WARNING", "FAILED"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "chatId", "sender", "rawText", "modelLabel", "status", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -371,6 +406,14 @@
     "/users/{userId}/chatRooms/{roomId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/RoomMessage" },
       "description": "Multi-bot interaction messages inside a chat room."
+    },
+    "/users/{userId}/generalChats/{chatId}": {
+      "schema": { "$ref": "#/entities/GeneralChatThread" },
+      "description": "General everyday Q&A chat threads."
+    },
+    "/users/{userId}/generalChats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/GeneralChatMessage" },
+      "description": "Messages inside a general Q&A chat thread."
     },
     "/users/{userId}/hosts/{hostId}": {
       "schema": { "$ref": "#/entities/OpenClawHost" },

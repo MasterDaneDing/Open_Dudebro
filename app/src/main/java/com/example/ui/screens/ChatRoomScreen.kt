@@ -76,7 +76,9 @@ import com.example.model.CompanionBot
 import com.example.model.MessageSender
 import com.example.model.OpenClawHost
 import com.example.model.RoomMessage
+import com.example.model.WheelLlmOption
 import com.example.ui.avatar.BotVectorAvatar
+import com.example.ui.components.LlmRotaryWheelSelector
 import com.example.ui.util.ReplyHaptics
 import com.example.viewmodel.UiState
 
@@ -87,9 +89,11 @@ fun ChatRoomScreen(
   roomMessagesState: UiState<List<RoomMessage>>,
   hostsState: UiState<List<OpenClawHost>>,
   activeExpressions: Map<String, BotExpression>,
+  selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
   onBack: () -> Unit,
-  onSendRoomMessage: (ChatRoom, List<CompanionBot>, List<RoomMessage>, String, Boolean) -> Unit,
+  onSelectWheelModel: (WheelLlmOption) -> Unit,
+  onSendRoomMessage: (ChatRoom, List<CompanionBot>, List<RoomMessage>, String, Boolean, WheelLlmOption) -> Unit,
   onUpdateRoom: (ChatRoom) -> Unit,
   onUpdateBotMission: (CompanionBot, String) -> Unit,
   onDispatchToOpenClaw: (CompanionBot, OpenClawHost?, String) -> Unit,
@@ -140,121 +144,103 @@ fun ChatRoomScreen(
     }
   }
 
-  Column(
-    modifier = Modifier
-      .fillMaxSize()
-      .background(
-        Brush.verticalGradient(
-          colors = listOf(
-            Color(0xFFFF1A8C),
-            Color(0xFFFF3DA8),
-            Color(0xFFE6007A),
+  Box(modifier = Modifier.fillMaxSize()) {
+    // Full-bleed sunlit Greek Forum characters in togas chat background — crystal clear!
+    Image(
+      painter = painterResource(id = R.drawable.img_greek_forum_togas),
+      contentDescription = "Greek Forum with mascot characters wearing togas",
+      contentScale = ContentScale.Crop,
+      modifier = Modifier.fillMaxSize(),
+    )
+    // Gentle top-only gradient behind header text; middle & bottom stay bright so toga pals shine through
+    Box(
+      modifier = Modifier
+        .fillMaxSize()
+        .background(
+          Brush.verticalGradient(
+            0.0f to Color(0x881F0533),
+            0.22f to Color.Transparent,
+            0.82f to Color.Transparent,
+            1.0f to Color(0x441B0426),
           )
         )
-      )
-      .background(
-        Brush.radialGradient(
-          colors = listOf(
-            Color(0x55FF9CE6),
-            Color.Transparent,
+    )
+
+    Column(
+      modifier = Modifier
+        .fillMaxSize()
+        .padding(horizontal = 12.dp),
+    ) {
+      // 1. Top Room Bar
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        FilledIconButton(
+          onClick = onBack,
+          colors = IconButtonDefaults.filledIconButtonColors(
+            containerColor = Color(0xFAFFF8FC),
+            contentColor = Color(0xFF280842),
           ),
-          center = Offset(540f, 380f),
-          radius = 850f,
-        )
-      )
-      .padding(horizontal = 12.dp),
-  ) {
-    // 1. Top Room Bar
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(vertical = 6.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      FilledIconButton(
-        onClick = onBack,
-        colors = IconButtonDefaults.filledIconButtonColors(
-          containerColor = Color(0xEBFFF8FC),
-          contentColor = Color(0xFF280842),
-        ),
-        modifier = Modifier
-          .size(48.dp)
-          .testTag("room_back_button"),
-      ) {
-        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to chats")
-      }
-
-      Column(modifier = Modifier.weight(1f)) {
-        Text(
-          text = room?.title ?: "Cafe Chat Room",
-          style = MaterialTheme.typography.titleLarge,
-          fontWeight = FontWeight.Bold,
-          color = Color.White,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-          text = room?.topic?.ifBlank { "${participants.size} bots at the cafe" } ?: "",
-          style = MaterialTheme.typography.bodySmall,
-          color = Color(0xFFFFE5F5),
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-
-      FilledIconButton(
-        onClick = { showRoomSettingsDialog = true },
-        enabled = room != null,
-        colors = IconButtonDefaults.filledIconButtonColors(
-          containerColor = Color(0xEBFFF8FC),
-          contentColor = Color(0xFF280842),
-        ),
-        modifier = Modifier
-          .size(48.dp)
-          .testTag("room_settings_button"),
-      ) {
-        Icon(Icons.Rounded.Settings, contentDescription = "Edit room crew & topic")
-      }
-    }
-
-    // 2. Cute Vector Cafe Stage with Sitting Animated Bots
-    Card(
-      shape = MaterialTheme.shapes.large,
-      border = BorderStroke(1.5.dp, Color(0x66FF54B6)),
-      elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
-      modifier = Modifier
-        .fillMaxWidth()
-        .height(200.dp)
-        .testTag("cafe_stage_card"),
-    ) {
-      Box(modifier = Modifier.fillMaxSize()) {
-        Image(
-          painter = painterResource(id = R.drawable.img_cafe_background),
-          contentDescription = "Cozy Claw Dudebro Cafe interior",
-          contentScale = ContentScale.Crop,
-          modifier = Modifier.fillMaxSize(),
-        )
-        Box(
           modifier = Modifier
-            .fillMaxSize()
-            .background(
-              Brush.verticalGradient(
-                colors = listOf(
-                  Color(0x281B0628),
-                  Color(0x14000000),
-                  Color(0x52180716),
-                )
-              )
-            )
-        )
+            .size(48.dp)
+            .testTag("room_back_button"),
+        ) {
+          Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to Bot Dudes")
+        }
 
-        // Participating bots hanging out at the cafe counter (tap any bot to edit its mission!)
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+            text = room?.title ?: "Greek Forum Room",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.ExtraBold,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Text(
+            text = room?.topic?.ifBlank { "${participants.size} bots debating in the forum" } ?: "",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFFFFF3C4),
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+
+        FilledIconButton(
+          onClick = { showRoomSettingsDialog = true },
+          enabled = room != null,
+          colors = IconButtonDefaults.filledIconButtonColors(
+            containerColor = Color(0xFAFFF8FC),
+            contentColor = Color(0xFF280842),
+          ),
+          modifier = Modifier
+            .size(48.dp)
+            .testTag("room_settings_button"),
+        ) {
+          Icon(Icons.Rounded.Settings, contentDescription = "Edit room crew & topic")
+        }
+      }
+
+      // 2. Airy translucent Forum Participant Strip letting the Greek Forum Togas art shine behind
+      Surface(
+        shape = MaterialTheme.shapes.large,
+        color = Color(0x281D0430),
+        border = BorderStroke(1.8.dp, Color(0xAAFF9CE0)),
+        modifier = Modifier
+          .fillMaxWidth()
+          .height(166.dp)
+          .testTag("cafe_stage_card"),
+      ) {
         Row(
           modifier = Modifier
             .fillMaxSize()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
           verticalAlignment = Alignment.Bottom,
           horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
         ) {
@@ -297,12 +283,12 @@ fun ChatRoomScreen(
               BotVectorAvatar(
                 bot = bot,
                 expression = expr,
-                size = 98.dp,
+                size = 92.dp,
                 animate = true,
               )
               Surface(
                 shape = RoundedCornerShape(8.dp),
-                color = Color(0xDDFFFBF4),
+                color = Color(0xEEFFFBF4),
               ) {
                 Text(
                   text = bot.displayMission,
@@ -319,7 +305,6 @@ fun ChatRoomScreen(
           }
         }
       }
-    }
 
     Spacer(Modifier.height(8.dp))
 
@@ -416,7 +401,15 @@ fun ChatRoomScreen(
       }
     }
 
-    // 4. Quick Continue Discussion & Composer
+    // 4. Rotating LLM Wheel + Quick Continue Discussion & Composer
+    LlmRotaryWheelSelector(
+      selectedOption = selectedWheelModel,
+      onSelectOption = onSelectWheelModel,
+      darkSurface = false,
+      accentColor = Color(0xFF7B00FF),
+      modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
+    )
+
     Row(
       modifier = Modifier
         .fillMaxWidth()
@@ -434,28 +427,30 @@ fun ChatRoomScreen(
               messages,
               "Continue the discussion: respond to the previous bot's points and refine the final result.",
               false,
+              selectedWheelModel,
             )
           }
         },
+        border = BorderStroke(1.8.dp, Color(0xFF280842)),
         colors = ButtonDefaults.buttonColors(
-          containerColor = Color(0xEBFFF8FC),
+          containerColor = Color(0xFFFFD54F),
           contentColor = Color(0xFF280842),
         ),
         modifier = Modifier
-          .height(40.dp)
+          .height(42.dp)
           .testTag("room_continue_discussion_button"),
       ) {
         Icon(Icons.Rounded.Forum, contentDescription = null, modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(6.dp))
-        Text("Let Bots Discuss More", style = MaterialTheme.typography.labelMedium)
+        Text("Let Bots Discuss More", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.ExtraBold)
       }
     }
 
     Surface(
       shape = RoundedCornerShape(24.dp),
-      color = MaterialTheme.colorScheme.surface,
-      tonalElevation = 2.dp,
-      border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+      color = Color(0xFAFFF9F2),
+      tonalElevation = 4.dp,
+      border = BorderStroke(2.dp, Color(0xFF280842)),
       modifier = Modifier
         .fillMaxWidth()
         .padding(bottom = 10.dp),
@@ -468,7 +463,12 @@ fun ChatRoomScreen(
           value = composerText,
           onValueChange = { composerText = it },
           placeholder = {
-            Text("Ask the room (e.g. translate & critique)...", style = MaterialTheme.typography.bodyMedium)
+            Text(
+              "Ask the forum (${selectedWheelModel.wheelLabel})...",
+              style = MaterialTheme.typography.bodyMedium,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
           },
           maxLines = 4,
           shape = RoundedCornerShape(18.dp),
@@ -482,7 +482,7 @@ fun ChatRoomScreen(
             if (room != null && composerText.isNotBlank() && !isBusy) {
               val prompt = composerText
               composerText = ""
-              onSendRoomMessage(room, participants, messages, prompt, true)
+              onSendRoomMessage(room, participants, messages, prompt, true, selectedWheelModel)
             }
           },
           enabled = room != null && composerText.isNotBlank() && !isBusy,
@@ -505,6 +505,7 @@ fun ChatRoomScreen(
         }
       }
     }
+    }
   }
 
   if (showRoomSettingsDialog && room != null) {
@@ -513,7 +514,7 @@ fun ChatRoomScreen(
     var chosenIds by remember(room.id) { mutableStateOf(room.botIds.toSet()) }
     AlertDialog(
       onDismissRequest = { showRoomSettingsDialog = false },
-      title = { Text("Cafe Room Settings") },
+      title = { Text("Forum Room Settings") },
       text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
           OutlinedTextField(

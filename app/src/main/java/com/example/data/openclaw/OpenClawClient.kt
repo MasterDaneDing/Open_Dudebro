@@ -1,10 +1,17 @@
 package com.example.data.openclaw
 
 import android.util.Log
+import com.example.data.ai.ChatRoomRoundResult
+import com.example.data.ai.ChatRoomTurn
 import com.example.model.BotExpression
+import com.example.model.ChatRoom
 import com.example.model.CompanionBot
+import com.example.model.GeneralChatMessage
+import com.example.model.MessageSender
 import com.example.model.OpenClawHost
 import com.example.model.OpenClawLlmProvider
+import com.example.model.RoomMessage
+import com.example.model.WheelLlmOption
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -75,7 +82,53 @@ class OpenClawClient {
 
   private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-  fun resolveEffectiveLlm(bot: CompanionBot, host: OpenClawHost): EffectiveLlmConfig {
+  fun resolveWheelLlm(
+    wheel: WheelLlmOption,
+    host: OpenClawHost,
+    providerKeys: LocalProviderKeys = LocalProviderKeys(),
+  ): EffectiveLlmConfig {
+    val provider = when (wheel) {
+      WheelLlmOption.OPENCLAW_LOCAL -> OpenClawLlmProvider.LOCAL_LLM
+      WheelLlmOption.OPENCLAW_THIRD_PARTY -> {
+        if (host.defaultLlmProviderEnum == OpenClawLlmProvider.GOOGLE ||
+          (providerKeys.googleApiKey.isNotBlank() && providerKeys.veniceApiKey.isBlank())
+        ) {
+          OpenClawLlmProvider.GOOGLE
+        } else {
+          OpenClawLlmProvider.VENICE_AI
+        }
+      }
+      WheelLlmOption.OPENCLAW_DEFAULT -> {
+        if (host.defaultLlmProviderEnum == OpenClawLlmProvider.LOCAL_LLM) {
+          OpenClawLlmProvider.OPENCLAW_AUTO
+        } else {
+          host.defaultLlmProviderEnum
+        }
+      }
+    }
+    val modelId = when {
+      wheel == WheelLlmOption.OPENCLAW_DEFAULT && host.defaultLlmModel.isNotBlank() -> host.defaultLlmModel.trim()
+      wheel == WheelLlmOption.OPENCLAW_LOCAL &&
+        host.defaultLlmProviderEnum == OpenClawLlmProvider.LOCAL_LLM &&
+        host.defaultLlmModel.isNotBlank() -> host.defaultLlmModel.trim()
+      else -> provider.defaultModel
+    }
+    return EffectiveLlmConfig(
+      provider = provider,
+      modelId = modelId,
+      localEndpoint = host.localLlmEndpoint.trim(),
+    )
+  }
+
+  fun resolveEffectiveLlm(
+    bot: CompanionBot,
+    host: OpenClawHost,
+    wheelOverride: WheelLlmOption? = null,
+    providerKeys: LocalProviderKeys = LocalProviderKeys(),
+  ): EffectiveLlmConfig {
+    if (wheelOverride != null) {
+      return resolveWheelLlm(wheelOverride, host, providerKeys)
+    }
     val botProvider = bot.llmProviderEnum
     val provider = if (botProvider == OpenClawLlmProvider.HOST_DEFAULT) {
       host.defaultLlmProviderEnum
@@ -313,13 +366,14 @@ class OpenClawClient {
     attachedFiles: List<String>,
     linkedPaths: List<String>,
     providerKeys: LocalProviderKeys = LocalProviderKeys(),
+    wheelOverride: WheelLlmOption? = null,
   ): Result<OpenClawDispatchResult> = withContext(Dispatchers.IO) {
     val cleanBase = host.baseUrl.trim().trimEnd('/')
     if (cleanBase.isBlank()) {
       return@withContext Result.failure(IllegalArgumentException("OpenClaw host URL is not configured."))
     }
 
-    val llm = resolveEffectiveLlm(bot, host)
+    val llm = resolveEffectiveLlm(bot, host, wheelOverride, providerKeys)
     val agentId = bot.openClawAgentId.ifBlank { bot.functionPresetEnum.suggestedAgentId }
     val endpoint = "$cleanBase/v1/chat/completions"
     try {
@@ -375,6 +429,131 @@ class OpenClawClient {
       throw e
     } catch (e: Exception) {
       Log.w(TAG, "OpenClaw dispatch failed: ${e.message}", e)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun sendGeneralChat(
+    host: OpenClawHost,
+    userId: String,
+    history: List<GeneralChatMessage>,
+    userPrompt: String,
+    wheelOption: WheelLlmOption,
+    providerKeys: LocalProviderKeys = LocalProviderKeys(),
+  ): Result<String> = withContext(Dispatchers.IO) {
+    val cleanBase = host.baseUrl.trim().trimEnd('/')
+    if (cleanBase.isBlank()) {
+      return@withContext Result.failure(IllegalArgumentException("OpenClaw host URL is not configured."))
+    }
+    val llm = resolveWheelLlm(wheelOption, host, providerKeys)
+    val endpoint = "$cleanBase/v1/chat/completions"
+    try {
+      val messagesArray = JSONArray().apply {
+        put(
+          JSONObject()
+            .put("role", "system")
+            .put(
+              "content",
+              "You are a helpful, clear, general-purpose Q&A assistant running through the user's OpenClaw gateway. Answer everyday questions directly and conversationally without assuming specialized bot roles unless asked."
+            )
+        )
+        history.takeLast(12).forEach { msg ->
+          val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
+          if (msg.rawText.isNotBlank()) {
+            put(JSONObject().put("role", role).put("content", msg.rawText))
+          }
+        }
+        put(JSONObject().put("role", "user").put("content", userPrompt))
+      }
+      val payload = JSONObject().apply {
+        put("model", resolveWireModel("main", llm))
+        put("messages", messagesArray)
+        put("user", userId)
+      }
+      val reqBuilder = Request.Builder()
+        .url(endpoint)
+        .post(payload.toString().toRequestBody(jsonMediaType))
+        .applyWheelHeaders(host, llm, providerKeys)
+
+      client.newCall(reqBuilder.build()).execute().use { resp ->
+        val bodyStr = resp.body?.string().orEmpty()
+        if (!resp.isSuccessful) {
+          return@withContext Result.failure(
+            IllegalStateException("OpenClaw gateway returned HTTP ${resp.code}: ${bodyStr.take(220)}")
+          )
+        }
+        val parsed = extractReplyFromOpenAiCompatibleJson(bodyStr, null)
+        Result.success(parsed.replyText)
+      }
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Log.w(TAG, "General chat OpenClaw dispatch failed: ${e.message}", e)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun dispatchChatRoomTurn(
+    host: OpenClawHost,
+    userId: String,
+    room: ChatRoom,
+    participants: List<CompanionBot>,
+    recentHistory: List<RoomMessage>,
+    userPrompt: String,
+    wheelOption: WheelLlmOption,
+    providerKeys: LocalProviderKeys = LocalProviderKeys(),
+  ): Result<ChatRoomRoundResult> = withContext(Dispatchers.IO) {
+    val cleanBase = host.baseUrl.trim().trimEnd('/')
+    if (cleanBase.isBlank()) {
+      return@withContext Result.failure(IllegalArgumentException("OpenClaw host URL is not configured."))
+    }
+    val llm = resolveWheelLlm(wheelOption, host, providerKeys)
+    val endpoint = "$cleanBase/v1/chat/completions"
+    try {
+      val systemPrompt = buildString {
+        appendLine("You are orchestrating a lively Greek Forum multi-bot collaborative room titled '${room.title}'.")
+        if (room.topic.isNotBlank()) appendLine("Topic: ${room.topic}")
+        appendLine("Participating bots:")
+        participants.forEach { bot ->
+          appendLine("- ${bot.name} | Role: ${bot.functionPresetEnum.displayName} | Mission: \"${bot.displayMission}\"")
+        }
+        appendLine("Reply strictly as a JSON object: {\"turns\":[{\"botName\":\"...\",\"replyToBotName\":null,\"message\":\"...\",\"expression\":\"UH_HUH\",\"parsedInstruction\":null}]}.")
+        append("Produce 2 to 3 concise collaborative turns using exact participant names.")
+      }
+      val messagesArray = JSONArray().apply {
+        put(JSONObject().put("role", "system").put("content", systemPrompt))
+        recentHistory.takeLast(8).forEach { msg ->
+          val role = if (msg.senderTypeEnum == MessageSender.USER) "user" else "assistant"
+          put(JSONObject().put("role", role).put("content", "[${msg.senderBotName}]: ${msg.rawText}"))
+        }
+        put(JSONObject().put("role", "user").put("content", userPrompt))
+      }
+      val payload = JSONObject().apply {
+        put("model", resolveWireModel("main", llm))
+        put("messages", messagesArray)
+        put("user", userId)
+      }
+      val req = Request.Builder()
+        .url(endpoint)
+        .post(payload.toString().toRequestBody(jsonMediaType))
+        .applyWheelHeaders(host, llm, providerKeys)
+        .build()
+
+      client.newCall(req).execute().use { resp ->
+        val bodyStr = resp.body?.string().orEmpty()
+        if (!resp.isSuccessful) {
+          return@withContext Result.failure(
+            IllegalStateException("OpenClaw gateway returned HTTP ${resp.code}: ${bodyStr.take(220)}")
+          )
+        }
+        val contentText = extractReplyFromOpenAiCompatibleJson(bodyStr, null).replyText.trim()
+        val turns = parseChatRoomTurnsFromText(contentText, participants)
+        Result.success(ChatRoomRoundResult(turns))
+      }
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Log.w(TAG, "ChatRoom OpenClaw turn failed: ${e.message}", e)
       Result.failure(e)
     }
   }
@@ -437,15 +616,11 @@ class OpenClawClient {
     }
   }
 
-  private fun Request.Builder.applyCommonHeaders(
+  private fun Request.Builder.applyWheelHeaders(
     host: OpenClawHost,
-    bot: CompanionBot,
     llm: EffectiveLlmConfig,
     providerKeys: LocalProviderKeys,
   ): Request.Builder {
-    val agentId = bot.openClawAgentId.ifBlank { bot.functionPresetEnum.suggestedAgentId }
-    addHeader("x-openclaw-agent-id", agentId)
-    addHeader("x-openclaw-bot-function", bot.functionPresetEnum.name.lowercase())
     addHeader("x-openclaw-llm-provider", llm.provider.wireKey)
     if (llm.modelId.isNotBlank()) {
       addHeader("x-openclaw-llm-model", llm.modelId)
@@ -465,6 +640,65 @@ class OpenClawClient {
       addHeader("Authorization", "Bearer ${host.gatewayToken.trim()}")
     }
     return this
+  }
+
+  private fun parseChatRoomTurnsFromText(
+    raw: String,
+    participants: List<CompanionBot>,
+  ): List<ChatRoomTurn> {
+    val startIdx = raw.indexOf('{')
+    val endIdx = raw.lastIndexOf('}')
+    if (startIdx >= 0 && endIdx > startIdx) {
+      try {
+        val json = JSONObject(raw.substring(startIdx, endIdx + 1))
+        val arr = json.optJSONArray("turns")
+        if (arr != null && arr.length() > 0) {
+          val parsed = buildList {
+            for (i in 0 until arr.length()) {
+              val item = arr.optJSONObject(i) ?: continue
+              val botName = item.optString("botName").trim()
+              val msg = item.optString("message").trim()
+              if (botName.isNotEmpty() && msg.isNotEmpty()) {
+                add(
+                  ChatRoomTurn(
+                    botName = botName,
+                    replyToBotName = item.optString("replyToBotName").trim().takeIf { it.isNotEmpty() && it != "null" },
+                    message = msg.take(4000),
+                    expression = BotExpression.safeValueOf(item.optString("expression", "UH_HUH")),
+                    parsedInstruction = item.optString("parsedInstruction").trim().takeIf { it.isNotEmpty() && it != "null" },
+                  )
+                )
+              }
+            }
+          }
+          if (parsed.isNotEmpty()) return parsed
+        }
+      } catch (_: Exception) {
+        // Fallback below
+      }
+    }
+    val speaker = participants.first()
+    return listOf(
+      ChatRoomTurn(
+        botName = speaker.name,
+        replyToBotName = null,
+        message = raw.take(4000).ifBlank { "Let's discuss this in the forum!" },
+        expression = BotExpression.UH_HUH,
+        parsedInstruction = null,
+      )
+    )
+  }
+
+  private fun Request.Builder.applyCommonHeaders(
+    host: OpenClawHost,
+    bot: CompanionBot,
+    llm: EffectiveLlmConfig,
+    providerKeys: LocalProviderKeys,
+  ): Request.Builder {
+    val agentId = bot.openClawAgentId.ifBlank { bot.functionPresetEnum.suggestedAgentId }
+    addHeader("x-openclaw-agent-id", agentId)
+    addHeader("x-openclaw-bot-function", bot.functionPresetEnum.name.lowercase())
+    return applyWheelHeaders(host, llm, providerKeys)
   }
 
   private fun extractReplyFromOpenAiCompatibleJson(

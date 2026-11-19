@@ -48,6 +48,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.res.painterResource
+import com.example.R
 import com.example.data.openclaw.OpenClawPingResult
 import com.example.model.AiRoutingMode
 import com.example.model.HostStatus
@@ -100,7 +106,7 @@ fun HostSettingsScreen(
   ) {
     Row(
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
       IconButton(
         onClick = onBack,
@@ -108,13 +114,35 @@ fun HostSettingsScreen(
           .size(48.dp)
           .testTag("host_back_to_chats_button"),
       ) {
-        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to Chats")
+        Icon(
+          Icons.AutoMirrored.Rounded.ArrowBack,
+          contentDescription = "Back to Bot Dudes",
+          tint = Color.White,
+        )
       }
-      Text("OpenClaw Host & Settings", style = MaterialTheme.typography.headlineSmall)
+      Icon(
+        painter = painterResource(id = R.drawable.ic_min_host),
+        contentDescription = null,
+        tint = Color(0xFFFFB2EB),
+        modifier = Modifier.size(24.dp),
+      )
+      Text(
+        text = "OpenClaw Settings",
+        style = MaterialTheme.typography.titleLarge.copy(
+          shadow = Shadow(color = Color(0x881A0033), offset = Offset(0f, 2f), blurRadius = 4f)
+        ),
+        color = Color.White,
+        fontWeight = FontWeight.ExtraBold,
+      )
     }
 
     if (hosts.isNotEmpty()) {
-      Text("Saved Host Computers", style = MaterialTheme.typography.titleMedium)
+      Text(
+        text = "Saved Host Computers",
+        style = MaterialTheme.typography.titleMedium,
+        color = Color(0xFFFFE57F),
+        fontWeight = FontWeight.ExtraBold,
+      )
       hosts.forEach { host ->
         val selected = host.id == editingId
         Surface(

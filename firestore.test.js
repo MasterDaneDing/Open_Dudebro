@@ -400,3 +400,97 @@ test("ChatRooms & bot missions: mission update, room CRUD, room messages, and cr
     bobDb.collection(`users/${ALICE_UID}/chatRooms/room_cafe/messages`).get()
   );
 });
+
+test("GeneralChats: owner CRUD, pin toggle, wheelModel validation, parent requirement, and cross-user isolation", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const now = new Date(Date.now() - 1000);
+
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/generalChats`).get());
+
+  const chatsRef = aliceDb.collection(`users/${ALICE_UID}/generalChats`);
+
+  // Orphaned general message without parent thread must fail
+  await assertFails(
+    chatsRef.doc("missing_chat").collection("messages").doc("gm_1").set({
+      userId: ALICE_UID,
+      chatId: "missing_chat",
+      sender: "USER",
+      rawText: "Quick question about Linux permissions",
+      modelLabel: "OpenClaw Default",
+      status: "IDLE",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    chatsRef.doc("chat_1").set({
+      userId: ALICE_UID,
+      title: "Creating Hybrid Cultures in CK3",
+      pinned: false,
+      lastMessagePreview: "",
+      wheelModel: "OPENCLAW_DEFAULT",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Pin toggle + wheelModel partial update
+  await assertSucceeds(
+    chatsRef.doc("chat_1").update({
+      pinned: true,
+      wheelModel: "OPENCLAW_LOCAL",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Invalid wheelModel rejected
+  await assertFails(
+    chatsRef.doc("chat_bad").set({
+      userId: ALICE_UID,
+      title: "Bad Model",
+      pinned: false,
+      lastMessagePreview: "",
+      wheelModel: "AI_STUDIO_BILLABLE",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // General message create & update
+  await assertSucceeds(
+    chatsRef.doc("chat_1").collection("messages").doc("gm_1").set({
+      userId: ALICE_UID,
+      chatId: "chat_1",
+      sender: "BOT",
+      rawText: "Thinking...",
+      modelLabel: "OpenClaw Local",
+      status: "DISPATCHED",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(
+    chatsRef.doc("chat_1").collection("messages").doc("gm_1").update({
+      rawText: "Here is how hybrid cultures work in CK3...",
+      status: "COMPLETED",
+      updatedAt: new Date(Date.now() - 400),
+    })
+  );
+
+  // Queries matching Kotlin repository
+  await assertSucceeds(chatsRef.orderBy("updatedAt", "desc").get());
+  await assertSucceeds(chatsRef.doc("chat_1").collection("messages").orderBy("createdAt", "asc").get());
+
+  // Cross-user isolation
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/generalChats`).get());
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/generalChats/chat_1/messages`).get());
+  await assertFails(chatsRef.doc("chat_1").collection("messages").doc("gm_1").update({
+    userId: BOB_UID,
+    updatedAt: new Date(Date.now() - 200),
+  }));
+
+  await assertSucceeds(chatsRef.doc("chat_1").delete());
+});

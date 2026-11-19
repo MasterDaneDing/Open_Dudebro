@@ -6,6 +6,8 @@ import com.example.model.BotExpression
 import com.example.model.BotMessage
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
+import com.example.model.GeneralChatMessage
+import com.example.model.GeneralChatThread
 import com.example.model.HostStatus
 import com.example.model.LinkedFile
 import com.example.model.MessageSender
@@ -13,6 +15,7 @@ import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.RoomMessage
 import com.example.model.StarterBots
+import com.example.model.WheelLlmOption
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
@@ -126,6 +129,36 @@ class ClawPalRepository(
       .snapshots()
       .map { snapshot ->
         snapshot.toObjects(RoomMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+      }
+      .catch { error ->
+        logFlowErrorIfActive(error, OperationType.LIST, path, userId)
+        throw error
+      }
+  }
+
+  fun observeGeneralChats(userId: String): Flow<List<GeneralChatThread>> {
+    val path = "users/$userId/generalChats"
+    return db.collection("users").document(userId).collection("generalChats")
+      .orderBy("updatedAt", Query.Direction.DESCENDING)
+      .snapshots()
+      .map { snapshot ->
+        snapshot.toObjects(GeneralChatThread::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+      }
+      .catch { error ->
+        logFlowErrorIfActive(error, OperationType.LIST, path, userId)
+        throw error
+      }
+  }
+
+  fun observeGeneralMessages(userId: String, chatId: String): Flow<List<GeneralChatMessage>> {
+    val path = "users/$userId/generalChats/$chatId/messages"
+    return db.collection("users").document(userId)
+      .collection("generalChats").document(chatId)
+      .collection("messages")
+      .orderBy("createdAt", Query.Direction.ASCENDING)
+      .snapshots()
+      .map { snapshot ->
+        snapshot.toObjects(GeneralChatMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
       }
       .catch { error ->
         logFlowErrorIfActive(error, OperationType.LIST, path, userId)
@@ -561,6 +594,148 @@ class ClawPalRepository(
       throw e
     } catch (e: Exception) {
       handleFirestoreError(e, OperationType.DELETE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun createGeneralChat(userId: String, thread: GeneralChatThread): Result<String> {
+    val colRef = db.collection("users").document(userId).collection("generalChats")
+    var docPath = "users/$userId/generalChats"
+    return try {
+      val uid = requireUserId(userId)
+      val docRef = colRef.document()
+      docPath = docRef.path
+      docRef.set(thread.toCreateMap(uid)).await()
+      Result.success(docRef.id)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.CREATE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun togglePinGeneralChat(userId: String, chatId: String, pinned: Boolean): Result<Unit> {
+    val docPath = "users/$userId/generalChats/$chatId"
+    return try {
+      val uid = requireUserId(userId)
+      require(chatId.isNotBlank()) { "Chat ID must not be blank" }
+      db.collection("users").document(uid).collection("generalChats").document(chatId)
+        .update(mapOf("pinned" to pinned, "updatedAt" to FieldValue.serverTimestamp()))
+        .await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun updateGeneralChatWheel(userId: String, chatId: String, wheelModel: WheelLlmOption): Result<Unit> {
+    val docPath = "users/$userId/generalChats/$chatId"
+    return try {
+      val uid = requireUserId(userId)
+      require(chatId.isNotBlank()) { "Chat ID must not be blank" }
+      db.collection("users").document(uid).collection("generalChats").document(chatId)
+        .update(mapOf("wheelModel" to wheelModel.name, "updatedAt" to FieldValue.serverTimestamp()))
+        .await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun deleteGeneralChat(userId: String, chatId: String): Result<Unit> {
+    val docPath = "users/$userId/generalChats/$chatId"
+    return try {
+      val uid = requireUserId(userId)
+      require(chatId.isNotBlank()) { "Chat ID must not be blank" }
+      val chatDoc = db.collection("users").document(uid).collection("generalChats").document(chatId)
+      val msgsSnap = chatDoc.collection("messages").get().await()
+      msgsSnap.documents.chunked(400).forEach { chunk ->
+        val batch = db.batch()
+        chunk.forEach { batch.delete(it.reference) }
+        batch.commit().await()
+      }
+      chatDoc.delete().await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.DELETE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun addGeneralMessage(
+    userId: String,
+    chatId: String,
+    message: GeneralChatMessage,
+    newTitleIfDefault: String? = null,
+  ): Result<String> {
+    var docPath = "users/$userId/generalChats/$chatId/messages"
+    return try {
+      val uid = requireUserId(userId)
+      require(chatId.isNotBlank()) { "Chat ID must not be blank" }
+      val chatDoc = db.collection("users").document(uid).collection("generalChats").document(chatId)
+      val msgRef = chatDoc.collection("messages").document()
+      docPath = msgRef.path
+      msgRef.set(message.toCreateMap(uid, chatId)).await()
+      val updates = mutableMapOf<String, Any>(
+        "lastMessagePreview" to message.rawText.replace('\n', ' ').trim().take(300),
+        "updatedAt" to FieldValue.serverTimestamp(),
+      )
+      if (!newTitleIfDefault.isNullOrBlank()) {
+        updates["title"] = newTitleIfDefault.trim().take(80)
+      }
+      chatDoc.update(updates).await()
+      Result.success(msgRef.id)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.CREATE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun updateGeneralMessage(
+    userId: String,
+    chatId: String,
+    messageId: String,
+    rawText: String,
+    modelLabel: String,
+    status: MessageStatus,
+  ): Result<Unit> {
+    val docPath = "users/$userId/generalChats/$chatId/messages/$messageId"
+    return try {
+      val uid = requireUserId(userId)
+      require(chatId.isNotBlank() && messageId.isNotBlank()) { "IDs must not be blank" }
+      val chatDoc = db.collection("users").document(uid).collection("generalChats").document(chatId)
+      chatDoc.collection("messages").document(messageId)
+        .update(
+          mapOf(
+            "rawText" to rawText.trim().take(4000).ifBlank { "..." },
+            "modelLabel" to modelLabel.trim().take(80),
+            "status" to status.name,
+            "updatedAt" to FieldValue.serverTimestamp(),
+          )
+        )
+        .await()
+      chatDoc.update(
+        mapOf(
+          "lastMessagePreview" to rawText.replace('\n', ' ').trim().take(300),
+          "updatedAt" to FieldValue.serverTimestamp(),
+        )
+      ).await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, docPath)
       Result.failure(e)
     }
   }

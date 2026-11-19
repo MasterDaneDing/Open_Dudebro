@@ -1,0 +1,26 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Cute rounded folder outline -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M3.5,7C3.5,5.9 4.4,5 5.5,5H9.6L11.4,7H18.5C19.6,7 20.5,7.9 20.5,9V17C20.5,18.1 19.6,19 18.5,19H5.5C4.4,19 3.5,18.1 3.5,17V7Z"
+        android:strokeWidth="1.9"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineJoin="round" />
+    <!-- Tiny cute eyes & smile on folder -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M9.2,12.6m-0.9,0a0.9,0.9 0,1 1,1.8 0a0.9,0.9 0,1 1,-1.8 0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M14.8,12.6m-0.9,0a0.9,0.9 0,1 1,1.8 0a0.9,0.9 0,1 1,-1.8 0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M10.5,15C11.3,15.8 12.7,15.8 13.5,15"
+        android:strokeWidth="1.7"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round" />
+</vector>

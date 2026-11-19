@@ -1,0 +1,43 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Antenna -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M12,3.5L12,6"
+        android:strokeWidth="1.9"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2.5m-1.3,0a1.3,1.3 0,1 1,2.6 0a1.3,1.3 0,1 1,-2.6 0" />
+    <!-- Cute round bot head -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M12,6.5C7.3,6.5 4,9.6 4,13.6C4,17.8 7.3,20.8 12,20.8C16.7,20.8 20,17.8 20,13.6C20,9.6 16.7,6.5 12,6.5Z"
+        android:strokeWidth="1.9"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineJoin="round" />
+    <!-- Tiny side ears -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M4,12.5C2.8,12.5 2.5,14.8 4,15M20,12.5C21.2,12.5 21.5,14.8 20,15"
+        android:strokeWidth="1.8"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round" />
+    <!-- Eyes & round nose/mouth -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M9,12.2m-1.1,0a1.1,1.1 0,1 1,2.2 0a1.1,1.1 0,1 1,-2.2 0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M15,12.2m-1.1,0a1.1,1.1 0,1 1,2.2 0a1.1,1.1 0,1 1,-2.2 0" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M10.2,15.8C11,16.8 13,16.8 13.8,15.8"
+        android:strokeWidth="1.8"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round" />
+</vector>

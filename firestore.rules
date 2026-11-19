@@ -127,6 +127,23 @@ service cloud.firestore {
              data.notes is string && data.notes.size() <= 250;
     }
 
+    function isValidGeneralChat(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 80 &&
+             data.pinned is bool &&
+             data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300 &&
+             data.wheelModel in ['OPENCLAW_DEFAULT', 'OPENCLAW_LOCAL', 'OPENCLAW_THIRD_PARTY'];
+    }
+
+    function isValidGeneralMessage(data, userId, chatId) {
+      return data.userId is string && data.userId == userId &&
+             data.chatId is string && data.chatId == chatId &&
+             data.sender in ['USER', 'BOT', 'SYSTEM'] &&
+             data.rawText is string && data.rawText.size() >= 1 && data.rawText.size() <= 4000 &&
+             data.modelLabel is string && data.modelLabel.size() <= 80 &&
+             data.status in ['IDLE', 'PARSING', 'DISPATCHED', 'COMPLETED', 'WARNING', 'FAILED'];
+    }
+
     // --- Collection Rules ---
     match /users/{userId}/bots/{botId} {
       allow list: if isOwner(userId);
@@ -342,6 +359,72 @@ service cloud.firestore {
                        ]);
 
       allow delete: if isOwner(userId) && isValidId(fileId);
+    }
+
+    match /users/{userId}/generalChats/{chatId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(chatId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(chatId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'title', 'pinned', 'lastMessagePreview',
+                         'wheelModel', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'title', 'pinned', 'lastMessagePreview',
+                         'wheelModel', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidGeneralChat(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(chatId) &&
+                       isValidGeneralChat(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'pinned', 'lastMessagePreview', 'wheelModel', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(chatId);
+
+      match /messages/{messageId} {
+        allow list: if isOwner(userId) && isValidId(chatId);
+        allow get: if isOwner(userId) && isValidId(chatId) && isValidId(messageId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(chatId) &&
+                         isValidId(messageId) &&
+                         exists(/databases/$(database)/documents/users/$(userId)/generalChats/$(chatId)) &&
+                         incoming().keys().hasAll([
+                           'userId', 'chatId', 'sender', 'rawText',
+                           'modelLabel', 'status', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'chatId', 'sender', 'rawText',
+                           'modelLabel', 'status', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidGeneralMessage(incoming(), userId, chatId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(chatId) &&
+                         isValidId(messageId) &&
+                         isValidGeneralMessage(incoming(), userId, chatId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().chatId == existing().chatId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'rawText', 'modelLabel', 'status', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(chatId) && isValidId(messageId);
+      }
     }
   }
 }

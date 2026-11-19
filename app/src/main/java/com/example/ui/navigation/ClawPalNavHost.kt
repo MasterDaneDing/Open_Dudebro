@@ -26,17 +26,21 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Settings
+import androidx.annotation.DrawableRes
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +49,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -64,15 +69,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -100,6 +102,7 @@ import com.example.ui.screens.ChatWorkspaceScreen
 import com.example.ui.screens.ChatsHomeScreen
 import com.example.ui.screens.ComputerTakeoverScreen
 import com.example.ui.screens.FilesVaultScreen
+import com.example.ui.screens.GeneralChatScreen
 import com.example.ui.screens.HostSettingsScreen
 import com.example.ui.screens.OutlinedArcadeTitle
 import com.example.viewmodel.ClawPalViewModel
@@ -118,6 +121,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 const val ROUTE_HOME = "home"
+const val ROUTE_GENERAL = "general"
 const val ROUTE_CHAT = "chat"
 const val ROUTE_ROOM = "room/{roomId}"
 const val ROUTE_TAKEOVER = "takeover"
@@ -128,15 +132,15 @@ const val ROUTE_BOT_STUDIO = "bot_studio?botId={botId}"
 private data class TopTab(
   val route: String,
   val label: String,
-  val selectedIcon: ImageVector,
-  val unselectedIcon: ImageVector,
+  @DrawableRes val iconRes: Int,
 )
 
 private val topTabs = listOf(
-  TopTab(ROUTE_HOME, "Chats", Icons.AutoMirrored.Filled.Chat, Icons.AutoMirrored.Outlined.Chat),
-  TopTab(ROUTE_TAKEOVER, "Take Over", Icons.Filled.Computer, Icons.Outlined.Computer),
-  TopTab(ROUTE_FILES, "Files", Icons.Filled.Folder, Icons.Outlined.Folder),
-  TopTab(ROUTE_SETTINGS, "Host", Icons.Filled.Settings, Icons.Outlined.Settings),
+  TopTab(ROUTE_HOME, "Bot Dudes", R.drawable.ic_min_bot_dudes),
+  TopTab(ROUTE_GENERAL, "General", R.drawable.ic_min_general),
+  TopTab(ROUTE_TAKEOVER, "Take Over", R.drawable.ic_min_takeover),
+  TopTab(ROUTE_FILES, "Files", R.drawable.ic_min_files),
+  TopTab(ROUTE_SETTINGS, "Host", R.drawable.ic_min_host),
 )
 
 internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
@@ -298,9 +302,13 @@ private fun AuthenticatedWorkspace(
 
   val botsState by viewModel.botsState.collectAsStateWithLifecycle()
   val chatRoomsState by viewModel.chatRoomsState.collectAsStateWithLifecycle()
+  val generalChatsState by viewModel.generalChatsState.collectAsStateWithLifecycle()
   val selectedBotId by viewModel.selectedBotId.collectAsStateWithLifecycle()
+  val selectedGeneralChatId by viewModel.selectedGeneralChatId.collectAsStateWithLifecycle()
+  val selectedWheelModel by viewModel.selectedWheelModel.collectAsStateWithLifecycle()
   val messagesState by viewModel.messagesState.collectAsStateWithLifecycle()
   val roomMessagesState by viewModel.roomMessagesState.collectAsStateWithLifecycle()
+  val generalMessagesState by viewModel.generalMessagesState.collectAsStateWithLifecycle()
   val roomActiveExpressions by viewModel.roomActiveExpressions.collectAsStateWithLifecycle()
   val hostsState by viewModel.hostsState.collectAsStateWithLifecycle()
   val linkedFilesState by viewModel.linkedFilesState.collectAsStateWithLifecycle()
@@ -326,10 +334,13 @@ private fun AuthenticatedWorkspace(
   val primaryHost = hosts.firstOrNull()
   val activeBot = bots.firstOrNull { it.id == selectedBotId } ?: bots.firstOrNull()
   val isHomeRoute = currentRoute == ROUTE_HOME
+  val isGeneralRoute = currentRoute == ROUTE_GENERAL
   val isTakeoverRoute = currentRoute == ROUTE_TAKEOVER
-  val isNeonPinkRoute = currentRoute == ROUTE_CHAT || currentRoute.startsWith("room/") || isTakeoverRoute
-  val useNeonChrome = isHomeRoute || isTakeoverRoute
-  val showNavChrome = currentRoute in setOf(ROUTE_HOME, ROUTE_TAKEOVER, ROUTE_FILES, ROUTE_SETTINGS)
+  val isFilesRoute = currentRoute == ROUTE_FILES
+  val isSettingsRoute = currentRoute == ROUTE_SETTINGS
+  val isNeonPinkRoute = currentRoute == ROUTE_CHAT || isTakeoverRoute
+  val useNeonChrome = true
+  val showNavChrome = currentRoute in setOf(ROUTE_HOME, ROUTE_GENERAL, ROUTE_TAKEOVER, ROUTE_FILES, ROUTE_SETTINGS)
 
   val navigateToTopTab: (String) -> Unit = { targetRoute ->
     if (targetRoute == ROUTE_HOME) {
@@ -359,29 +370,51 @@ private fun AuthenticatedWorkspace(
     modifier = Modifier
       .fillMaxSize()
       .then(
-        if (isNeonPinkRoute) {
-          Modifier
-            .background(
+        when {
+          isNeonPinkRoute -> {
+            Modifier
+              .background(
+                Brush.verticalGradient(
+                  colors = listOf(
+                    Color(0xFFFF1A8C),
+                    Color(0xFFFF3DA8),
+                    Color(0xFFE6007A),
+                  )
+                )
+              )
+              .background(
+                Brush.radialGradient(
+                  colors = listOf(
+                    Color(0x55FF9CE6),
+                    Color.Transparent,
+                  ),
+                  center = Offset(540f, 380f),
+                  radius = 850f,
+                )
+              )
+          }
+          isGeneralRoute -> {
+            Modifier.background(
               Brush.verticalGradient(
                 colors = listOf(
-                  Color(0xFFFF1A8C),
-                  Color(0xFFFF3DA8),
-                  Color(0xFFE6007A),
+                  Color(0xFF6A00F4),
+                  Color(0xFFFF6D00),
                 )
               )
             )
-            .background(
-              Brush.radialGradient(
+          }
+          isFilesRoute || isSettingsRoute -> {
+            Modifier.background(
+              Brush.verticalGradient(
                 colors = listOf(
-                  Color(0x55FF9CE6),
-                  Color.Transparent,
-                ),
-                center = Offset(540f, 380f),
-                radius = 850f,
+                  Color(0xFF5D00D6),
+                  Color(0xFF8E1CFF),
+                  Color(0xFF42009E),
+                )
               )
             )
-        } else {
-          Modifier
+          }
+          else -> Modifier
         }
       ),
   ) {
@@ -389,8 +422,8 @@ private fun AuthenticatedWorkspace(
 
     Scaffold(
       containerColor = when {
-        isNeonPinkRoute -> Color.Transparent
-        isHomeRoute -> Color(0xFF190629)
+        isNeonPinkRoute || isGeneralRoute || isFilesRoute || isSettingsRoute -> Color.Transparent
+        isHomeRoute -> Color(0xFF280054)
         else -> MaterialTheme.colorScheme.background
       },
       contentWindowInsets = WindowInsets.safeDrawing,
@@ -399,7 +432,7 @@ private fun AuthenticatedWorkspace(
         if (showNavChrome && !useRail) {
           NavigationBar(
             windowInsets = WindowInsets.navigationBars,
-            containerColor = if (useNeonChrome) Color(0xFF280842) else MaterialTheme.colorScheme.surface,
+            containerColor = Color(0xFF5800C7),
           ) {
             topTabs.forEach { tab ->
               val selected = currentRoute == tab.route
@@ -408,22 +441,27 @@ private fun AuthenticatedWorkspace(
                 onClick = { navigateToTopTab(tab.route) },
                 icon = {
                   Icon(
-                    imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                    painter = painterResource(id = tab.iconRes),
                     contentDescription = tab.label,
+                    tint = if (selected) Color.White else Color(0xFFFFA8E6),
+                    modifier = Modifier.size(25.dp),
                   )
                 },
-                label = { Text(tab.label) },
-                colors = if (useNeonChrome) {
-                  NavigationBarItemDefaults.colors(
-                    selectedIconColor = Color.White,
-                    selectedTextColor = Color(0xFFFFB8E8),
-                    indicatorColor = Color(0xAAFF2E93),
-                    unselectedIconColor = Color(0xFFD89AD6),
-                    unselectedTextColor = Color(0xFFD89AD6),
+                label = {
+                  Text(
+                    text = tab.label,
+                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false,
                   )
-                } else {
-                  NavigationBarItemDefaults.colors()
                 },
+                colors = NavigationBarItemDefaults.colors(
+                  selectedIconColor = Color.White,
+                  selectedTextColor = Color.White,
+                  indicatorColor = Color(0xAAFF2E93),
+                  unselectedIconColor = Color(0xFFFFA8E6),
+                  unselectedTextColor = Color(0xFFFFC7EE),
+                ),
               )
             }
           }
@@ -437,9 +475,20 @@ private fun AuthenticatedWorkspace(
       ) {
         if (showNavChrome && useRail) {
           NavigationRail(
-            modifier = Modifier.fillMaxHeight(),
-            containerColor = if (useNeonChrome) Color(0xFF280842) else MaterialTheme.colorScheme.surface,
+            modifier = Modifier
+              .fillMaxHeight()
+              .background(
+                Brush.verticalGradient(
+                  colors = listOf(
+                    Color(0xFF6B00F5),
+                    Color(0xFF8B1EFF),
+                    Color(0xFF4A00AE),
+                  )
+                )
+              ),
+            containerColor = Color.Transparent,
           ) {
+            Spacer(Modifier.height(6.dp))
             topTabs.forEach { tab ->
               val selected = currentRoute == tab.route
               NavigationRailItem(
@@ -447,11 +496,27 @@ private fun AuthenticatedWorkspace(
                 onClick = { navigateToTopTab(tab.route) },
                 icon = {
                   Icon(
-                    imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                    painter = painterResource(id = tab.iconRes),
                     contentDescription = tab.label,
+                    tint = if (selected) Color.White else Color(0xFFFFA8E6),
+                    modifier = Modifier.size(26.dp),
                   )
                 },
-                label = { Text(tab.label) },
+                label = {
+                  Text(
+                    text = tab.label,
+                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false,
+                  )
+                },
+                colors = NavigationRailItemDefaults.colors(
+                  selectedIconColor = Color.White,
+                  selectedTextColor = Color.White,
+                  indicatorColor = if (tab.route == ROUTE_GENERAL) Color(0xCCFF6D00) else Color(0xCCFF2E93),
+                  unselectedIconColor = Color(0xFFFFA8E6),
+                  unselectedTextColor = Color(0xFFFFC7EE),
+                ),
               )
             }
           }
@@ -488,6 +553,26 @@ private fun AuthenticatedWorkspace(
               )
             }
 
+            composable(ROUTE_GENERAL) {
+              GeneralChatScreen(
+                generalChatsState = generalChatsState,
+                selectedChatId = selectedGeneralChatId,
+                messagesState = generalMessagesState,
+                hostsState = hostsState,
+                selectedWheelModel = selectedWheelModel,
+                isBusy = isBusy,
+                onSelectChat = viewModel::selectGeneralChat,
+                onCreateNewChat = { wheel -> viewModel.createGeneralChat(wheel) },
+                onTogglePinChat = viewModel::togglePinGeneralChat,
+                onDeleteChat = viewModel::deleteGeneralChat,
+                onSelectWheelModel = viewModel::selectWheelModel,
+                onSendMessage = { thread, text, wheel, host ->
+                  viewModel.sendGeneralMessage(thread, text, wheel, host)
+                },
+                onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
+              )
+            }
+
             composable(ROUTE_CHAT) {
               ChatWorkspaceScreen(
                 botsState = botsState,
@@ -497,15 +582,19 @@ private fun AuthenticatedWorkspace(
                 linkedFilesState = linkedFilesState,
                 liveExpression = liveExpression,
                 pendingAttachments = pendingAttachments,
+                selectedWheelModel = selectedWheelModel,
                 isBusy = isBusy,
                 onSelectBot = viewModel::selectBot,
+                onSelectWheelModel = { option -> viewModel.selectWheelModel(option, null) },
                 onBack = { navController.popBackStack() },
                 onAddBotClick = { navController.navigate("bot_studio?botId=") },
                 onEditBotClick = { bot -> navController.navigate("bot_studio?botId=${bot.id}") },
                 onRenameBot = viewModel::renameBot,
                 onUpdateMission = viewModel::updateBotMission,
                 onDeleteBotClick = viewModel::deleteBot,
-                onSendMessage = viewModel::sendCasualMessage,
+                onSendMessage = { text, bot, host, wheel ->
+                  viewModel.sendCasualMessage(text, bot, host, wheel)
+                },
                 onRetryMessage = viewModel::retryDispatchMessage,
                 onAttachDeviceFile = { name, uri, mime, size ->
                   viewModel.addLinkedFile(
@@ -533,6 +622,7 @@ private fun AuthenticatedWorkspace(
                 onToggleAttachment = viewModel::togglePendingAttachment,
                 onPreviewExpression = viewModel::setLiveExpression,
                 onOpenTakeover = { navController.navigate(ROUTE_TAKEOVER) },
+                onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
               )
             }
 
@@ -551,9 +641,13 @@ private fun AuthenticatedWorkspace(
                 roomMessagesState = roomMessagesState,
                 hostsState = hostsState,
                 activeExpressions = roomActiveExpressions,
+                selectedWheelModel = selectedWheelModel,
                 isBusy = isBusy,
                 onBack = { navController.popBackStack() },
-                onSendRoomMessage = viewModel::sendRoomMessage,
+                onSelectWheelModel = { option -> viewModel.selectWheelModel(option, null) },
+                onSendRoomMessage = { r, p, h, prompt, postBubble, wheel ->
+                  viewModel.sendRoomMessage(r, p, h, prompt, postBubble, wheel)
+                },
                 onUpdateRoom = viewModel::updateChatRoom,
                 onUpdateBotMission = viewModel::updateBotMission,
                 onDispatchToOpenClaw = viewModel::dispatchRoomInstructionToHost,
@@ -606,6 +700,7 @@ private fun AuthenticatedWorkspace(
                   navController.navigate(ROUTE_CHAT)
                 },
                 onDeleteFile = viewModel::deleteLinkedFile,
+                onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
               )
             }
 

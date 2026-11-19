@@ -62,13 +62,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.TextButton
+import com.example.R
 import com.example.data.openclaw.HostControlAction
 import com.example.data.openclaw.OpenClawPingResult
 import com.example.model.BotExpression
 import com.example.model.CompanionBot
 import com.example.model.HostStatus
 import com.example.model.OpenClawHost
-import com.example.ui.avatar.BotVectorAvatar
+import com.example.ui.components.SectionSettingsIconButton
 import com.example.viewmodel.UiState
 
 @Composable
@@ -88,6 +92,7 @@ fun ComputerTakeoverScreen(
 
   var showLiveWebConsole by remember { mutableStateOf(false) }
   var remoteCommandInput by remember { mutableStateOf("") }
+  var showSectionSettings by remember { mutableStateOf(false) }
 
   Column(
     modifier = Modifier
@@ -113,41 +118,52 @@ fun ComputerTakeoverScreen(
       )
       .verticalScroll(rememberScrollState())
       .padding(16.dp),
-    verticalArrangement = Arrangement.spacedBy(14.dp),
+    verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     Row(
+      modifier = Modifier.fillMaxWidth(),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(12.dp),
+      horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-      if (activeBot != null) {
-        BotVectorAvatar(
-          bot = activeBot,
-          expression = if (takeoverActive) BotExpression.ALERT else BotExpression.WORKING,
-          size = 76.dp,
-          animate = true,
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.weight(1f),
+      ) {
+        androidx.compose.material3.Icon(
+          painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_min_takeover),
+          contentDescription = null,
+          tint = Color.White,
+          modifier = Modifier.size(24.dp),
         )
+        Column {
+          Text(
+            text = "Take Over Host PC",
+            style = MaterialTheme.typography.titleLarge.copy(
+              shadow = Shadow(
+                color = Color(0x66220018),
+                offset = Offset(0f, 2f),
+                blurRadius = 4f,
+              )
+            ),
+            color = Color.White,
+            fontWeight = FontWeight.ExtraBold,
+          )
+          Text(
+            text = activeHost?.label ?: "No OpenClaw host configured",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFFFFE5F5),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
       }
-      Column(modifier = Modifier.weight(1f)) {
-        Text(
-          text = "Take Over Host PC",
-          style = MaterialTheme.typography.headlineSmall.copy(
-            shadow = Shadow(
-              color = Color(0x66220018),
-              offset = Offset(0f, 3f),
-              blurRadius = 6f,
-            )
-          ),
-          color = Color.White,
-          fontWeight = FontWeight.ExtraBold,
-        )
-        Text(
-          text = activeHost?.let { "${it.label} (${it.baseUrl})" } ?: "No OpenClaw host configured",
-          style = MaterialTheme.typography.bodySmall,
-          color = Color(0xFFFFE5F5),
-          maxLines = 2,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
+      SectionSettingsIconButton(
+        contentDescription = "Take Over & OpenClaw Settings",
+        onClick = { showSectionSettings = true },
+        tint = Color.White,
+        modifier = Modifier.testTag("takeover_section_settings_button"),
+      )
     }
 
     // Status & Takeover Toggle Card
@@ -455,5 +471,54 @@ fun ComputerTakeoverScreen(
         }
       }
     }
+  }
+
+  if (showSectionSettings) {
+    AlertDialog(
+      onDismissRequest = { showSectionSettings = false },
+      title = { Text("Take Over & Host Settings") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Text(
+            text = activeHost?.let { "${it.label} (${it.baseUrl})" } ?: "No host PC configured yet.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          if (activeHost != null) {
+            OutlinedButton(
+              onClick = {
+                onPingHost(activeHost)
+                showSectionSettings = false
+              },
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Text("Ping Host Gateway Now")
+            }
+          }
+          OutlinedButton(
+            onClick = {
+              onSendControl(activeHost, HostControlAction.SCREEN_SNAPSHOT, "")
+              showSectionSettings = false
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text("Request Host Screen Snapshot")
+          }
+          HorizontalDivider()
+          Button(
+            onClick = {
+              showSectionSettings = false
+              onOpenHostSettings()
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text("Open OpenClaw & Host Settings")
+          }
+        }
+      },
+      confirmButton = {
+        TextButton(onClick = { showSectionSettings = false }) { Text("Done") }
+      },
+    )
   }
 }

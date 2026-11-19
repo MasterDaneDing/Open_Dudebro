@@ -51,8 +51,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.material3.HorizontalDivider
+import com.example.R
 import com.example.model.FileLinkType
 import com.example.model.LinkedFile
+import com.example.ui.components.SectionSettingsIconButton
 import com.example.viewmodel.UiState
 
 @Composable
@@ -61,9 +71,11 @@ fun FilesVaultScreen(
   onAddFile: (displayName: String, uriOrPath: String, linkType: FileLinkType, mime: String, sizeBytes: Long, notes: String, attachToComposer: Boolean) -> Unit,
   onQueueForChat: (LinkedFile) -> Unit,
   onDeleteFile: (String) -> Unit,
+  onOpenHostSettings: () -> Unit,
 ) {
   val context = LocalContext.current
   var showHostLinkDialog by remember { mutableStateOf(false) }
+  var showSectionSettings by remember { mutableStateOf(false) }
 
   val docPicker = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.OpenDocument(),
@@ -89,19 +101,50 @@ fun FilesVaultScreen(
       .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    Text("Files & Host Links", style = MaterialTheme.typography.headlineSmall)
-    Text(
-      text = "Attach documents or photos from this device (zero storage permissions needed), or save host PC paths and URLs to reference in OpenClaw prompts.",
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Icon(
+          painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_min_files),
+          contentDescription = null,
+          tint = Color(0xFFFFB2EB),
+          modifier = Modifier.size(24.dp),
+        )
+        Text(
+          text = "Files & Links",
+          style = MaterialTheme.typography.titleLarge.copy(
+            shadow = Shadow(color = Color(0x881A0033), offset = Offset(0f, 2f), blurRadius = 4f)
+          ),
+          color = Color.White,
+          fontWeight = FontWeight.ExtraBold,
+        )
+      }
+      SectionSettingsIconButton(
+        contentDescription = "Files & OpenClaw Settings",
+        onClick = { showSectionSettings = true },
+        tint = Color(0xFFFFB2EB),
+        modifier = Modifier.testTag("files_section_settings_button"),
+      )
+    }
 
     Row(
       modifier = Modifier.fillMaxWidth(),
       horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      OutlinedButton(
+      Button(
         onClick = { docPicker.launch(arrayOf("*/*")) },
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.8.dp, Color(0xFF28004A)),
+        colors = ButtonDefaults.buttonColors(
+          containerColor = Color(0xFAFFF9F2),
+          contentColor = Color(0xFF42009E),
+        ),
         modifier = Modifier
           .weight(1f)
           .height(48.dp)
@@ -109,10 +152,16 @@ fun FilesVaultScreen(
       ) {
         Icon(Icons.Rounded.FolderOpen, contentDescription = null, Modifier.size(18.dp))
         Spacer(Modifier.width(6.dp))
-        Text("File", maxLines = 1)
+        Text("File", fontWeight = FontWeight.Bold, maxLines = 1)
       }
-      OutlinedButton(
+      Button(
         onClick = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.8.dp, Color(0xFF28004A)),
+        colors = ButtonDefaults.buttonColors(
+          containerColor = Color(0xFAFFF9F2),
+          contentColor = Color(0xFF42009E),
+        ),
         modifier = Modifier
           .weight(1f)
           .height(48.dp)
@@ -120,10 +169,16 @@ fun FilesVaultScreen(
       ) {
         Icon(Icons.Rounded.Image, contentDescription = null, Modifier.size(18.dp))
         Spacer(Modifier.width(6.dp))
-        Text("Photo", maxLines = 1)
+        Text("Photo", fontWeight = FontWeight.Bold, maxLines = 1)
       }
       Button(
         onClick = { showHostLinkDialog = true },
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.8.dp, Color(0xFF28004A)),
+        colors = ButtonDefaults.buttonColors(
+          containerColor = Color(0xFFFF6D00),
+          contentColor = Color.White,
+        ),
         modifier = Modifier
           .weight(1f)
           .height(48.dp)
@@ -131,7 +186,7 @@ fun FilesVaultScreen(
       ) {
         Icon(Icons.Rounded.Link, contentDescription = null, Modifier.size(18.dp))
         Spacer(Modifier.width(6.dp))
-        Text("Link", maxLines = 1)
+        Text("Link", fontWeight = FontWeight.ExtraBold, maxLines = 1)
       }
     }
 
@@ -318,6 +373,44 @@ fun FilesVaultScreen(
       },
       dismissButton = {
         TextButton(onClick = { showHostLinkDialog = false }) { Text("Cancel") }
+      },
+    )
+  }
+
+  if (showSectionSettings) {
+    AlertDialog(
+      onDismissRequest = { showSectionSettings = false },
+      title = { Text("Files & OpenClaw Settings") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Text(
+            text = "Attach photos or documents without broad storage permissions, or save Host PC paths & URLs to pass into prompts.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          OutlinedButton(
+            onClick = {
+              showSectionSettings = false
+              showHostLinkDialog = true
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text("Add New Host Path / URL")
+          }
+          HorizontalDivider()
+          Button(
+            onClick = {
+              showSectionSettings = false
+              onOpenHostSettings()
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text("Open OpenClaw & Host Settings")
+          }
+        }
+      },
+      confirmButton = {
+        TextButton(onClick = { showSectionSettings = false }) { Text("Done") }
       },
     )
   }

@@ -224,6 +224,22 @@ enum class OpenClawLlmProvider(
   }
 }
 
+enum class WheelLlmOption(
+  val wheelLabel: String,
+  val fullLabel: String,
+  val provider: OpenClawLlmProvider,
+) {
+  OPENCLAW_DEFAULT("Gateway", "OpenClaw Default", OpenClawLlmProvider.OPENCLAW_AUTO),
+  OPENCLAW_LOCAL("Local LLM", "OpenClaw Local", OpenClawLlmProvider.LOCAL_LLM),
+  OPENCLAW_THIRD_PARTY("3rd Party", "OpenClaw 3rd Party", OpenClawLlmProvider.VENICE_AI),
+  ;
+
+  companion object {
+    fun safeValueOf(raw: String?): WheelLlmOption =
+      entries.firstOrNull { it.name == raw } ?: OPENCLAW_DEFAULT
+  }
+}
+
 enum class HostStatus(val label: String) {
   ONLINE("Online"),
   OFFLINE("Offline"),
@@ -516,6 +532,59 @@ data class RoomMessage(
     @Suppress("UNCHECKED_CAST")
     return base.filterValues { it != null } as Map<String, Any>
   }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class GeneralChatThread(
+  @DocumentId val id: String = "",
+  val userId: String = "",
+  val title: String = "New General Chat",
+  val pinned: Boolean = false,
+  val lastMessagePreview: String = "",
+  val wheelModel: String = WheelLlmOption.OPENCLAW_DEFAULT.name,
+  @ServerTimestamp val createdAt: Timestamp? = null,
+  @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+  val wheelModelEnum: WheelLlmOption get() = WheelLlmOption.safeValueOf(wheelModel)
+
+  fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
+    "userId" to ownerId,
+    "title" to title.trim().take(80).ifBlank { "New General Chat" },
+    "pinned" to pinned,
+    "lastMessagePreview" to lastMessagePreview.trim().take(300),
+    "wheelModel" to wheelModelEnum.name,
+    "createdAt" to FieldValue.serverTimestamp(),
+    "updatedAt" to FieldValue.serverTimestamp(),
+  )
+}
+
+@Keep
+@IgnoreExtraProperties
+data class GeneralChatMessage(
+  @DocumentId val id: String = "",
+  val userId: String = "",
+  val chatId: String = "",
+  val sender: String = MessageSender.USER.name,
+  val rawText: String = "",
+  val modelLabel: String = "",
+  val status: String = MessageStatus.IDLE.name,
+  @ServerTimestamp val createdAt: Timestamp? = null,
+  @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+  val senderEnum: MessageSender get() = MessageSender.safeValueOf(sender)
+  val statusEnum: MessageStatus get() = MessageStatus.safeValueOf(status)
+
+  fun toCreateMap(ownerId: String, targetChatId: String): Map<String, Any> = mapOf(
+    "userId" to ownerId,
+    "chatId" to targetChatId,
+    "sender" to senderEnum.name,
+    "rawText" to rawText.trim().take(4000).ifBlank { "..." },
+    "modelLabel" to modelLabel.trim().take(80),
+    "status" to statusEnum.name,
+    "createdAt" to FieldValue.serverTimestamp(),
+    "updatedAt" to FieldValue.serverTimestamp(),
+  )
 }
 
 fun normalizeHex(raw: String, fallback: String): String {

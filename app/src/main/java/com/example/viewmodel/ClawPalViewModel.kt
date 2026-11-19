@@ -18,12 +18,15 @@ import com.example.model.BotMessage
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
 import com.example.model.FileLinkType
+import com.example.model.GeneralChatMessage
+import com.example.model.GeneralChatThread
 import com.example.model.HostStatus
 import com.example.model.LinkedFile
 import com.example.model.MessageSender
 import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.RoomMessage
+import com.example.model.WheelLlmOption
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -77,11 +80,22 @@ class ClawPalViewModel(
     .catch { error -> emit(unwrapFirestoreError("chat rooms", error)) }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
+  val generalChatsState: StateFlow<UiState<List<GeneralChatThread>>> = repository.observeGeneralChats(currentUserId)
+    .map<List<GeneralChatThread>, UiState<List<GeneralChatThread>>> { UiState.Success(it) }
+    .catch { error -> emit(unwrapFirestoreError("general chats", error)) }
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
   private val _selectedBotId = MutableStateFlow("")
   val selectedBotId: StateFlow<String> = _selectedBotId.asStateFlow()
 
   private val _selectedRoomId = MutableStateFlow("")
   val selectedRoomId: StateFlow<String> = _selectedRoomId.asStateFlow()
+
+  private val _selectedGeneralChatId = MutableStateFlow("")
+  val selectedGeneralChatId: StateFlow<String> = _selectedGeneralChatId.asStateFlow()
+
+  private val _selectedWheelModel = MutableStateFlow(WheelLlmOption.OPENCLAW_DEFAULT)
+  val selectedWheelModel: StateFlow<WheelLlmOption> = _selectedWheelModel.asStateFlow()
 
   val messagesState: StateFlow<UiState<List<BotMessage>>> = _selectedBotId
     .flatMapLatest { botId ->
@@ -103,6 +117,18 @@ class ClawPalViewModel(
         repository.observeRoomMessages(currentUserId, roomId)
           .map<List<RoomMessage>, UiState<List<RoomMessage>>> { UiState.Success(it) }
           .catch { error -> emit(unwrapFirestoreError("room messages", error)) }
+      }
+    }
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+  val generalMessagesState: StateFlow<UiState<List<GeneralChatMessage>>> = _selectedGeneralChatId
+    .flatMapLatest { chatId ->
+      if (chatId.isBlank()) {
+        flowOf(UiState.Success(emptyList()))
+      } else {
+        repository.observeGeneralMessages(currentUserId, chatId)
+          .map<List<GeneralChatMessage>, UiState<List<GeneralChatMessage>>> { UiState.Success(it) }
+          .catch { error -> emit(unwrapFirestoreError("general messages", error)) }
       }
     }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
@@ -165,6 +191,24 @@ class ClawPalViewModel(
     _roomActiveExpressions.value = emptyMap()
   }
 
+  fun selectGeneralChat(chatId: String) {
+    _selectedGeneralChatId.value = chatId
+    val thread = (generalChatsState.value as? UiState.Success)?.data?.firstOrNull { it.id == chatId }
+    if (thread != null) {
+      _selectedWheelModel.value = thread.wheelModelEnum
+    }
+  }
+
+  fun selectWheelModel(option: WheelLlmOption, activeGeneralChatId: String? = null) {
+    _selectedWheelModel.value = option
+    val chatId = activeGeneralChatId?.takeIf { it.isNotBlank() } ?: _selectedGeneralChatId.value
+    if (chatId.isNotBlank()) {
+      viewModelScope.launch {
+        repository.updateGeneralChatWheel(currentUserId, chatId, option)
+      }
+    }
+  }
+
   fun setLiveExpression(expression: BotExpression) {
     _liveExpression.value = expression
   }
@@ -190,6 +234,7 @@ class ClawPalViewModel(
     rawText: String,
     bot: CompanionBot,
     activeHost: OpenClawHost?,
+    wheelOverride: WheelLlmOption? = _selectedWheelModel.value,
   ) {
     val trimmed = rawText.trim()
     if (trimmed.isBlank() || bot.id.isBlank()) return
@@ -259,6 +304,7 @@ class ClawPalViewModel(
           attachedFiles = attachedLabels,
           linkedPaths = linkedPathLabels,
           providerKeys = providerKeys,
+          wheelOverride = wheelOverride,
         )
         dispatchRes.onSuccess { res ->
           _liveExpression.value = res.expression
@@ -365,6 +411,7 @@ class ClawPalViewModel(
         attachedFiles = attachedLabels,
         linkedPaths = linkedPathLabels,
         providerKeys = providerKeys,
+        wheelOverride = wheelOverride,
       )
 
       dispatchResult.onSuccess { res ->
@@ -501,6 +548,7 @@ class ClawPalViewModel(
           attachedFiles = message.attachedFiles,
           linkedPaths = message.linkedPaths,
           providerKeys = currentProviderKeys(),
+          wheelOverride = _selectedWheelModel.value,
         )
         dispatchResult.onSuccess { res ->
           val finalExpr = if (res.takeoverSuggested) BotExpression.ALERT else res.expression
@@ -553,6 +601,7 @@ class ClawPalViewModel(
         attachedFiles = message.attachedFiles,
         linkedPaths = message.linkedPaths,
         providerKeys = currentProviderKeys(),
+        wheelOverride = _selectedWheelModel.value,
       )
       res.onSuccess { reply ->
         _liveExpression.value = reply.expression
@@ -805,6 +854,7 @@ class ClawPalViewModel(
     history: List<RoomMessage>,
     promptText: String,
     postUserBubble: Boolean = true,
+    wheelOverride: WheelLlmOption = _selectedWheelModel.value,
   ) {
     val trimmed = promptText.trim()
     if (trimmed.isBlank() || room.id.isBlank() || participants.isEmpty()) return
@@ -834,12 +884,28 @@ class ClawPalViewModel(
         }
       }
 
-      val aiRes = refinerService.runChatRoomTurn(
-        room = room,
-        participants = participants,
-        recentHistory = history,
-        userPrompt = trimmed,
-      )
+      val activeHost = currentPrimaryHost()
+      val aiRes = if (activeHost != null && activeHost.baseUrl.isNotBlank() &&
+        (wheelOverride != WheelLlmOption.OPENCLAW_DEFAULT || activeHost.aiModeEnum == AiRoutingMode.OPENCLAW_ONLY)
+      ) {
+        openClawClient.dispatchChatRoomTurn(
+          host = activeHost,
+          userId = currentUserId,
+          room = room,
+          participants = participants,
+          recentHistory = history,
+          userPrompt = trimmed,
+          wheelOption = wheelOverride,
+          providerKeys = currentProviderKeys(),
+        )
+      } else {
+        refinerService.runChatRoomTurn(
+          room = room,
+          participants = participants,
+          recentHistory = history,
+          userPrompt = trimmed,
+        )
+      }
 
       aiRes.onFailure { err ->
         _roomActiveExpressions.value = participants.associate { it.id to BotExpression.WORRIED }
@@ -913,6 +979,179 @@ class ClawPalViewModel(
       }.onFailure { err ->
         _roomActiveExpressions.value = _roomActiveExpressions.value + (bot.id to BotExpression.WORRIED)
         _statusBanner.value = "OpenClaw host unreachable: ${err.localizedMessage ?: "offline"}"
+      }
+      _isBusy.value = false
+    }
+  }
+
+  fun createGeneralChat(
+    wheelOption: WheelLlmOption = _selectedWheelModel.value,
+    onCreated: (String) -> Unit = {},
+  ) {
+    viewModelScope.launch {
+      _isBusy.value = true
+      val thread = GeneralChatThread(
+        userId = currentUserId,
+        title = "New General Chat",
+        pinned = false,
+        lastMessagePreview = "",
+        wheelModel = wheelOption.name,
+      )
+      repository.createGeneralChat(currentUserId, thread)
+        .onSuccess { newId ->
+          _selectedGeneralChatId.value = newId
+          _selectedWheelModel.value = wheelOption
+          onCreated(newId)
+        }
+        .onFailure { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not start general chat."
+        }
+      _isBusy.value = false
+    }
+  }
+
+  fun togglePinGeneralChat(chatId: String, pinned: Boolean) {
+    viewModelScope.launch {
+      repository.togglePinGeneralChat(currentUserId, chatId, pinned)
+        .onFailure { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not update pin state."
+        }
+    }
+  }
+
+  fun deleteGeneralChat(chatId: String) {
+    viewModelScope.launch {
+      repository.deleteGeneralChat(currentUserId, chatId)
+        .onSuccess {
+          if (_selectedGeneralChatId.value == chatId) {
+            _selectedGeneralChatId.value = ""
+          }
+          _statusBanner.value = "Chat deleted."
+        }
+        .onFailure { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not delete chat."
+        }
+    }
+  }
+
+  fun sendGeneralMessage(
+    chat: GeneralChatThread?,
+    rawText: String,
+    wheelOption: WheelLlmOption,
+    activeHost: OpenClawHost?,
+    onThreadReady: (String) -> Unit = {},
+  ) {
+    val trimmed = rawText.trim()
+    if (trimmed.isBlank()) return
+
+    val history = (generalMessagesState.value as? UiState.Success)?.data.orEmpty()
+
+    viewModelScope.launch {
+      _isBusy.value = true
+      val resolvedChatId: String
+      val isDefaultTitle: Boolean
+
+      if (chat == null || chat.id.isBlank()) {
+        val initialTitle = trimmed.replace('\n', ' ').trim().take(48).ifBlank { "General Chat" }
+        val newIdRes = repository.createGeneralChat(
+          currentUserId,
+          GeneralChatThread(
+            userId = currentUserId,
+            title = initialTitle,
+            pinned = false,
+            lastMessagePreview = trimmed.take(120),
+            wheelModel = wheelOption.name,
+          ),
+        )
+        resolvedChatId = newIdRes.getOrElse { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not create chat."
+          _isBusy.value = false
+          return@launch
+        }
+        _selectedGeneralChatId.value = resolvedChatId
+        onThreadReady(resolvedChatId)
+        isDefaultTitle = false
+      } else {
+        resolvedChatId = chat.id
+        isDefaultTitle = chat.title == "New General Chat"
+      }
+
+      val autoTitle = if (isDefaultTitle) trimmed.replace('\n', ' ').trim().take(48) else null
+      repository.addGeneralMessage(
+        userId = currentUserId,
+        chatId = resolvedChatId,
+        message = GeneralChatMessage(
+          userId = currentUserId,
+          chatId = resolvedChatId,
+          sender = MessageSender.USER.name,
+          rawText = trimmed,
+          modelLabel = wheelOption.fullLabel,
+          status = MessageStatus.IDLE.name,
+        ),
+        newTitleIfDefault = autoTitle,
+      ).onFailure { err ->
+        _statusBanner.value = err.localizedMessage ?: "Could not save message."
+        _isBusy.value = false
+        return@launch
+      }
+
+      val assistantMsgId = repository.addGeneralMessage(
+        userId = currentUserId,
+        chatId = resolvedChatId,
+        message = GeneralChatMessage(
+          userId = currentUserId,
+          chatId = resolvedChatId,
+          sender = MessageSender.BOT.name,
+          rawText = "Asking ${wheelOption.fullLabel}...",
+          modelLabel = wheelOption.fullLabel,
+          status = MessageStatus.DISPATCHED.name,
+        ),
+      ).getOrElse { err ->
+        _statusBanner.value = err.localizedMessage ?: "Could not create reply."
+        _isBusy.value = false
+        return@launch
+      }
+
+      if (activeHost == null || activeHost.baseUrl.isBlank()) {
+        repository.updateGeneralMessage(
+          userId = currentUserId,
+          chatId = resolvedChatId,
+          messageId = assistantMsgId,
+          rawText = "OpenClaw host URL isn't configured yet. Add your gateway URL in the Host tab so General Chat can route via ${wheelOption.fullLabel} without using AI Studio quota.",
+          modelLabel = wheelOption.fullLabel,
+          status = MessageStatus.WARNING,
+        )
+        _isBusy.value = false
+        return@launch
+      }
+
+      val replyRes = openClawClient.sendGeneralChat(
+        host = activeHost,
+        userId = currentUserId,
+        history = history,
+        userPrompt = trimmed,
+        wheelOption = wheelOption,
+        providerKeys = currentProviderKeys(),
+      )
+
+      replyRes.onSuccess { answer ->
+        repository.updateGeneralMessage(
+          userId = currentUserId,
+          chatId = resolvedChatId,
+          messageId = assistantMsgId,
+          rawText = answer,
+          modelLabel = wheelOption.fullLabel,
+          status = MessageStatus.COMPLETED,
+        )
+      }.onFailure { err ->
+        repository.updateGeneralMessage(
+          userId = currentUserId,
+          chatId = resolvedChatId,
+          messageId = assistantMsgId,
+          rawText = "Couldn't reach ${wheelOption.fullLabel} via ${activeHost.baseUrl}: ${err.localizedMessage ?: "Host offline"}. Make sure OpenClaw is running and reachable on your LAN/Tailscale.",
+          modelLabel = wheelOption.fullLabel,
+          status = MessageStatus.FAILED,
+        )
       }
       _isBusy.value = false
     }

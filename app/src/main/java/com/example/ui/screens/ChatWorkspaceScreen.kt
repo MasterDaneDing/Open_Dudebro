@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -79,19 +80,23 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.model.BotExpression
 import com.example.model.BotMessage
 import com.example.model.CompanionBot
@@ -100,7 +105,10 @@ import com.example.model.LinkedFile
 import com.example.model.MessageSender
 import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
+import com.example.model.WheelLlmOption
 import com.example.ui.avatar.BotVectorAvatar
+import com.example.ui.components.LlmRotaryWheelSelector
+import com.example.ui.components.SectionSettingsIconButton
 import com.example.ui.util.ReplyHaptics
 import com.example.viewmodel.UiState
 
@@ -113,21 +121,24 @@ fun ChatWorkspaceScreen(
   linkedFilesState: UiState<List<LinkedFile>>,
   liveExpression: BotExpression,
   pendingAttachments: List<LinkedFile>,
+  selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
   onSelectBot: (String) -> Unit,
+  onSelectWheelModel: (WheelLlmOption) -> Unit,
   onBack: () -> Unit,
   onAddBotClick: () -> Unit,
   onEditBotClick: (CompanionBot) -> Unit,
   onRenameBot: (CompanionBot, String) -> Unit,
   onUpdateMission: (CompanionBot, String) -> Unit,
   onDeleteBotClick: (String) -> Unit,
-  onSendMessage: (String, CompanionBot, OpenClawHost?) -> Unit,
+  onSendMessage: (String, CompanionBot, OpenClawHost?, WheelLlmOption) -> Unit,
   onRetryMessage: (BotMessage, CompanionBot, OpenClawHost?) -> Unit,
   onAttachDeviceFile: (String, String, String, Long) -> Unit,
   onAddHostPathLink: (String, String) -> Unit,
   onToggleAttachment: (LinkedFile) -> Unit,
   onPreviewExpression: (BotExpression) -> Unit,
   onOpenTakeover: () -> Unit,
+  onOpenHostSettings: () -> Unit,
 ) {
   val context = LocalContext.current
   val haptic = LocalHapticFeedback.current
@@ -215,7 +226,7 @@ fun ChatWorkspaceScreen(
     }
   }
 
-  Column(
+  Box(
     modifier = Modifier
       .fillMaxSize()
       .background(
@@ -226,19 +237,32 @@ fun ChatWorkspaceScreen(
             Color(0xFFE6007A),
           )
         )
-      )
-      .background(
-        Brush.radialGradient(
-          colors = listOf(
-            Color(0x55FF9CE6),
-            Color.Transparent,
-          ),
-          center = Offset(540f, 380f),
-          radius = 850f,
-        )
-      )
-      .padding(horizontal = 12.dp),
+      ),
   ) {
+    Image(
+      painter = painterResource(id = R.drawable.img_greek_forum_togas),
+      contentDescription = null,
+      contentScale = ContentScale.Crop,
+      modifier = Modifier
+        .fillMaxSize()
+        .alpha(0.24f),
+    )
+
+    Column(
+      modifier = Modifier
+        .fillMaxSize()
+        .background(
+          Brush.radialGradient(
+            colors = listOf(
+              Color(0x44FF9CE6),
+              Color.Transparent,
+            ),
+            center = Offset(540f, 380f),
+            radius = 850f,
+          )
+        )
+        .padding(horizontal = 12.dp),
+    ) {
     // 1. Back + Bot Crew Strip (+ Add Bot / - Remove Bot)
     Row(
       modifier = Modifier
@@ -257,7 +281,7 @@ fun ChatWorkspaceScreen(
           .size(48.dp)
           .testTag("chat_back_home_button"),
       ) {
-        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to chats")
+        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to Bot Dudes")
       }
       Box(modifier = Modifier.weight(1f)) {
         BotCrewBar(
@@ -270,6 +294,12 @@ fun ChatWorkspaceScreen(
           onRequestDeleteBot = { botPendingDelete = it },
         )
       }
+      SectionSettingsIconButton(
+        contentDescription = "Bot & OpenClaw Settings",
+        onClick = { showBotDetailsDialog = true },
+        tint = Color.White,
+        modifier = Modifier.testTag("chat_section_settings_button"),
+      )
     }
 
     Spacer(Modifier.height(6.dp))
@@ -446,12 +476,19 @@ fun ChatWorkspaceScreen(
       }
     }
 
+    // 4.5 Rotating LLM Wheel Selector
+    LlmRotaryWheelSelector(
+      selectedOption = selectedWheelModel,
+      onSelectOption = onSelectWheelModel,
+      modifier = Modifier.padding(bottom = 6.dp),
+    )
+
     // 5. Casual Message Composer
     Surface(
       shape = RoundedCornerShape(24.dp),
-      color = MaterialTheme.colorScheme.surface,
-      tonalElevation = 2.dp,
-      border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+      color = Color(0xFAFFF9F2),
+      tonalElevation = 4.dp,
+      border = BorderStroke(2.dp, Color(0xFF280842)),
       modifier = Modifier
         .fillMaxWidth()
         .padding(bottom = 10.dp),
@@ -478,7 +515,7 @@ fun ChatWorkspaceScreen(
           onValueChange = { composerText = it },
           placeholder = {
             Text(
-              text = "Message ${activeBot?.name ?: "bot"}...",
+              text = "Task ${activeBot?.name ?: "bot"} (${selectedWheelModel.wheelLabel})...",
               style = MaterialTheme.typography.bodyMedium,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
@@ -498,7 +535,7 @@ fun ChatWorkspaceScreen(
             if (activeBot != null && composerText.isNotBlank() && !isBusy) {
               val textToSend = composerText
               composerText = ""
-              onSendMessage(textToSend, activeBot, activeHost)
+              onSendMessage(textToSend, activeBot, activeHost, selectedWheelModel)
             }
           },
           enabled = activeBot != null && composerText.isNotBlank() && !isBusy,
@@ -524,6 +561,7 @@ fun ChatWorkspaceScreen(
         }
       }
     }
+  }
   }
 
   if (showAttachSheet) {
@@ -874,6 +912,17 @@ fun ChatWorkspaceScreen(
             Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text("Edit Appearance & OpenClaw Brain")
+          }
+          OutlinedButton(
+            onClick = {
+              showBotDetailsDialog = false
+              onOpenHostSettings()
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .defaultMinSize(minHeight = 48.dp),
+          ) {
+            Text("Open OpenClaw & Host Settings")
           }
         }
       },

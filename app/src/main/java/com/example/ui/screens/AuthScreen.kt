@@ -159,18 +159,20 @@ fun AuthScreen(
       modifier = Modifier.fillMaxSize(),
       contentAlignment = Alignment.Center,
     ) {
-      val headSize = minOf(maxWidth * 0.96f, maxHeight * 0.54f)
+      val isLandscape = maxWidth > maxHeight && maxWidth >= 520.dp
+      val portraitHeadSize = minOf(maxWidth * 0.96f, maxHeight * 0.54f)
         .coerceAtLeast(300.dp)
         .coerceAtMost(480.dp)
-      val titleFontSp = minOf(maxWidth.value * 0.10f, 42f).coerceAtLeast(28f)
+      val landscapeHeadSize = minOf(maxWidth * 0.42f, maxHeight * 0.86f)
+        .coerceIn(190.dp, 460.dp)
+      val titleFontSp = if (isLandscape) {
+        minOf(maxWidth.value * 0.056f, maxHeight.value * 0.145f).coerceIn(32f, 58f)
+      } else {
+        minOf(maxWidth.value * 0.10f, 42f).coerceAtLeast(28f)
+      }
 
-      Column(
-        modifier = Modifier
-          .fillMaxWidth()
-          .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-      ) {
+      @Composable
+      fun MascotHeadBox(headSize: androidx.compose.ui.unit.Dp) {
         Box(
           contentAlignment = Alignment.Center,
           modifier = Modifier
@@ -215,102 +217,148 @@ fun AuthScreen(
             size = headSize,
           )
         }
+      }
 
-        OutlinedArcadeTitle(
-          title = "Claw Dudebro",
-          fontSizeSp = titleFontSp,
-        )
-
+      @Composable
+      fun SignInCard(modifier: Modifier = Modifier) {
         Card(
           shape = MaterialTheme.shapes.large,
           colors = CardDefaults.cardColors(containerColor = Color(0xFAFFF9FC)),
           elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-          modifier = Modifier
+          modifier = modifier
             .widthIn(max = 460.dp)
             .fillMaxWidth()
             .padding(horizontal = 8.dp),
         ) {
-        Column(
-          modifier = Modifier.padding(20.dp),
-          horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-          Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          Column(
+            modifier = Modifier.padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
           ) {
-            Icon(
-              imageVector = Icons.Rounded.Computer,
-              contentDescription = null,
-              tint = Color(0xFFD6006E),
-            )
-            Text(
-              text = "Sync your bots & host profiles",
-              style = MaterialTheme.typography.titleMedium,
-              color = Color(0xFF280B2E),
-            )
-          }
-
-          if (errorMessage != null) {
-            Surface(
-              color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
-              shape = MaterialTheme.shapes.small,
-              modifier = Modifier.fillMaxWidth(),
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+              Icon(
+                imageVector = Icons.Rounded.Computer,
+                contentDescription = null,
+                tint = Color(0xFFD6006E),
+              )
               Text(
-                text = errorMessage.orEmpty(),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(12.dp),
+                text = "Sync your bots & host profiles",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color(0xFF280B2E),
               )
             }
-          }
 
-          Button(
-            onClick = {
-              errorMessage = null
-              isLoading = true
-              onGoogleSignInClicked(
-                context = context,
-                credentialManager = credentialManager,
-                onAuthSuccess = {
-                  isLoading = false
-                  onAuthSuccess()
-                },
-                onAuthError = { msg ->
-                  isLoading = false
-                  errorMessage = msg
-                },
-                scope = scope,
-                onAuthCancelled = {
-                  isLoading = false
-                },
-              )
-            },
-            enabled = !isLoading,
-            shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(
-              containerColor = Color(0xFFD6006E),
-              contentColor = Color.White,
-            ),
-            modifier = Modifier
-              .fillMaxWidth()
-              .height(52.dp)
-              .testTag("google_sign_in_button"),
-          ) {
-            if (isLoading) {
-              CircularProgressIndicator(
-                modifier = Modifier.size(22.dp),
-                color = Color.White,
-                strokeWidth = 2.5.dp,
-              )
-            } else {
-              Icon(Icons.Rounded.Login, contentDescription = null)
-              Spacer(Modifier.width(10.dp))
-              Text("Sign in with Google", style = MaterialTheme.typography.titleSmall)
+            if (errorMessage != null) {
+              Surface(
+                color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                Text(
+                  text = errorMessage.orEmpty(),
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.error,
+                  modifier = Modifier.padding(12.dp),
+                )
+              }
+            }
+
+            Button(
+              onClick = {
+                errorMessage = null
+                isLoading = true
+                onGoogleSignInClicked(
+                  context = context,
+                  credentialManager = credentialManager,
+                  onAuthSuccess = {
+                    isLoading = false
+                    onAuthSuccess()
+                  },
+                  onAuthError = { msg ->
+                    isLoading = false
+                    errorMessage = msg
+                  },
+                  scope = scope,
+                  onAuthCancelled = {
+                    isLoading = false
+                  },
+                )
+              },
+              enabled = !isLoading,
+              shape = RoundedCornerShape(16.dp),
+              colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFFD6006E),
+                contentColor = Color.White,
+              ),
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .testTag("google_sign_in_button"),
+            ) {
+              if (isLoading) {
+                CircularProgressIndicator(
+                  modifier = Modifier.size(22.dp),
+                  color = Color.White,
+                  strokeWidth = 2.5.dp,
+                )
+              } else {
+                Icon(Icons.Rounded.Login, contentDescription = null)
+                Spacer(Modifier.width(10.dp))
+                Text("Sign in with Google", style = MaterialTheme.typography.titleSmall)
+              }
             }
           }
         }
+      }
+
+      if (isLandscape) {
+        Row(
+          modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+          Box(
+            modifier = Modifier.weight(0.45f),
+            contentAlignment = Alignment.Center,
+          ) {
+            MascotHeadBox(headSize = landscapeHeadSize)
+          }
+
+          Column(
+            modifier = Modifier
+              .weight(0.55f)
+              .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically),
+          ) {
+            OutlinedArcadeTitle(
+              title = "Claw Dudebro",
+              fontSizeSp = titleFontSp,
+            )
+            SignInCard()
+          }
+        }
+      } else {
+        Column(
+          modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
+          horizontalAlignment = Alignment.CenterHorizontally,
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          MascotHeadBox(headSize = portraitHeadSize)
+
+          OutlinedArcadeTitle(
+            title = "Claw Dudebro",
+            fontSizeSp = titleFontSp,
+          )
+
+          SignInCard()
         }
       }
     }
