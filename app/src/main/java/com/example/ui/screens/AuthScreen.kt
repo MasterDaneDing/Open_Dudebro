@@ -3,9 +3,13 @@ package com.example.ui.screens
 import android.app.Activity
 import android.content.Context
 import android.util.Log
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,9 +21,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Login
 import androidx.compose.material3.Button
@@ -34,18 +40,33 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
@@ -56,6 +77,8 @@ import com.example.model.BotArchetype
 import com.example.model.BotExpression
 import com.example.model.HatStyle
 import com.example.ui.avatar.BotVectorAvatar
+import com.example.ui.theme.SuperArcadeFontFamily
+import com.example.ui.util.ReplyHaptics
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -74,12 +97,27 @@ fun AuthScreen(
   onAuthSuccess: () -> Unit,
 ) {
   val context = LocalContext.current
+  val haptic = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val credentialManager = remember(context) { CredentialManager.create(context) }
 
   var isLoading by remember { mutableStateOf(false) }
   var errorMessage by remember { mutableStateOf<String?>(null) }
-  var previewExpression by remember { mutableStateOf(BotExpression.HAPPY) }
+
+  val tapExpressions = remember {
+    listOf(
+      BotExpression.HAPPY,
+      BotExpression.UH_HUH,
+      BotExpression.THINKING,
+      BotExpression.WORRIED,
+      BotExpression.SORRY,
+      BotExpression.ALERT,
+    )
+  }
+  var tapIndex by remember { mutableIntStateOf(0) }
+  val heroExpression = tapExpressions[tapIndex % tapExpressions.size]
+  val headScale = remember { Animatable(1f) }
+  val headTilt = remember { Animatable(0f) }
 
   LaunchedEffect(Unit) {
     attemptAutoSignIn(
@@ -97,96 +135,101 @@ fun AuthScreen(
       .background(
         Brush.verticalGradient(
           colors = listOf(
-            MaterialTheme.colorScheme.background,
-            MaterialTheme.colorScheme.surface,
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+            Color(0xFFFF1A8C),
+            Color(0xFFFF3DA8),
+            Color(0xFFE6007A),
           )
         )
       )
+      .background(
+        Brush.radialGradient(
+          colors = listOf(
+            Color(0x55FF9CE6),
+            Color.Transparent,
+          ),
+          center = Offset(540f, 380f),
+          radius = 850f,
+        )
+      )
       .systemBarsPadding()
-      .padding(24.dp),
+      .padding(horizontal = 12.dp, vertical = 10.dp),
     contentAlignment = Alignment.Center,
   ) {
-    Column(
-      modifier = Modifier.widthIn(max = 460.dp),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.spacedBy(18.dp),
+    BoxWithConstraints(
+      modifier = Modifier.fillMaxSize(),
+      contentAlignment = Alignment.Center,
     ) {
-      Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.tertiaryContainer,
+      val headSize = minOf(maxWidth * 0.96f, maxHeight * 0.54f)
+        .coerceAtLeast(300.dp)
+        .coerceAtMost(480.dp)
+      val titleFontSp = minOf(maxWidth.value * 0.10f, 42f).coerceAtLeast(28f)
+
+      Column(
+        modifier = Modifier
+          .fillMaxWidth()
+          .verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        Row(
-          modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        Box(
+          contentAlignment = Alignment.Center,
+          modifier = Modifier
+            .size(headSize + 4.dp)
+            .scale(headScale.value)
+            .rotate(headTilt.value)
+            .clip(CircleShape)
+            .clickable(
+              role = Role.Button,
+              onClickLabel = "Tap character head to react",
+            ) {
+              tapIndex = (tapIndex + 1) % tapExpressions.size
+              ReplyHaptics.triggerSoftTick(context, haptic)
+              val wobbleDir = if (tapIndex % 2 == 0) 9f else -9f
+              scope.launch {
+                headScale.snapTo(0.88f)
+                headScale.animateTo(
+                  targetValue = 1f,
+                  animationSpec = spring(dampingRatio = 0.42f, stiffness = 420f),
+                )
+              }
+              scope.launch {
+                headTilt.snapTo(wobbleDir)
+                headTilt.animateTo(
+                  targetValue = 0f,
+                  animationSpec = spring(dampingRatio = 0.45f, stiffness = 360f),
+                )
+              }
+            }
+            .semantics {
+              contentDescription = "Claw Dudebro mascot head, currently ${heroExpression.label}. Tap to react."
+            }
+            .testTag("auth_hero_avatar"),
         ) {
-          Icon(
-            imageVector = Icons.Rounded.AutoAwesome,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(16.dp),
-          )
-          Text(
-            text = "OpenClaw Companion Studio",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onTertiaryContainer,
+          BotVectorAvatar(
+            archetype = BotArchetype.GLASSES_FELLOW,
+            hatStyle = HatStyle.NONE,
+            accessoryStyle = AccessoryStyle.FOREHEAD_GLASSES,
+            primaryColor = Color(0xFFEEA05E),
+            accentColor = Color(0xFFDC4D21),
+            expression = heroExpression,
+            size = headSize,
           )
         }
-      }
 
-      BotVectorAvatar(
-        archetype = BotArchetype.GLASSES_FELLOW,
-        hatStyle = HatStyle.NONE,
-        accessoryStyle = AccessoryStyle.FOREHEAD_GLASSES,
-        primaryColor = Color(0xFFEEA05E),
-        accentColor = Color(0xFFDC4D21),
-        expression = previewExpression,
-        size = 180.dp,
-        modifier = Modifier.testTag("auth_hero_avatar"),
-      )
+        OutlinedArcadeTitle(
+          title = "Claw Dudebro",
+          fontSizeSp = titleFontSp,
+        )
 
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf(
-          BotExpression.HAPPY to "Hi!",
-          BotExpression.THINKING to "Think",
-          BotExpression.UH_HUH to "Uh-huh!",
-        ).forEach { (expr, label) ->
-          Surface(
-            onClick = { previewExpression = expr },
-            shape = RoundedCornerShape(50),
-            color = if (previewExpression == expr) {
-              MaterialTheme.colorScheme.primary
-            } else {
-              MaterialTheme.colorScheme.surface
-            },
-          ) {
-            Text(
-              text = label,
-              style = MaterialTheme.typography.labelMedium,
-              color = if (previewExpression == expr) {
-                MaterialTheme.colorScheme.onPrimary
-              } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-              },
-              modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-            )
-          }
-        }
-      }
-
-      Text(
-        text = "ClawPal",
-        style = MaterialTheme.typography.displaySmall,
-        color = MaterialTheme.colorScheme.onBackground,
-      )
-
-      Card(
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        modifier = Modifier.fillMaxWidth(),
-      ) {
+        Card(
+          shape = MaterialTheme.shapes.large,
+          colors = CardDefaults.cardColors(containerColor = Color(0xFAFFF9FC)),
+          elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+          modifier = Modifier
+            .widthIn(max = 460.dp)
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp),
+        ) {
         Column(
           modifier = Modifier.padding(20.dp),
           horizontalAlignment = Alignment.CenterHorizontally,
@@ -199,11 +242,12 @@ fun AuthScreen(
             Icon(
               imageVector = Icons.Rounded.Computer,
               contentDescription = null,
-              tint = MaterialTheme.colorScheme.secondary,
+              tint = Color(0xFFD6006E),
             )
             Text(
               text = "Sync your bots & host profiles",
               style = MaterialTheme.typography.titleMedium,
+              color = Color(0xFF280B2E),
             )
           }
 
@@ -245,7 +289,10 @@ fun AuthScreen(
             },
             enabled = !isLoading,
             shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+            colors = ButtonDefaults.buttonColors(
+              containerColor = Color(0xFFD6006E),
+              contentColor = Color.White,
+            ),
             modifier = Modifier
               .fillMaxWidth()
               .height(52.dp)
@@ -254,7 +301,7 @@ fun AuthScreen(
             if (isLoading) {
               CircularProgressIndicator(
                 modifier = Modifier.size(22.dp),
-                color = MaterialTheme.colorScheme.onPrimary,
+                color = Color.White,
                 strokeWidth = 2.5.dp,
               )
             } else {
@@ -264,8 +311,51 @@ fun AuthScreen(
             }
           }
         }
+        }
       }
     }
+  }
+}
+
+@Composable
+internal fun OutlinedArcadeTitle(
+  title: String,
+  fontSizeSp: Float = 38f,
+  modifier: Modifier = Modifier,
+) {
+  val strokePx = with(LocalDensity.current) { (fontSizeSp * 0.16f).dp.toPx() }
+  val baseStyle = MaterialTheme.typography.displaySmall.copy(
+    fontFamily = SuperArcadeFontFamily,
+    fontWeight = FontWeight.Normal,
+    fontSize = fontSizeSp.sp,
+    lineHeight = (fontSizeSp + 8f).sp,
+  )
+
+  Box(
+    contentAlignment = Alignment.Center,
+    modifier = modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+  ) {
+    // Crisp black outline + subtle arcade drop shadow
+    Text(
+      text = title,
+      style = baseStyle.copy(
+        drawStyle = Stroke(width = strokePx, join = StrokeJoin.Round),
+        shadow = Shadow(
+          color = Color(0xAA000000),
+          offset = Offset(2.5f, 4.5f),
+          blurRadius = 3f,
+        ),
+      ),
+      color = Color.Black,
+      textAlign = TextAlign.Center,
+    )
+    // Vibrant lavender purple fill
+    Text(
+      text = title,
+      style = baseStyle,
+      color = Color(0xFFCFA6FF),
+      textAlign = TextAlign.Center,
+    )
   }
 }
 

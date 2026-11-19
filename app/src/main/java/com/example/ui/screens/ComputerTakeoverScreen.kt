@@ -8,6 +8,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -49,7 +50,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.openclaw.HostControlAction
 import com.example.data.openclaw.OpenClawPingResult
@@ -199,38 +202,46 @@ fun ComputerTakeoverScreen(
         // Quick Host Control Actions
         Row(
           modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+          val quickActionLabelStyle = MaterialTheme.typography.labelLarge.copy(fontSize = 13.sp)
+          val quickActionPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
           OutlinedButton(
             onClick = { onSendControl(activeHost, HostControlAction.PAUSE_AGENT, "") },
+            contentPadding = quickActionPadding,
             modifier = Modifier
               .weight(1f)
-              .height(48.dp),
+              .height(48.dp)
+              .testTag("takeover_pause_button"),
           ) {
-            Icon(Icons.Rounded.Pause, contentDescription = null, Modifier.size(16.dp))
-            Spacer(Modifier.width(4.dp))
-            Text("Pause", maxLines = 1)
+            Icon(Icons.Rounded.Pause, contentDescription = null, Modifier.size(15.dp))
+            Spacer(Modifier.width(3.dp))
+            Text("Pause", style = quickActionLabelStyle, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
           }
           OutlinedButton(
             onClick = { onSendControl(activeHost, HostControlAction.RESUME_AGENT, "") },
+            contentPadding = quickActionPadding,
             modifier = Modifier
               .weight(1f)
-              .height(48.dp),
+              .height(48.dp)
+              .testTag("takeover_resume_button"),
           ) {
-            Icon(Icons.Rounded.PlayArrow, contentDescription = null, Modifier.size(16.dp))
-            Spacer(Modifier.width(4.dp))
-            Text("Resume", maxLines = 1)
+            Icon(Icons.Rounded.PlayArrow, contentDescription = null, Modifier.size(15.dp))
+            Spacer(Modifier.width(3.dp))
+            Text("Resume", style = quickActionLabelStyle, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
           }
           OutlinedButton(
             onClick = { onSendControl(activeHost, HostControlAction.ABORT_TASK, "") },
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            contentPadding = quickActionPadding,
             modifier = Modifier
               .weight(1f)
-              .height(48.dp),
+              .height(48.dp)
+              .testTag("takeover_abort_button"),
           ) {
-            Icon(Icons.Rounded.Stop, contentDescription = null, Modifier.size(16.dp))
-            Spacer(Modifier.width(4.dp))
-            Text("Abort", maxLines = 1)
+            Icon(Icons.Rounded.Stop, contentDescription = null, Modifier.size(15.dp))
+            Spacer(Modifier.width(3.dp))
+            Text("Abort", style = quickActionLabelStyle, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
           }
         }
       }

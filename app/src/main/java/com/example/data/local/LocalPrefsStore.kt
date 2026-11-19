@@ -18,6 +18,8 @@ data class LocalUiPrefs(
   val selectedBotId: String = "",
   val showParsedCardExpanded: Boolean = true,
   val takeoverActive: Boolean = false,
+  val veniceApiKey: String = "",
+  val googleApiKey: String = "",
 )
 
 class LocalPrefsStore(private val context: Context) {
@@ -25,6 +27,8 @@ class LocalPrefsStore(private val context: Context) {
     val SELECTED_BOT_ID = stringPreferencesKey("selected_bot_id")
     val SHOW_PARSED_EXPANDED = booleanPreferencesKey("show_parsed_expanded")
     val TAKEOVER_ACTIVE = booleanPreferencesKey("takeover_active")
+    val VENICE_API_KEY = stringPreferencesKey("venice_api_key")
+    val GOOGLE_API_KEY = stringPreferencesKey("google_api_key")
   }
 
   val prefsFlow: Flow<LocalUiPrefs> = context.clawPalDataStore.data.map { prefs ->
@@ -32,6 +36,8 @@ class LocalPrefsStore(private val context: Context) {
       selectedBotId = prefs[Keys.SELECTED_BOT_ID] ?: "",
       showParsedCardExpanded = prefs[Keys.SHOW_PARSED_EXPANDED] ?: true,
       takeoverActive = prefs[Keys.TAKEOVER_ACTIVE] ?: false,
+      veniceApiKey = prefs[Keys.VENICE_API_KEY] ?: "",
+      googleApiKey = prefs[Keys.GOOGLE_API_KEY] ?: "",
     )
   }
 
@@ -45,5 +51,12 @@ class LocalPrefsStore(private val context: Context) {
 
   suspend fun setTakeoverActive(active: Boolean) {
     context.clawPalDataStore.edit { it[Keys.TAKEOVER_ACTIVE] = active }
+  }
+
+  suspend fun setProviderApiKeys(veniceKey: String, googleKey: String) {
+    context.clawPalDataStore.edit {
+      it[Keys.VENICE_API_KEY] = veniceKey.trim()
+      it[Keys.GOOGLE_API_KEY] = googleKey.trim()
+    }
   }
 }

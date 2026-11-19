@@ -216,7 +216,7 @@ fun ChatsHomeScreen(
         ) {
           Text(
             text = when (filter) {
-              HomeFilter.ALL -> "ClawPal • ${rooms.size} Rooms • ${bots.size} Bots"
+              HomeFilter.ALL -> "Claw Dudebro • ${rooms.size} Rooms • ${bots.size} Bots"
               HomeFilter.ROOMS -> "Cafe Chat Rooms (${rooms.size})"
               HomeFilter.BOTS -> "Companion Bots (${bots.size})"
             },

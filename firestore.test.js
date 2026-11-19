@@ -115,6 +115,26 @@ test("Owner CRUD: bots create, partial update, query, and delete succeed", async
     })
   );
 
+  // Validate functionPreset + OpenClaw LLM fields on bots
+  await assertSucceeds(
+    botsRef.doc("bot_translator").set(
+      sampleBotPayload(ALICE_UID, {
+        name: "Polyglot Volt",
+        archetype: "RETRO_ROBOT",
+        openClawAgentId: "translator",
+        functionPreset: "TRANSLATION",
+        llmProvider: "VENICE_AI",
+        llmModel: "venice/llama-3.3-70b",
+        openClawSynced: true,
+      })
+    )
+  );
+  await assertFails(
+    botsRef.doc("bot_bad_llm").set(
+      sampleBotPayload(ALICE_UID, { llmProvider: "UNKNOWN_PROVIDER" })
+    )
+  );
+
   // Validate all 5 additional character templates
   for (const arch of ["DINOSAUR", "GOBLIN", "YANKI_BIKER", "CHINESE_MASTER", "PIGTAIL_GIRL"]) {
     await assertSucceeds(
@@ -259,6 +279,9 @@ test("Hosts and LinkedFiles: CRUD and validation parity", async () => {
       controlUrl: "http://192.168.1.42:18789/control",
       gatewayToken: "secret-token-123",
       aiMode: "HYBRID_GEMINI_OPENCLAW",
+      defaultLlmProvider: "VENICE_AI",
+      defaultLlmModel: "venice/llama-3.3-70b",
+      localLlmEndpoint: "http://127.0.0.1:11434/v1",
       autoParseCasual: true,
       lastStatus: "UNVERIFIED",
       createdAt: now,
@@ -269,6 +292,8 @@ test("Hosts and LinkedFiles: CRUD and validation parity", async () => {
   await assertSucceeds(
     aliceDb.collection(`users/${ALICE_UID}/hosts`).doc("host_1").update({
       lastStatus: "ONLINE",
+      defaultLlmProvider: "LOCAL_LLM",
+      defaultLlmModel: "ollama/qwen2.5:14b",
       updatedAt: new Date(Date.now() - 500),
     })
   );

@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -56,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -140,6 +143,25 @@ fun ChatRoomScreen(
   Column(
     modifier = Modifier
       .fillMaxSize()
+      .background(
+        Brush.verticalGradient(
+          colors = listOf(
+            Color(0xFFFF1A8C),
+            Color(0xFFFF3DA8),
+            Color(0xFFE6007A),
+          )
+        )
+      )
+      .background(
+        Brush.radialGradient(
+          colors = listOf(
+            Color(0x55FF9CE6),
+            Color.Transparent,
+          ),
+          center = Offset(540f, 380f),
+          radius = 850f,
+        )
+      )
       .padding(horizontal = 12.dp),
   ) {
     // 1. Top Room Bar
@@ -150,8 +172,12 @@ fun ChatRoomScreen(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      IconButton(
+      FilledIconButton(
         onClick = onBack,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = Color(0xEBFFF8FC),
+          contentColor = Color(0xFF280842),
+        ),
         modifier = Modifier
           .size(48.dp)
           .testTag("room_back_button"),
@@ -163,21 +189,27 @@ fun ChatRoomScreen(
         Text(
           text = room?.title ?: "Cafe Chat Room",
           style = MaterialTheme.typography.titleLarge,
+          fontWeight = FontWeight.Bold,
+          color = Color.White,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )
         Text(
           text = room?.topic?.ifBlank { "${participants.size} bots at the cafe" } ?: "",
           style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          color = Color(0xFFFFE5F5),
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
         )
       }
 
-      IconButton(
+      FilledIconButton(
         onClick = { showRoomSettingsDialog = true },
         enabled = room != null,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = Color(0xEBFFF8FC),
+          contentColor = Color(0xFF280842),
+        ),
         modifier = Modifier
           .size(48.dp)
           .testTag("room_settings_button"),
@@ -193,13 +225,13 @@ fun ChatRoomScreen(
       elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
       modifier = Modifier
         .fillMaxWidth()
-        .height(186.dp)
+        .height(200.dp)
         .testTag("cafe_stage_card"),
     ) {
       Box(modifier = Modifier.fillMaxSize()) {
         Image(
           painter = painterResource(id = R.drawable.img_cafe_background),
-          contentDescription = "Cozy ClawPal Cafe interior",
+          contentDescription = "Cozy Claw Dudebro Cafe interior",
           contentScale = ContentScale.Crop,
           modifier = Modifier.fillMaxSize(),
         )
@@ -247,7 +279,7 @@ fun ChatRoomScreen(
                   horizontalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
                   Text(
-                    text = if (isBusy && expr == BotExpression.THINKING) "${bot.name}..." else bot.name,
+                    text = bot.name,
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
@@ -265,7 +297,7 @@ fun ChatRoomScreen(
               BotVectorAvatar(
                 bot = bot,
                 expression = expr,
-                size = 82.dp,
+                size = 98.dp,
                 animate = true,
               )
               Surface(
@@ -328,6 +360,8 @@ fun ChatRoomScreen(
               Text(
                 text = "Start a cafe conversation!",
                 style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
               )
               Spacer(Modifier.height(6.dp))
               listOf(
@@ -337,6 +371,7 @@ fun ChatRoomScreen(
                 Surface(
                   onClick = { composerText = sample },
                   shape = MaterialTheme.shapes.medium,
+                  color = MaterialTheme.colorScheme.surface,
                   border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                   modifier = Modifier
                     .fillMaxWidth()
@@ -389,7 +424,7 @@ fun ChatRoomScreen(
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      OutlinedButton(
+      Button(
         enabled = room != null && participants.isNotEmpty() && !isBusy,
         onClick = {
           if (room != null) {
@@ -402,6 +437,10 @@ fun ChatRoomScreen(
             )
           }
         },
+        colors = ButtonDefaults.buttonColors(
+          containerColor = Color(0xEBFFF8FC),
+          contentColor = Color(0xFF280842),
+        ),
         modifier = Modifier
           .height(40.dp)
           .testTag("room_continue_discussion_button"),
@@ -584,68 +623,87 @@ private fun RoomMessageBubble(
   Row(
     modifier = Modifier.fillMaxWidth(),
     horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+    verticalAlignment = Alignment.Top,
   ) {
-    Surface(
-      shape = RoundedCornerShape(
-        topStart = 20.dp,
-        topEnd = 20.dp,
-        bottomStart = if (isUser) 20.dp else 6.dp,
-        bottomEnd = if (isUser) 6.dp else 20.dp,
-      ),
-      color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-      border = if (isUser) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-      tonalElevation = if (isUser) 0.dp else 2.dp,
-      modifier = Modifier.widthIn(max = 520.dp),
-    ) {
-      Column(
-        modifier = Modifier.padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-      ) {
-        if (!isUser) {
-          Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-          ) {
-            if (speakerBot != null) {
-              BotVectorAvatar(
-                bot = speakerBot,
-                expression = message.expressionEnum,
-                size = 32.dp,
-                animate = false,
-              )
-            }
-            Text(
-              text = message.senderBotName,
-              style = MaterialTheme.typography.labelLarge,
-              color = MaterialTheme.colorScheme.primary,
-              fontWeight = FontWeight.Bold,
-            )
-            if (!message.replyToBotName.isNullOrBlank()) {
-              Surface(
-                shape = RoundedCornerShape(50),
-                color = Color(0x26FF2E93),
-              ) {
-                Text(
-                  text = "@${message.replyToBotName}",
-                  style = MaterialTheme.typography.labelSmall,
-                  color = Color(0xFFD62583),
-                  modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+    if (!isUser && speakerBot != null) {
+      val haloColor = when (message.expressionEnum) {
+        BotExpression.THINKING -> Color(0xFFFF2E93)
+        BotExpression.WORKING -> Color(0xFFFF9800)
+        BotExpression.UH_HUH -> Color(0xFF2E9D5B)
+        BotExpression.WORRIED -> Color(0xFF56B4F7)
+        BotExpression.SORRY, BotExpression.ALERT -> Color(0xFFE53935)
+        BotExpression.HAPPY -> Color(0xFFCFA6FF)
+      }
+          Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+              .padding(top = 2.dp, end = 8.dp)
+              .size(80.dp)
+              .clip(CircleShape)
+              .background(
+                Brush.radialGradient(
+                  colors = listOf(Color.White.copy(alpha = 0.34f), haloColor.copy(alpha = 0.2f), Color.Transparent)
                 )
-              }
-            }
-            Spacer(Modifier.weight(1f))
-            Surface(
-              shape = RoundedCornerShape(50),
-              color = MaterialTheme.colorScheme.surfaceVariant,
-            ) {
-              Text(
-                text = message.expressionEnum.label,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
               )
-            }
+              .testTag("room_message_chat_head_${message.id}"),
+          ) {
+            BotVectorAvatar(
+              bot = speakerBot,
+              expression = message.expressionEnum,
+              size = 76.dp,
+              animate = true,
+            )
           }
         }
+
+        Surface(
+          shape = RoundedCornerShape(
+            topStart = 20.dp,
+            topEnd = 20.dp,
+            bottomStart = if (isUser) 20.dp else 6.dp,
+            bottomEnd = if (isUser) 6.dp else 20.dp,
+          ),
+          color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+          border = if (isUser) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          tonalElevation = if (isUser) 0.dp else 2.dp,
+          modifier = if (isUser) {
+            Modifier.widthIn(max = 520.dp)
+          } else {
+            Modifier
+              .weight(1f, fill = false)
+              .widthIn(max = 520.dp)
+          },
+        ) {
+          Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            if (!isUser) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+              ) {
+                Text(
+                  text = message.senderBotName,
+                  style = MaterialTheme.typography.labelLarge,
+                  color = MaterialTheme.colorScheme.primary,
+                  fontWeight = FontWeight.Bold,
+                )
+                if (!message.replyToBotName.isNullOrBlank()) {
+                  Surface(
+                    shape = RoundedCornerShape(50),
+                    color = Color(0x26FF2E93),
+                  ) {
+                    Text(
+                      text = "@${message.replyToBotName}",
+                      style = MaterialTheme.typography.labelSmall,
+                      color = Color(0xFFD62583),
+                      modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                  }
+                }
+              }
+            }
 
         Text(
           text = message.rawText,

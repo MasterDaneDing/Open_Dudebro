@@ -8,6 +8,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.example.R
 
+val SuperArcadeFontFamily = FontFamily(
+  Font(R.font.super_arcade, FontWeight.Normal),
+  Font(R.font.super_arcade, FontWeight.Bold),
+  Font(R.font.super_arcade, FontWeight.ExtraBold),
+)
+
+val AnakManjaFontFamily = FontFamily(
+  Font(R.font.anak_manja, FontWeight.Normal),
+  Font(R.font.anak_manja, FontWeight.Bold),
+  Font(R.font.anak_manja, FontWeight.ExtraBold),
+)
+
+val CartaBiancaFontFamily = FontFamily(
+  Font(R.font.carta_bianca, FontWeight.Normal),
+  Font(R.font.carta_bianca, FontWeight.Bold),
+  Font(R.font.carta_bianca, FontWeight.ExtraBold),
+)
+
 val FredokaFontFamily = FontFamily(
   Font(R.font.fredoka, FontWeight.Normal),
   Font(R.font.fredoka, FontWeight.Medium),

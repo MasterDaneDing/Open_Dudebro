@@ -1,5 +1,5 @@
 {
-  "name": "ClawPal",
+  "name": "Claw Dudebro",
   "description": "Cute animated companion bot client for OpenClaw with smart prompt refinement, 8 customizable character templates, file attachments, and host computer takeover.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

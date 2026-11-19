@@ -8,10 +8,12 @@ import com.example.data.firebase.ClawPalRepository
 import com.example.data.local.LocalPrefsStore
 import com.example.data.local.LocalUiPrefs
 import com.example.data.openclaw.HostControlAction
+import com.example.data.openclaw.LocalProviderKeys
 import com.example.data.openclaw.OpenClawClient
 import com.example.data.openclaw.OpenClawPingResult
 import com.example.model.AiRoutingMode
 import com.example.model.BotExpression
+import com.example.model.BotFunctionPreset
 import com.example.model.BotMessage
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
@@ -245,6 +247,7 @@ class ClawPalViewModel(
       }
 
       val mode = activeHost?.aiModeEnum ?: AiRoutingMode.HYBRID_GEMINI_OPENCLAW
+      val providerKeys = currentProviderKeys()
 
       if (mode == AiRoutingMode.OPENCLAW_ONLY && activeHost != null) {
         _liveExpression.value = BotExpression.WORKING
@@ -255,6 +258,7 @@ class ClawPalViewModel(
           refinedInstruction = null,
           attachedFiles = attachedLabels,
           linkedPaths = linkedPathLabels,
+          providerKeys = providerKeys,
         )
         dispatchRes.onSuccess { res ->
           _liveExpression.value = res.expression
@@ -360,6 +364,7 @@ class ClawPalViewModel(
         refinedInstruction = parsed.clearInstruction,
         attachedFiles = attachedLabels,
         linkedPaths = linkedPathLabels,
+        providerKeys = providerKeys,
       )
 
       dispatchResult.onSuccess { res ->
@@ -403,6 +408,136 @@ class ClawPalViewModel(
     bot: CompanionBot,
     host: OpenClawHost?,
   ) {
+    if (message.parsedInstruction.isNullOrBlank()) {
+      val currentMessages = (messagesState.value as? UiState.Success)?.data.orEmpty()
+      val msgIdx = currentMessages.indexOfFirst { it.id == message.id }
+      val originalUserPrompt = if (msgIdx > 0) {
+        currentMessages.subList(0, msgIdx).lastOrNull { it.senderEnum == MessageSender.USER }?.rawText
+      } else {
+        currentMessages.lastOrNull { it.senderEnum == MessageSender.USER }?.rawText
+      }
+      if (originalUserPrompt.isNullOrBlank()) {
+        _statusBanner.value = "Could not find original prompt to retry."
+        return
+      }
+      viewModelScope.launch {
+        _isBusy.value = true
+        _liveExpression.value = BotExpression.THINKING
+        repository.updateMessageExecution(
+          userId = currentUserId,
+          botId = bot.id,
+          messageId = message.id,
+          rawText = "Retrying... let me translate your request into clear OpenClaw steps!",
+          parsedInstruction = null,
+          instructionGoal = null,
+          instructionSteps = emptyList(),
+          expression = BotExpression.THINKING,
+          status = MessageStatus.PARSING,
+          takeoverSuggested = false,
+        )
+        val parseResult = refinerService.parseCasualRequest(
+          bot = bot,
+          casualMessage = originalUserPrompt,
+          attachedFiles = message.attachedFiles,
+          linkedPaths = message.linkedPaths,
+        )
+        parseResult.onFailure { err ->
+          _liveExpression.value = BotExpression.SORRY
+          repository.updateMessageExecution(
+            userId = currentUserId,
+            botId = bot.id,
+            messageId = message.id,
+            rawText = "Sorry! Prompt parsing failed: ${err.localizedMessage ?: "Unknown error"}",
+            parsedInstruction = null,
+            instructionGoal = "Parsing failed",
+            instructionSteps = emptyList(),
+            expression = BotExpression.SORRY,
+            status = MessageStatus.FAILED,
+            takeoverSuggested = false,
+          )
+          _isBusy.value = false
+          return@launch
+        }
+        val parsed = parseResult.getOrThrow()
+        val mode = host?.aiModeEnum ?: AiRoutingMode.HYBRID_GEMINI_OPENCLAW
+        if (mode == AiRoutingMode.GEMINI_PARSER_PREVIEW || host == null) {
+          val expr = if (parsed.needsHostTakeover) BotExpression.ALERT else parsed.recommendedExpression
+          _liveExpression.value = expr
+          repository.updateMessageExecution(
+            userId = currentUserId,
+            botId = bot.id,
+            messageId = message.id,
+            rawText = parsed.friendlyBotReply,
+            parsedInstruction = parsed.clearInstruction,
+            instructionGoal = parsed.goal,
+            instructionSteps = parsed.steps,
+            expression = expr,
+            status = MessageStatus.COMPLETED,
+            takeoverSuggested = parsed.needsHostTakeover,
+          )
+          repository.updateBotPreview(currentUserId, bot.id, parsed.friendlyBotReply)
+          _isBusy.value = false
+          return@launch
+        }
+
+        _liveExpression.value = BotExpression.WORKING
+        repository.updateMessageExecution(
+          userId = currentUserId,
+          botId = bot.id,
+          messageId = message.id,
+          rawText = "${parsed.friendlyBotReply}\nSending instructions to ${host.label}...",
+          parsedInstruction = parsed.clearInstruction,
+          instructionGoal = parsed.goal,
+          instructionSteps = parsed.steps,
+          expression = BotExpression.WORKING,
+          status = MessageStatus.DISPATCHED,
+          takeoverSuggested = parsed.needsHostTakeover,
+        )
+        val dispatchResult = openClawClient.dispatchInstruction(
+          host = host,
+          bot = bot,
+          casualMessage = originalUserPrompt,
+          refinedInstruction = parsed.clearInstruction,
+          attachedFiles = message.attachedFiles,
+          linkedPaths = message.linkedPaths,
+          providerKeys = currentProviderKeys(),
+        )
+        dispatchResult.onSuccess { res ->
+          val finalExpr = if (res.takeoverSuggested) BotExpression.ALERT else res.expression
+          _liveExpression.value = finalExpr
+          repository.updateMessageExecution(
+            userId = currentUserId,
+            botId = bot.id,
+            messageId = message.id,
+            rawText = res.replyText,
+            parsedInstruction = parsed.clearInstruction,
+            instructionGoal = parsed.goal,
+            instructionSteps = parsed.steps,
+            expression = finalExpr,
+            status = MessageStatus.COMPLETED,
+            takeoverSuggested = res.takeoverSuggested || parsed.needsHostTakeover,
+          )
+          repository.updateBotPreview(currentUserId, bot.id, res.replyText)
+        }.onFailure { err ->
+          _liveExpression.value = BotExpression.WORRIED
+          repository.updateMessageExecution(
+            userId = currentUserId,
+            botId = bot.id,
+            messageId = message.id,
+            rawText = "${parsed.friendlyBotReply}\n\nHeads up — OpenClaw host (${host.baseUrl}) didn't respond yet (${err.localizedMessage ?: "unreachable"}). Your structured instruction is saved below so you can dispatch it once your host is online!",
+            parsedInstruction = parsed.clearInstruction,
+            instructionGoal = parsed.goal,
+            instructionSteps = parsed.steps,
+            expression = BotExpression.WORRIED,
+            status = MessageStatus.WARNING,
+            takeoverSuggested = parsed.needsHostTakeover,
+          )
+        }
+        _isBusy.value = false
+      }
+      return
+    }
+
     if (host == null) {
       _statusBanner.value = "Configure an OpenClaw host in Host Settings first."
       return
@@ -417,6 +552,7 @@ class ClawPalViewModel(
         refinedInstruction = message.parsedInstruction,
         attachedFiles = message.attachedFiles,
         linkedPaths = message.linkedPaths,
+        providerKeys = currentProviderKeys(),
       )
       res.onSuccess { reply ->
         _liveExpression.value = reply.expression
@@ -440,20 +576,98 @@ class ClawPalViewModel(
     }
   }
 
+  private suspend fun enrichBotWithTranslatedInstructions(bot: CompanionBot): CompanionBot {
+    val translated = refinerService.compileBotProfileForOpenClaw(bot)
+    val shouldAdoptFunction = bot.functionPresetEnum == BotFunctionPreset.GENERAL ||
+      translated.inferredFunction != BotFunctionPreset.GENERAL
+    val finalFn = if (shouldAdoptFunction) translated.inferredFunction else bot.functionPresetEnum
+    val finalAgentId = if (
+      bot.openClawAgentId.isBlank() ||
+      (bot.openClawAgentId == "main" && finalFn != BotFunctionPreset.GENERAL)
+    ) {
+      translated.suggestedAgentId
+    } else {
+      bot.openClawAgentId
+    }
+    val finalRole = if (bot.roleTitle.isBlank() || bot.roleTitle == BotFunctionPreset.GENERAL.displayName) {
+      finalFn.displayName
+    } else {
+      bot.roleTitle
+    }
+    return bot.copy(
+      functionPreset = finalFn.name,
+      openClawAgentId = finalAgentId,
+      roleTitle = finalRole,
+      systemPersona = translated.translatedInstructions,
+    )
+  }
+
   fun saveBot(bot: CompanionBot, onDone: (String) -> Unit = {}) {
     viewModelScope.launch {
       _isBusy.value = true
-      val res = if (bot.id.isBlank()) {
-        repository.createBot(currentUserId, bot)
+      val enriched = enrichBotWithTranslatedInstructions(bot)
+      val res = if (enriched.id.isBlank()) {
+        repository.createBot(currentUserId, enriched)
       } else {
-        repository.updateBot(currentUserId, bot).map { bot.id }
+        repository.updateBot(currentUserId, enriched).map { enriched.id }
       }
       res.onSuccess { id ->
         selectBot(id)
-        _statusBanner.value = "${bot.name} saved!"
+        val savedBot = enriched.copy(id = id)
+        val activeHost = currentPrimaryHost()
+        if (activeHost != null) {
+          val syncRes = openClawClient.syncBotProfile(activeHost, savedBot, currentProviderKeys())
+          syncRes.onSuccess { info ->
+            repository.updateBotSyncStatus(currentUserId, id, true)
+            _statusBanner.value = "${savedBot.name} translated as ${savedBot.functionPresetEnum.displayName} & synced to ${activeHost.label} (${info.resolvedModelLabel})."
+          }.onFailure {
+            repository.updateBotSyncStatus(currentUserId, id, false)
+            _statusBanner.value = "${savedBot.name} saved as ${savedBot.functionPresetEnum.displayName}! Host offline—translated instructions will send with every chat."
+          }
+        } else {
+          _statusBanner.value = "${savedBot.name} saved (${savedBot.functionPresetEnum.displayName})! Add an OpenClaw host in Host Settings to register it."
+        }
         onDone(id)
       }.onFailure { err ->
         _statusBanner.value = err.localizedMessage ?: "Failed to save bot."
+      }
+      _isBusy.value = false
+    }
+  }
+
+  fun syncBotWithOpenClaw(bot: CompanionBot, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+    val activeHost = currentPrimaryHost()
+    if (activeHost == null) {
+      val msg = "Configure an OpenClaw host in Host Settings first."
+      _statusBanner.value = msg
+      onResult(false, msg)
+      return
+    }
+    viewModelScope.launch {
+      _isBusy.value = true
+      val enriched = enrichBotWithTranslatedInstructions(bot)
+      if (enriched.id.isNotBlank()) {
+        repository.updateBot(currentUserId, enriched)
+      }
+      val res = openClawClient.syncBotProfile(activeHost, enriched, currentProviderKeys())
+      res.onSuccess { info ->
+        if (enriched.id.isNotBlank()) {
+          repository.updateBotSyncStatus(currentUserId, enriched.id, true)
+        }
+        val msg = if (info.createdHostAgentRecord) {
+          "Translated '${enriched.displayMission}' -> ${enriched.functionPresetEnum.displayName} & registered ${enriched.name} on ${activeHost.label} (${info.resolvedModelLabel})."
+        } else {
+          "Translated '${enriched.displayMission}' -> ${enriched.functionPresetEnum.displayName} & primed ${enriched.name} on ${activeHost.label} (${info.resolvedModelLabel})."
+        }
+        _statusBanner.value = msg
+        onResult(true, msg)
+      }.onFailure { err ->
+        if (enriched.id.isNotBlank()) {
+          repository.updateBotSyncStatus(currentUserId, enriched.id, false)
+        }
+        val msg = "Translated to ${enriched.functionPresetEnum.displayName}, but couldn't reach ${activeHost.baseUrl}: ${err.localizedMessage ?: "host offline"}."
+        _statusBanner.value = msg
+        onResult(false, msg)
       }
       _isBusy.value = false
     }
@@ -479,12 +693,17 @@ class ClawPalViewModel(
   }
 
   fun deleteBot(botId: String) {
+    val targetBot = (botsState.value as? UiState.Success)?.data?.firstOrNull { it.id == botId }
+    val activeHost = currentPrimaryHost()
     viewModelScope.launch {
       _isBusy.value = true
       repository.deleteBot(currentUserId, botId)
         .onSuccess {
           if (_selectedBotId.value == botId) {
             _selectedBotId.value = ""
+          }
+          if (activeHost != null && targetBot != null) {
+            openClawClient.unregisterBotProfile(activeHost, targetBot)
           }
           _statusBanner.value = "Bot removed."
         }
@@ -503,9 +722,15 @@ class ClawPalViewModel(
     }
     viewModelScope.launch {
       _isBusy.value = true
-      repository.updateBotMission(currentUserId, bot.id, trimmed)
+      val enriched = enrichBotWithTranslatedInstructions(bot.copy(mission = trimmed))
+      repository.updateBot(currentUserId, enriched)
         .onSuccess {
-          _statusBanner.value = "${bot.name}'s mission updated!"
+          val activeHost = currentPrimaryHost()
+          if (activeHost != null) {
+            openClawClient.syncBotProfile(activeHost, enriched, currentProviderKeys())
+              .onSuccess { repository.updateBotSyncStatus(currentUserId, bot.id, true) }
+          }
+          _statusBanner.value = "${bot.name}'s mission translated (${enriched.functionPresetEnum.displayName}) & synced!"
         }
         .onFailure { err ->
           _statusBanner.value = err.localizedMessage ?: "Failed to update mission."
@@ -680,6 +905,7 @@ class ClawPalViewModel(
         refinedInstruction = instructionText,
         attachedFiles = emptyList(),
         linkedPaths = emptyList(),
+        providerKeys = currentProviderKeys(),
       )
       res.onSuccess { reply ->
         _roomActiveExpressions.value = _roomActiveExpressions.value + (bot.id to reply.expression)
@@ -731,12 +957,18 @@ class ClawPalViewModel(
     }
   }
 
-  fun saveHost(host: OpenClawHost, onSaved: () -> Unit = {}) {
+  fun saveHost(
+    host: OpenClawHost,
+    veniceApiKey: String = localPrefs.value.veniceApiKey,
+    googleApiKey: String = localPrefs.value.googleApiKey,
+    onSaved: () -> Unit = {},
+  ) {
     viewModelScope.launch {
       _isBusy.value = true
+      localPrefsStore.setProviderApiKeys(veniceApiKey, googleApiKey)
       repository.saveHost(currentUserId, host)
         .onSuccess {
-          _statusBanner.value = "${host.label} saved!"
+          _statusBanner.value = "${host.label} & default LLM (${host.defaultLlmProviderEnum.displayName}) saved!"
           onSaved()
         }
         .onFailure { err ->
@@ -744,6 +976,17 @@ class ClawPalViewModel(
         }
       _isBusy.value = false
     }
+  }
+
+  private fun currentPrimaryHost(): OpenClawHost? =
+    (hostsState.value as? UiState.Success)?.data?.firstOrNull()
+
+  private fun currentProviderKeys(): LocalProviderKeys {
+    val prefs = localPrefs.value
+    return LocalProviderKeys(
+      veniceApiKey = prefs.veniceApiKey,
+      googleApiKey = prefs.googleApiKey,
+    )
   }
 
   fun deleteHost(hostId: String) {

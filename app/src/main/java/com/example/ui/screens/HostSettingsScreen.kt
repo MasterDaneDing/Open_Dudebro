@@ -21,6 +21,8 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DesktopWindows
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WifiTethering
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -44,11 +46,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.data.openclaw.OpenClawPingResult
 import com.example.model.AiRoutingMode
 import com.example.model.HostStatus
 import com.example.model.OpenClawHost
+import com.example.model.OpenClawLlmProvider
 import com.example.viewmodel.UiState
 
 @Composable
@@ -57,8 +61,10 @@ fun HostSettingsScreen(
   currentUserId: String,
   userEmail: String?,
   pingResult: OpenClawPingResult?,
+  savedVeniceApiKey: String = "",
+  savedGoogleApiKey: String = "",
   onBack: () -> Unit = {},
-  onSaveHost: (OpenClawHost) -> Unit,
+  onSaveHost: (OpenClawHost, String, String) -> Unit,
   onDeleteHost: (String) -> Unit,
   onPingHost: (OpenClawHost) -> Unit,
   onSignOut: () -> Unit,
@@ -72,6 +78,17 @@ fun HostSettingsScreen(
   var controlUrl by remember(primaryHost?.id) { mutableStateOf(primaryHost?.controlUrl ?: "http://192.168.1.50:18789/control") }
   var gatewayToken by remember(primaryHost?.id) { mutableStateOf(primaryHost?.gatewayToken.orEmpty()) }
   var aiMode by remember(primaryHost?.id) { mutableStateOf(primaryHost?.aiModeEnum ?: AiRoutingMode.HYBRID_GEMINI_OPENCLAW) }
+  var defaultLlmProvider by remember(primaryHost?.id) {
+    mutableStateOf(primaryHost?.defaultLlmProviderEnum ?: OpenClawLlmProvider.OPENCLAW_AUTO)
+  }
+  var defaultLlmModel by remember(primaryHost?.id) {
+    mutableStateOf(primaryHost?.defaultLlmModel.orEmpty())
+  }
+  var localLlmEndpoint by remember(primaryHost?.id) {
+    mutableStateOf(primaryHost?.localLlmEndpoint?.ifBlank { "http://127.0.0.1:11434/v1" } ?: "http://127.0.0.1:11434/v1")
+  }
+  var veniceApiKey by remember(savedVeniceApiKey) { mutableStateOf(savedVeniceApiKey) }
+  var googleApiKey by remember(savedGoogleApiKey) { mutableStateOf(savedGoogleApiKey) }
   var autoParseCasual by remember(primaryHost?.id) { mutableStateOf(primaryHost?.autoParseCasual ?: true) }
 
   Column(
@@ -108,6 +125,9 @@ fun HostSettingsScreen(
             controlUrl = host.controlUrl
             gatewayToken = host.gatewayToken
             aiMode = host.aiModeEnum
+            defaultLlmProvider = host.defaultLlmProviderEnum
+            defaultLlmModel = host.defaultLlmModel
+            localLlmEndpoint = host.localLlmEndpoint.ifBlank { "http://127.0.0.1:11434/v1" }
             autoParseCasual = host.autoParseCasual
           },
           shape = MaterialTheme.shapes.medium,
@@ -154,6 +174,9 @@ fun HostSettingsScreen(
           controlUrl = "http://192.168.1.100:18789/control"
           gatewayToken = ""
           aiMode = AiRoutingMode.HYBRID_GEMINI_OPENCLAW
+          defaultLlmProvider = OpenClawLlmProvider.OPENCLAW_AUTO
+          defaultLlmModel = ""
+          localLlmEndpoint = "http://127.0.0.1:11434/v1"
           autoParseCasual = true
         },
       ) {
@@ -193,13 +216,28 @@ fun HostSettingsScreen(
           singleLine = true,
           modifier = Modifier.fillMaxWidth(),
         )
+        var showToken by remember { mutableStateOf(false) }
         OutlinedTextField(
           value = gatewayToken,
           onValueChange = { gatewayToken = it.take(256) },
-          label = { Text("Gateway Bearer Token (optional)") },
-          visualTransformation = PasswordVisualTransformation(),
+          label = { Text("Gateway Bearer Token") },
+          placeholder = { Text("Paste OpenClaw auth token (required on LAN / 0.0.0.0 / Tailscale)") },
+          supportingText = {
+            Text("Bind OpenClaw on your mini PC to 0.0.0.0, LAN IP, or Tailscale and paste its auth token here.")
+          },
+          visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+          trailingIcon = {
+            IconButton(onClick = { showToken = !showToken }) {
+              Icon(
+                imageVector = if (showToken) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                contentDescription = if (showToken) "Hide token" else "Show token",
+              )
+            }
+          },
           singleLine = true,
-          modifier = Modifier.fillMaxWidth(),
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("host_gateway_token_input"),
         )
 
         Row(
@@ -242,6 +280,102 @@ fun HostSettingsScreen(
           }
         }
 
+        Text("Default OpenClaw LLM Provider", style = MaterialTheme.typography.titleSmall)
+        Text(
+          text = "Pick which LLM OpenClaw defaults to for bots unless overridden per bot.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val defaultModels = remember { OpenClawLlmProvider.hostOptions.map { it.defaultModel }.toSet() }
+        OpenClawLlmProvider.hostOptions.forEach { provider ->
+          Surface(
+            onClick = {
+              defaultLlmProvider = provider
+              if (defaultLlmModel.isBlank() || defaultLlmModel in defaultModels) {
+                defaultLlmModel = provider.defaultModel
+              }
+            },
+            shape = MaterialTheme.shapes.small,
+            color = if (defaultLlmProvider == provider) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("host_llm_provider_${provider.name}"),
+          ) {
+            Row(
+              modifier = Modifier.padding(10.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              RadioButton(
+                selected = defaultLlmProvider == provider,
+                onClick = {
+                  defaultLlmProvider = provider
+                  if (defaultLlmModel.isBlank() || defaultLlmModel in defaultModels) {
+                    defaultLlmModel = provider.defaultModel
+                  }
+                },
+              )
+              Column(modifier = Modifier.weight(1f)) {
+                Text(provider.displayName, style = MaterialTheme.typography.labelLarge)
+                Text(provider.description, style = MaterialTheme.typography.bodySmall)
+              }
+            }
+          }
+        }
+
+        if (defaultLlmProvider != OpenClawLlmProvider.OPENCLAW_AUTO) {
+          OutlinedTextField(
+            value = defaultLlmModel,
+            onValueChange = { defaultLlmModel = it.take(120) },
+            label = { Text("Default Model ID for OpenClaw") },
+            placeholder = { Text(defaultLlmProvider.defaultModel.ifBlank { "provider/model-name" }) },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("host_default_model_input"),
+          )
+        }
+
+        if (defaultLlmProvider == OpenClawLlmProvider.VENICE_AI) {
+          OutlinedTextField(
+            value = veniceApiKey,
+            onValueChange = { veniceApiKey = it.take(256) },
+            label = { Text("Venice.ai API Key (optional, device-only)") },
+            placeholder = { Text("Leave blank if already set in OpenClaw host config") },
+            visualTransformation = PasswordVisualTransformation(),
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("host_venice_key_input"),
+          )
+        }
+
+        if (defaultLlmProvider == OpenClawLlmProvider.GOOGLE) {
+          OutlinedTextField(
+            value = googleApiKey,
+            onValueChange = { googleApiKey = it.take(256) },
+            label = { Text("Google API Key for OpenClaw (optional, device-only)") },
+            placeholder = { Text("Leave blank if already set in OpenClaw host config") },
+            visualTransformation = PasswordVisualTransformation(),
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("host_google_key_input"),
+          )
+        }
+
+        if (defaultLlmProvider == OpenClawLlmProvider.LOCAL_LLM) {
+          OutlinedTextField(
+            value = localLlmEndpoint,
+            onValueChange = { localLlmEndpoint = it.take(300) },
+            label = { Text("Local LLM Endpoint (Ollama / LM Studio / vLLM)") },
+            placeholder = { Text("http://127.0.0.1:11434/v1") },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("host_local_llm_url_input"),
+          )
+        }
+
         if (pingResult != null) {
           Text(
             text = pingResult.detail,
@@ -258,6 +392,9 @@ fun HostSettingsScreen(
           controlUrl = controlUrl,
           gatewayToken = gatewayToken,
           aiMode = aiMode.name,
+          defaultLlmProvider = defaultLlmProvider.name,
+          defaultLlmModel = defaultLlmModel,
+          localLlmEndpoint = localLlmEndpoint,
           autoParseCasual = autoParseCasual,
           lastStatus = primaryHost?.lastStatus ?: HostStatus.UNVERIFIED.name,
         )
@@ -274,7 +411,7 @@ fun HostSettingsScreen(
             Text("Test Ping")
           }
           Button(
-            onClick = { onSaveHost(draftHost) },
+            onClick = { onSaveHost(draftHost, veniceApiKey, googleApiKey) },
             modifier = Modifier
               .weight(1f)
               .height(48.dp)
@@ -296,7 +433,7 @@ fun HostSettingsScreen(
       Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Account & Cross-Device Sync", style = MaterialTheme.typography.titleMedium)
         Text(
-          text = "Signed in as ${userEmail ?: "Google User"}. Your bots, SVG customizations, linked files, and host profiles sync via Firestore—ready for a future Windows PC ClawPal companion.",
+          text = "Signed in as ${userEmail ?: "Google User"}. Your bots, SVG customizations, linked files, and host profiles sync via Firestore—ready for a future Windows PC Claw Dudebro companion.",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

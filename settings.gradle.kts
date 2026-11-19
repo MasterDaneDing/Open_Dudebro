@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "ClawPal"
+rootProject.name = "Claw Dudebro"
 
 include(":app")

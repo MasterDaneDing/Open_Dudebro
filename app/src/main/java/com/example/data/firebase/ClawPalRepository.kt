@@ -281,6 +281,28 @@ class ClawPalRepository(
     }
   }
 
+  suspend fun updateBotSyncStatus(userId: String, botId: String, synced: Boolean): Result<Unit> {
+    val docPath = "users/$userId/bots/$botId"
+    return try {
+      val uid = requireUserId(userId)
+      require(botId.isNotBlank()) { "Bot ID must not be blank" }
+      db.collection("users").document(uid).collection("bots").document(botId)
+        .update(
+          mapOf(
+            "openClawSynced" to synced,
+            "updatedAt" to FieldValue.serverTimestamp(),
+          )
+        )
+        .await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, docPath)
+      Result.failure(e)
+    }
+  }
+
   suspend fun updateBotPreview(userId: String, botId: String, preview: String): Result<Unit> {
     val docPath = "users/$userId/bots/$botId"
     return try {

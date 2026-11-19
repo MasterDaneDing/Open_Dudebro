@@ -61,8 +61,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -70,6 +72,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -98,6 +101,7 @@ import com.example.ui.screens.ChatsHomeScreen
 import com.example.ui.screens.ComputerTakeoverScreen
 import com.example.ui.screens.FilesVaultScreen
 import com.example.ui.screens.HostSettingsScreen
+import com.example.ui.screens.OutlinedArcadeTitle
 import com.example.viewmodel.ClawPalViewModel
 import com.example.viewmodel.UiState
 import com.google.firebase.Firebase
@@ -194,7 +198,7 @@ private fun SplashLoadingScreen() {
   ) {
     Image(
       painter = painterResource(id = R.drawable.img_splash_bots),
-      contentDescription = "ClawPal companion bots giving a thumbs up",
+      contentDescription = "Claw Dudebro companion bots giving a thumbs up",
       contentScale = ContentScale.Crop,
       modifier = Modifier.fillMaxSize(),
     )
@@ -222,19 +226,10 @@ private fun SplashLoadingScreen() {
       horizontalAlignment = Alignment.CenterHorizontally,
       verticalArrangement = Arrangement.SpaceBetween,
     ) {
-      Surface(
-        shape = RoundedCornerShape(50),
-        color = Color(0xAA290744),
-        border = BorderStroke(1.2.dp, Color(0xFFFF7BD2)),
-      ) {
-        Text(
-          text = "ClawPal",
-          style = MaterialTheme.typography.headlineMedium,
-          color = Color.White,
-          fontWeight = FontWeight.ExtraBold,
-          modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
-        )
-      }
+      OutlinedArcadeTitle(
+        title = "Claw Dudebro",
+        fontSizeSp = 32f,
+      )
 
       Surface(
         shape = RoundedCornerShape(24.dp),
@@ -327,8 +322,11 @@ private fun AuthenticatedWorkspace(
 
   val bots = (botsState as? UiState.Success)?.data.orEmpty()
   val rooms = (chatRoomsState as? UiState.Success)?.data.orEmpty()
+  val hosts = (hostsState as? UiState.Success)?.data.orEmpty()
+  val primaryHost = hosts.firstOrNull()
   val activeBot = bots.firstOrNull { it.id == selectedBotId } ?: bots.firstOrNull()
   val isHomeRoute = currentRoute == ROUTE_HOME
+  val isChatRoute = currentRoute == ROUTE_CHAT || currentRoute.startsWith("room/")
   val showNavChrome = currentRoute in setOf(ROUTE_HOME, ROUTE_TAKEOVER, ROUTE_FILES, ROUTE_SETTINGS)
 
   val navigateToTopTab: (String) -> Unit = { targetRoute ->
@@ -355,11 +353,44 @@ private fun AuthenticatedWorkspace(
     }
   }
 
-  BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+  BoxWithConstraints(
+    modifier = Modifier
+      .fillMaxSize()
+      .then(
+        if (isChatRoute) {
+          Modifier
+            .background(
+              Brush.verticalGradient(
+                colors = listOf(
+                  Color(0xFFFF1A8C),
+                  Color(0xFFFF3DA8),
+                  Color(0xFFE6007A),
+                )
+              )
+            )
+            .background(
+              Brush.radialGradient(
+                colors = listOf(
+                  Color(0x55FF9CE6),
+                  Color.Transparent,
+                ),
+                center = Offset(540f, 380f),
+                radius = 850f,
+              )
+            )
+        } else {
+          Modifier
+        }
+      ),
+  ) {
     val useRail = maxWidth >= 600.dp
 
     Scaffold(
-      containerColor = if (isHomeRoute) Color(0xFF190629) else MaterialTheme.colorScheme.background,
+      containerColor = when {
+        isHomeRoute -> Color(0xFF190629)
+        isChatRoute -> Color.Transparent
+        else -> MaterialTheme.colorScheme.background
+      },
       contentWindowInsets = WindowInsets.safeDrawing,
       snackbarHost = { SnackbarHost(snackbarHostState) },
       bottomBar = {
@@ -536,11 +567,13 @@ private fun AuthenticatedWorkspace(
               BotStudioScreen(
                 existingBot = existing,
                 currentUserId = currentUserId,
+                activeHost = primaryHost,
                 onSaveBot = { bot ->
                   viewModel.saveBot(bot) {
                     navController.popBackStack()
                   }
                 },
+                onSyncWithOpenClaw = viewModel::syncBotWithOpenClaw,
                 onDeleteBot = { id ->
                   viewModel.deleteBot(id)
                   navController.popBackStack()
@@ -580,8 +613,12 @@ private fun AuthenticatedWorkspace(
                 currentUserId = currentUserId,
                 userEmail = userEmail,
                 pingResult = pingResult,
+                savedVeniceApiKey = localPrefs.veniceApiKey,
+                savedGoogleApiKey = localPrefs.googleApiKey,
                 onBack = { navigateToTopTab(ROUTE_HOME) },
-                onSaveHost = { host -> viewModel.saveHost(host) },
+                onSaveHost = { host, veniceKey, googleKey ->
+                  viewModel.saveHost(host, veniceKey, googleKey)
+                },
                 onDeleteHost = viewModel::deleteHost,
                 onPingHost = viewModel::pingHost,
                 onSignOut = {

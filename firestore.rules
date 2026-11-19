@@ -60,6 +60,10 @@ service cloud.firestore {
               (!('mission' in data) || (data.mission is string && data.mission.size() <= 160)) &&
               (!('lastMessagePreview' in data) || (data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300)) &&
               data.openClawAgentId is string && data.openClawAgentId.size() <= 80 &&
+              (!('functionPreset' in data) || data.functionPreset in ['GENERAL', 'TRANSLATION', 'PROOFREADING', 'CRITIQUING', 'CODING', 'RESEARCH']) &&
+              (!('llmProvider' in data) || data.llmProvider in ['HOST_DEFAULT', 'OPENCLAW_AUTO', 'VENICE_AI', 'GOOGLE', 'LOCAL_LLM']) &&
+              (!('llmModel' in data) || (data.llmModel is string && data.llmModel.size() <= 120)) &&
+              (!('openClawSynced' in data) || data.openClawSynced is bool) &&
               data.pinnedDefault is bool;
     }
 
@@ -106,6 +110,9 @@ service cloud.firestore {
              data.controlUrl is string && data.controlUrl.size() <= 300 &&
              data.gatewayToken is string && data.gatewayToken.size() <= 256 &&
              data.aiMode in ['HYBRID_GEMINI_OPENCLAW', 'OPENCLAW_ONLY', 'GEMINI_PARSER_PREVIEW'] &&
+             (!('defaultLlmProvider' in data) || data.defaultLlmProvider in ['OPENCLAW_AUTO', 'VENICE_AI', 'GOOGLE', 'LOCAL_LLM']) &&
+             (!('defaultLlmModel' in data) || (data.defaultLlmModel is string && data.defaultLlmModel.size() <= 120)) &&
+             (!('localLlmEndpoint' in data) || (data.localLlmEndpoint is string && data.localLlmEndpoint.size() <= 300)) &&
              data.autoParseCasual is bool &&
              data.lastStatus in ['ONLINE', 'OFFLINE', 'UNVERIFIED'];
     }
@@ -137,7 +144,9 @@ service cloud.firestore {
                          'userId', 'name', 'roleTitle', 'archetype', 'hatStyle',
                          'accessoryStyle', 'primaryColorHex', 'accentColorHex',
                          'systemPersona', 'mission', 'lastMessagePreview',
-                         'openClawAgentId', 'pinnedDefault', 'createdAt', 'updatedAt'
+                         'openClawAgentId', 'functionPreset', 'llmProvider',
+                         'llmModel', 'openClawSynced', 'pinnedDefault',
+                         'createdAt', 'updatedAt'
                        ]) &&
                        isValidTimestamp(incoming().createdAt) &&
                        isValidTimestamp(incoming().updatedAt) &&
@@ -153,7 +162,8 @@ service cloud.firestore {
                          'name', 'roleTitle', 'archetype', 'hatStyle',
                          'accessoryStyle', 'primaryColorHex', 'accentColorHex',
                          'systemPersona', 'mission', 'lastMessagePreview',
-                         'openClawAgentId', 'pinnedDefault', 'updatedAt'
+                         'openClawAgentId', 'functionPreset', 'llmProvider',
+                         'llmModel', 'openClawSynced', 'pinnedDefault', 'updatedAt'
                        ]);
 
       allow delete: if isOwner(userId) && isValidId(botId);
@@ -279,7 +289,9 @@ service cloud.firestore {
                        ]) &&
                        incoming().keys().hasOnly([
                          'userId', 'label', 'baseUrl', 'controlUrl', 'gatewayToken',
-                         'aiMode', 'autoParseCasual', 'lastStatus', 'createdAt', 'updatedAt'
+                         'aiMode', 'defaultLlmProvider', 'defaultLlmModel',
+                         'localLlmEndpoint', 'autoParseCasual', 'lastStatus',
+                         'createdAt', 'updatedAt'
                        ]) &&
                        isValidTimestamp(incoming().createdAt) &&
                        isValidTimestamp(incoming().updatedAt) &&
@@ -293,7 +305,8 @@ service cloud.firestore {
                        isValidTimestamp(incoming().updatedAt) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
                          'label', 'baseUrl', 'controlUrl', 'gatewayToken',
-                         'aiMode', 'autoParseCasual', 'lastStatus', 'updatedAt'
+                         'aiMode', 'defaultLlmProvider', 'defaultLlmModel',
+                         'localLlmEndpoint', 'autoParseCasual', 'lastStatus', 'updatedAt'
                        ]);
 
       allow delete: if isOwner(userId) && isValidId(hostId);

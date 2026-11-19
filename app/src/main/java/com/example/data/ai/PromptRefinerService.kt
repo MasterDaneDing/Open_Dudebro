@@ -2,6 +2,7 @@ package com.example.data.ai
 
 import android.util.Log
 import com.example.model.BotExpression
+import com.example.model.BotFunctionPreset
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
 import com.example.model.RoomMessage
@@ -33,6 +34,13 @@ data class ChatRoomTurn(
 
 data class ChatRoomRoundResult(
   val turns: List<ChatRoomTurn>,
+)
+
+data class TranslatedBotProfileResult(
+  val inferredFunction: BotFunctionPreset,
+  val suggestedAgentId: String,
+  val translatedInstructions: String,
+  val summary: String,
 )
 
 class PromptRefinerService {
@@ -108,6 +116,34 @@ class PromptRefinerService {
     )
   }
 
+  private val botProfileSchema = Schema.obj(
+    properties = mapOf(
+      "functionPreset" to Schema.enumeration(
+        values = BotFunctionPreset.entries.map { it.name },
+        description = "Best matching OpenClaw functional role inferred from the bot's casual description/mission (e.g., 'I translate stuff!' -> TRANSLATION).",
+      ),
+      "suggestedAgentId" to Schema.string(
+        description = "Short URL-safe lowercase OpenClaw agent ID slug (e.g., translator, proofreader, critic, coder, researcher, main)."
+      ),
+      "translatedInstructions" to Schema.string(
+        description = "Clear, explicit, execution-ready system instructions for OpenClaw (under 460 characters) translating the user's casual description into exact operational behavior."
+      ),
+      "summary" to Schema.string(
+        description = "One-line confirmation describing the translated OpenClaw role."
+      ),
+    ),
+  )
+
+  private val botProfileModel by lazy {
+    Firebase.ai.generativeModel(
+      modelName = "gemini-3.8-flash",
+      generationConfig = generationConfig {
+        responseMimeType = "application/json"
+        responseSchema = botProfileSchema
+      },
+    )
+  }
+
   suspend fun parseCasualRequest(
     bot: CompanionBot,
     casualMessage: String,
@@ -117,6 +153,7 @@ class PromptRefinerService {
     return try {
       val prompt = buildString {
         appendLine("You are ${bot.name} (${bot.roleTitle}), a cute companion front-end for OpenClaw.")
+        appendLine("Bot function preset: ${bot.functionPresetEnum.displayName} — ${bot.functionPresetEnum.openClawDirective}")
         appendLine("Bot mission: ${bot.displayMission}")
         appendLine("Bot persona: ${bot.systemPersona}")
         appendLine("Target OpenClaw agent ID: ${bot.openClawAgentId}")
@@ -190,7 +227,7 @@ class PromptRefinerService {
         appendLine()
         appendLine("Participating bots (stick strictly to each bot's mission and persona):")
         participants.forEach { bot ->
-          appendLine("- ${bot.name} | Mission: \"${bot.displayMission}\" | Role: ${bot.roleTitle} | Persona: ${bot.systemPersona}")
+          appendLine("- ${bot.name} | Function: ${bot.functionPresetEnum.displayName} | Mission: \"${bot.displayMission}\" | Role: ${bot.roleTitle} | Persona: ${bot.systemPersona}")
         }
         appendLine()
         if (recentHistory.isNotEmpty()) {
@@ -251,6 +288,97 @@ class PromptRefinerService {
       Log.e(TAG, "Chat room turn failed", e)
       Result.failure(e)
     }
+  }
+
+  /**
+   * Translates a user's casual bot description/mission (e.g. "I translate stuff!") into
+   * an explicit OpenClaw function preset + clear execution-ready OpenClaw instructions.
+   */
+  suspend fun compileBotProfileForOpenClaw(bot: CompanionBot): TranslatedBotProfileResult {
+    val missionText = bot.displayMission.trim()
+    val heuristic = heuristicBotProfile(bot, missionText)
+    if (missionText.isBlank()) return heuristic
+
+    return try {
+      val prompt = buildString {
+        appendLine("Translate this casual companion bot description into structured OpenClaw agent instructions.")
+        appendLine("Bot Name: ${bot.name}")
+        appendLine("User's Casual Description / Mission: \"$missionText\"")
+        appendLine("Current Selected Function Preset: ${bot.functionPresetEnum.name} (${bot.functionPresetEnum.displayName})")
+        appendLine("Current Role Title: ${bot.roleTitle}")
+        if (bot.systemPersona.isNotBlank()) {
+          appendLine("Existing Persona/Notes: ${bot.systemPersona}")
+        }
+        appendLine()
+        appendLine("Rules:")
+        appendLine("1. Infer the best BotFunctionPreset (GENERAL, TRANSLATION, PROOFREADING, CRITIQUING, CODING, RESEARCH) from the user's mission/description. For example, 'I translate stuff!' -> TRANSLATION.")
+        appendLine("2. Write clear, actionable OpenClaw instructions (<= 450 characters) telling OpenClaw exactly what this agent does, how to handle inputs/files, and how to format output.")
+        appendLine("3. Provide a clean lowercase suggestedAgentId slug matching the role (e.g. translator, proofreader, critic, coder, researcher, main).")
+      }
+
+      val response = withTimeout(25_000L) {
+        botProfileModel.generateContent(prompt)
+      }
+      val jsonText = response.text?.takeIf { it.isNotBlank() } ?: return heuristic
+      val json = JSONObject(jsonText)
+      val fn = BotFunctionPreset.safeValueOf(json.optString("functionPreset", heuristic.inferredFunction.name))
+      val rawSlug = json.optString("suggestedAgentId", fn.suggestedAgentId)
+        .lowercase()
+        .replace(Regex("[^a-z0-9_-]"), "")
+        .take(40)
+        .ifBlank { fn.suggestedAgentId }
+      val instructions = json.optString("translatedInstructions", heuristic.translatedInstructions)
+        .trim()
+        .take(490)
+        .ifBlank { heuristic.translatedInstructions }
+      val summary = json.optString("summary", "Translated as ${fn.displayName} for OpenClaw.")
+        .trim()
+        .take(160)
+
+      TranslatedBotProfileResult(
+        inferredFunction = fn,
+        suggestedAgentId = rawSlug,
+        translatedInstructions = instructions,
+        summary = summary,
+      )
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Log.w(TAG, "Falling back to heuristic bot instruction translation: ${e.message}")
+      heuristic
+    }
+  }
+
+  private fun heuristicBotProfile(bot: CompanionBot, missionText: String): TranslatedBotProfileResult {
+    val combined = "${missionText.lowercase()} ${bot.roleTitle.lowercase()} ${bot.systemPersona.lowercase()}"
+    val inferred = when {
+      combined.contains("translat") || combined.contains("japanese") || combined.contains("spanish") ||
+        combined.contains("language") || combined.contains("bilingual") -> BotFunctionPreset.TRANSLATION
+      combined.contains("proofread") || combined.contains("grammar") || combined.contains("spell") ||
+        combined.contains("typo") || combined.contains("polish") || combined.contains("edit text") -> BotFunctionPreset.PROOFREADING
+      combined.contains("critiqu") || combined.contains("review") || combined.contains("roast") ||
+        combined.contains("feedback") || combined.contains("audit") -> BotFunctionPreset.CRITIQUING
+      combined.contains("code") || combined.contains("debug") || combined.contains("script") ||
+        combined.contains("program") || combined.contains("shell") || combined.contains("terminal") -> BotFunctionPreset.CODING
+      combined.contains("research") || combined.contains("summar") || combined.contains("analy") ||
+        combined.contains("report") || combined.contains("investigat") -> BotFunctionPreset.RESEARCH
+      else -> bot.functionPresetEnum
+    }
+    val instructions = buildString {
+      append(inferred.openClawDirective)
+      if (missionText.isNotBlank()) {
+        append(" Specific user mission: \"")
+        append(missionText)
+        append("\".")
+      }
+    }.take(490)
+
+    return TranslatedBotProfileResult(
+      inferredFunction = inferred,
+      suggestedAgentId = inferred.suggestedAgentId,
+      translatedInstructions = instructions,
+      summary = "Translated mission into ${inferred.displayName} instructions.",
+    )
   }
 
   private companion object {

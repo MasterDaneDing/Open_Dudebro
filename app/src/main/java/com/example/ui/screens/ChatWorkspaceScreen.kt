@@ -7,17 +7,20 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -77,6 +80,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -136,6 +143,7 @@ fun ChatWorkspaceScreen(
   var composerText by remember { mutableStateOf("") }
   var showLinkDialog by remember { mutableStateOf(false) }
   var showAttachSheet by remember { mutableStateOf(false) }
+  var showBotDetailsDialog by remember { mutableStateOf(false) }
   var botPendingDelete by remember { mutableStateOf<CompanionBot?>(null) }
   var botPendingRename by remember { mutableStateOf<CompanionBot?>(null) }
   var botPendingMissionEdit by remember { mutableStateOf<CompanionBot?>(null) }
@@ -210,16 +218,41 @@ fun ChatWorkspaceScreen(
   Column(
     modifier = Modifier
       .fillMaxSize()
+      .background(
+        Brush.verticalGradient(
+          colors = listOf(
+            Color(0xFFFF1A8C),
+            Color(0xFFFF3DA8),
+            Color(0xFFE6007A),
+          )
+        )
+      )
+      .background(
+        Brush.radialGradient(
+          colors = listOf(
+            Color(0x55FF9CE6),
+            Color.Transparent,
+          ),
+          center = Offset(540f, 380f),
+          radius = 850f,
+        )
+      )
       .padding(horizontal = 12.dp),
   ) {
     // 1. Back + Bot Crew Strip (+ Add Bot / - Remove Bot)
     Row(
-      modifier = Modifier.fillMaxWidth(),
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(top = 4.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(4.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-      IconButton(
+      FilledIconButton(
         onClick = onBack,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = Color(0xEBFFF8FC),
+          contentColor = Color(0xFF280842),
+        ),
         modifier = Modifier
           .size(48.dp)
           .testTag("chat_back_home_button"),
@@ -241,87 +274,122 @@ fun ChatWorkspaceScreen(
 
     Spacer(Modifier.height(6.dp))
 
-    // 2. Live Animated Bot Stage
-    if (activeBot != null) {
-      LiveBotStageCard(
-        bot = activeBot,
-        expression = liveExpression,
-        activeHost = activeHost,
-        isBusy = isBusy,
-        onCustomizeBot = { onEditBotClick(activeBot) },
-        onRequestRename = { botPendingRename = activeBot },
-        onRequestEditMission = { botPendingMissionEdit = activeBot },
-        onPreviewExpression = onPreviewExpression,
-        onOpenTakeover = onOpenTakeover,
-      )
-    } else if (botsState is UiState.Loading) {
-      Box(
-        modifier = Modifier
-          .fillMaxWidth()
-          .height(130.dp),
-        contentAlignment = Alignment.Center,
-      ) {
-        CircularProgressIndicator()
-      }
-    } else {
-      EmptyBotCrewCard(onAddBotClick = onAddBotClick)
-    }
-
-    Spacer(Modifier.height(8.dp))
-
-    // 3. Conversation & Parsed OpenClaw Instructions Feed
-    Box(
+    // 2 + 3. Adaptive Chat Window:
+    // On wider layouts (>= 580.dp), pin a dedicated large animated Chat Head dock on the left side of the chat window.
+    // On compact phones, feature a big 132.dp animated left-hand Chat Head stage above the feed AND 82.dp animated heads beside bot messages.
+    BoxWithConstraints(
       modifier = Modifier
         .weight(1f)
         .fillMaxWidth(),
     ) {
-      when (messagesState) {
-        is UiState.Loading -> {
-          Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-          }
-        }
-        is UiState.Error -> {
-          Surface(
-            color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
-            shape = MaterialTheme.shapes.medium,
-            modifier = Modifier
-              .fillMaxWidth()
-              .padding(8.dp),
-          ) {
-            Text(
-              text = messagesState.message,
-              color = MaterialTheme.colorScheme.error,
-              modifier = Modifier.padding(14.dp),
-            )
-          }
-        }
-        is UiState.Success -> {
-          if (messages.isEmpty()) {
-            EmptyChatPrompt(
-              botName = activeBot?.name ?: "your bot",
-              onSampleClick = { sample -> composerText = sample },
-            )
-          } else {
-            LazyColumn(
-              state = listState,
-              contentPadding = PaddingValues(vertical = 8.dp),
-              verticalArrangement = Arrangement.spacedBy(10.dp),
-              modifier = Modifier.fillMaxSize(),
-            ) {
-              items(messages, key = { it.id }) { msg ->
-                MessageBubbleItem(
-                  message = msg,
-                  bot = activeBot,
-                  onCopyInstruction = { text -> clipboard.setText(AnnotatedString(text)) },
-                  onRetry = {
-                    if (activeBot != null) onRetryMessage(msg, activeBot, activeHost)
-                  },
-                  onOpenTakeover = onOpenTakeover,
+      val useSideChatHeadPane = maxWidth >= 580.dp && activeBot != null
+
+      @Composable
+      fun ChatFeedBox(modifier: Modifier) {
+        Box(modifier = modifier) {
+          when (messagesState) {
+            is UiState.Loading -> {
+              Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+              }
+            }
+            is UiState.Error -> {
+              Surface(
+                color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .padding(8.dp),
+              ) {
+                Text(
+                  text = messagesState.message,
+                  color = MaterialTheme.colorScheme.error,
+                  modifier = Modifier.padding(14.dp),
                 )
               }
             }
+            is UiState.Success -> {
+              if (messages.isEmpty()) {
+                EmptyChatPrompt(
+                  botName = activeBot?.name ?: "your bot",
+                  onSampleClick = { sample -> composerText = sample },
+                )
+              } else {
+                LazyColumn(
+                  state = listState,
+                  contentPadding = PaddingValues(vertical = 8.dp),
+                  verticalArrangement = Arrangement.spacedBy(12.dp),
+                  modifier = Modifier.fillMaxSize(),
+                ) {
+                  items(messages, key = { it.id }) { msg ->
+                    MessageBubbleItem(
+                      message = msg,
+                      bot = activeBot,
+                      onCopyInstruction = { text -> clipboard.setText(AnnotatedString(text)) },
+                      onRetry = {
+                        if (activeBot != null) onRetryMessage(msg, activeBot, activeHost)
+                      },
+                      onOpenTakeover = onOpenTakeover,
+                    )
+                  }
+                }
+              }
+            }
           }
+        }
+      }
+
+      if (useSideChatHeadPane && activeBot != null) {
+        Row(
+          modifier = Modifier.fillMaxSize(),
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+          LeftHandChatHeadDock(
+            bot = activeBot,
+            expression = liveExpression,
+            isBusy = isBusy,
+            onOpenBotDetails = { showBotDetailsDialog = true },
+            onOpenTakeover = onOpenTakeover,
+            modifier = Modifier
+              .width(210.dp)
+              .fillMaxHeight(),
+          )
+          ChatFeedBox(
+            modifier = Modifier
+              .weight(1f)
+              .fillMaxHeight(),
+          )
+        }
+      } else {
+        Column(modifier = Modifier.fillMaxSize()) {
+          if (activeBot != null) {
+            LiveBotStageCard(
+              bot = activeBot,
+              expression = liveExpression,
+              isBusy = isBusy,
+              onOpenBotDetails = { showBotDetailsDialog = true },
+              onOpenTakeover = onOpenTakeover,
+            )
+          } else if (botsState is UiState.Loading) {
+            Box(
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(140.dp),
+              contentAlignment = Alignment.Center,
+            ) {
+              CircularProgressIndicator()
+            }
+          } else {
+            EmptyBotCrewCard(onAddBotClick = onAddBotClick)
+          }
+
+          Spacer(Modifier.height(6.dp))
+
+          ChatFeedBox(
+            modifier = Modifier
+              .weight(1f)
+              .fillMaxWidth(),
+          )
         }
       }
     }
@@ -678,6 +746,147 @@ fun ChatWorkspaceScreen(
       },
     )
   }
+
+  if (showBotDetailsDialog && activeBot != null) {
+    AlertDialog(
+      onDismissRequest = { showBotDetailsDialog = false },
+      title = {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+          BotVectorAvatar(
+            bot = activeBot,
+            expression = liveExpression,
+            size = 74.dp,
+            animate = true,
+          )
+          Column(modifier = Modifier.weight(1f)) {
+            Text(
+              text = activeBot.name,
+              style = MaterialTheme.typography.titleLarge,
+              fontWeight = FontWeight.Bold,
+            )
+            Text(
+              text = "${activeBot.functionPresetEnum.displayName} • ${activeBot.roleTitle}",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.primary,
+            )
+          }
+        }
+      },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              Text(
+                text = "Mission",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+              )
+              Text(
+                text = activeBot.displayMission,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+              )
+            }
+          }
+
+          Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              Text(
+                text = "OpenClaw Connection",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+              Text(
+                text = "Host: ${activeHost?.label ?: "Not connected"}",
+                style = MaterialTheme.typography.bodySmall,
+              )
+              Text(
+                text = "Agent ID: ${activeBot.openClawAgentId} • LLM: ${activeBot.llmProviderEnum.displayName}",
+                style = MaterialTheme.typography.bodySmall,
+              )
+            }
+          }
+
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            OutlinedButton(
+              onClick = {
+                showBotDetailsDialog = false
+                botPendingRename = activeBot
+              },
+              modifier = Modifier
+                .weight(1f)
+                .height(48.dp)
+                .testTag("quick_rename_bot_button"),
+            ) {
+              Icon(Icons.Rounded.DriveFileRenameOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(Modifier.width(4.dp))
+              Text("Rename")
+            }
+            OutlinedButton(
+              onClick = {
+                showBotDetailsDialog = false
+                botPendingMissionEdit = activeBot
+              },
+              modifier = Modifier
+                .weight(1f)
+                .height(48.dp)
+                .testTag("edit_mission_button"),
+            ) {
+              Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(Modifier.width(4.dp))
+              Text("Mission")
+            }
+          }
+
+          Button(
+            onClick = {
+              showBotDetailsDialog = false
+              onEditBotClick(activeBot)
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(48.dp)
+              .testTag("edit_bot_appearance_button"),
+          ) {
+            Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Edit Appearance & OpenClaw Brain")
+          }
+        }
+      },
+      confirmButton = {
+        TextButton(onClick = { showBotDetailsDialog = false }) {
+          Text("Done")
+        }
+      },
+      dismissButton = {
+        TextButton(
+          onClick = {
+            showBotDetailsDialog = false
+            onOpenTakeover()
+          },
+        ) {
+          Icon(Icons.Rounded.Computer, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(Modifier.width(4.dp))
+          Text("Take Over PC")
+        }
+      },
+    )
+  }
 }
 
 @Composable
@@ -785,173 +994,205 @@ private fun BotCrewBar(
 }
 
 @Composable
+private fun expressionHaloColor(expression: BotExpression): Color {
+  val target = when (expression) {
+    BotExpression.THINKING -> Color(0xFFFF2E93)
+    BotExpression.WORKING -> Color(0xFFFF9800)
+    BotExpression.UH_HUH -> Color(0xFF2E9D5B)
+    BotExpression.WORRIED -> Color(0xFF56B4F7)
+    BotExpression.SORRY, BotExpression.ALERT -> Color(0xFFE53935)
+    BotExpression.HAPPY -> Color(0xFFCFA6FF)
+  }
+  val animated by animateColorAsState(targetValue = target, label = "expr_halo")
+  return animated
+}
+
+@Composable
+private fun InteractiveChatHeadStage(
+  bot: CompanionBot,
+  expression: BotExpression,
+  isBusy: Boolean,
+  headSize: androidx.compose.ui.unit.Dp,
+  onTapHead: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val context = LocalContext.current
+  val haptic = LocalHapticFeedback.current
+  val haloColor = expressionHaloColor(expression)
+
+  Box(
+    contentAlignment = Alignment.Center,
+    modifier = modifier
+      .size(headSize + 14.dp)
+      .clip(CircleShape)
+      .background(
+        Brush.radialGradient(
+          colors = listOf(
+            Color.White.copy(alpha = if (isBusy || expression != BotExpression.HAPPY) 0.34f else 0.24f),
+            haloColor.copy(alpha = 0.22f),
+            Color.Transparent,
+          )
+        )
+      )
+      .clickable {
+        ReplyHaptics.triggerSoftTick(context, haptic)
+        onTapHead()
+      }
+      .testTag("live_bot_avatar"),
+  ) {
+    BotVectorAvatar(
+      bot = bot,
+      expression = expression,
+      size = headSize,
+      animate = true,
+    )
+  }
+}
+
+@Composable
+private fun LeftHandChatHeadDock(
+  bot: CompanionBot,
+  expression: BotExpression,
+  isBusy: Boolean,
+  onOpenBotDetails: () -> Unit,
+  onOpenTakeover: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  Column(
+    modifier = modifier.padding(vertical = 8.dp, horizontal = 6.dp),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
+    InteractiveChatHeadStage(
+      bot = bot,
+      expression = expression,
+      isBusy = isBusy,
+      headSize = 176.dp,
+      onTapHead = onOpenBotDetails,
+    )
+
+    Box(
+      contentAlignment = Alignment.Center,
+      modifier = Modifier
+        .defaultMinSize(minHeight = 48.dp)
+        .clip(RoundedCornerShape(14.dp))
+        .clickable(onClick = onOpenBotDetails)
+        .padding(horizontal = 10.dp, vertical = 4.dp)
+        .testTag("bot_name_header_button"),
+    ) {
+      Text(
+        text = bot.name,
+        style = MaterialTheme.typography.headlineSmall.copy(
+          shadow = Shadow(
+            color = Color(0x66220018),
+            offset = Offset(0f, 3f),
+            blurRadius = 6f,
+          )
+        ),
+        color = Color.White,
+        fontWeight = FontWeight.ExtraBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+
+    Button(
+      onClick = onOpenTakeover,
+      colors = ButtonDefaults.buttonColors(
+        containerColor = Color(0xEBFFF8FC),
+        contentColor = Color(0xFF280842),
+      ),
+      shape = RoundedCornerShape(50),
+      contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+      modifier = Modifier
+        .height(48.dp)
+        .testTag("stage_takeover_button"),
+    ) {
+      Icon(Icons.Rounded.Computer, contentDescription = null, modifier = Modifier.size(18.dp))
+      Spacer(Modifier.width(6.dp))
+      Text("Take Over PC", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+  }
+}
+
+@Composable
 private fun LiveBotStageCard(
   bot: CompanionBot,
   expression: BotExpression,
-  activeHost: OpenClawHost?,
   isBusy: Boolean,
-  onCustomizeBot: () -> Unit,
-  onRequestRename: () -> Unit,
-  onRequestEditMission: () -> Unit,
-  onPreviewExpression: (BotExpression) -> Unit,
+  onOpenBotDetails: () -> Unit,
   onOpenTakeover: () -> Unit,
 ) {
-  Card(
-    shape = MaterialTheme.shapes.large,
-    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-    modifier = Modifier.fillMaxWidth(),
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(vertical = 2.dp),
   ) {
-    Column(modifier = Modifier.padding(14.dp)) {
-      Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    // Borderless, extra-large animating Chat Head directly on the Neon Pink canvas
+    InteractiveChatHeadStage(
+      bot = bot,
+      expression = expression,
+      isBusy = isBusy,
+      headSize = 160.dp,
+      onTapHead = onOpenBotDetails,
+    )
+
+    Column(
+      modifier = Modifier.weight(1f),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+      horizontalAlignment = Alignment.Start,
+    ) {
+      Box(
+        contentAlignment = Alignment.CenterStart,
+        modifier = Modifier
+          .defaultMinSize(minHeight = 48.dp)
+          .clip(RoundedCornerShape(14.dp))
+          .clickable(onClick = onOpenBotDetails)
+          .padding(horizontal = 6.dp, vertical = 4.dp)
+          .testTag("bot_name_header_button"),
       ) {
-        BotVectorAvatar(
-          bot = bot,
-          expression = expression,
-          size = 88.dp,
-          animate = true,
-          modifier = Modifier.testTag("live_bot_avatar"),
+        Text(
+          text = bot.name,
+          style = MaterialTheme.typography.headlineSmall.copy(
+            shadow = Shadow(
+              color = Color(0x66220018),
+              offset = Offset(0f, 3f),
+              blurRadius = 6f,
+            )
+          ),
+          color = Color.White,
+          fontWeight = FontWeight.ExtraBold,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
         )
-
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-          Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-          ) {
-            Row(
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(4.dp),
-              modifier = Modifier
-                .weight(1f, fill = false)
-                .defaultMinSize(minHeight = 48.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(onClick = onRequestRename)
-                .padding(horizontal = 4.dp)
-                .testTag("quick_rename_bot_button"),
-            ) {
-              Text(
-                text = bot.name,
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-              )
-              Icon(
-                imageVector = Icons.Rounded.DriveFileRenameOutline,
-                contentDescription = "Rename ${bot.name}",
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(18.dp),
-              )
-            }
-            Surface(
-              shape = RoundedCornerShape(50),
-              color = MaterialTheme.colorScheme.tertiaryContainer,
-            ) {
-              Text(
-                text = expression.label,
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-              )
-            }
-          }
-          Surface(
-            onClick = onRequestEditMission,
-            shape = RoundedCornerShape(10.dp),
-            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
-            modifier = Modifier.testTag("edit_mission_button"),
-          ) {
-            Text(
-              text = if (isBusy) expression.bubbleHint else "Mission: ${bot.displayMission}",
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSecondaryContainer,
-              maxLines = 2,
-              overflow = TextOverflow.Ellipsis,
-              modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            )
-          }
-          Text(
-            text = "OpenClaw: ${activeHost?.label ?: "No Host"} • agent:${bot.openClawAgentId}",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.secondary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-          IconButton(
-            onClick = onCustomizeBot,
-            modifier = Modifier
-              .size(48.dp)
-              .clip(CircleShape)
-              .background(MaterialTheme.colorScheme.primaryContainer)
-              .testTag("edit_bot_appearance_button"),
-          ) {
-            Icon(
-              Icons.Rounded.Edit,
-              contentDescription = "Customize bot appearance",
-              tint = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-          }
-        }
       }
 
-      Spacer(Modifier.height(8.dp))
-
-      Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+      Button(
+        onClick = onOpenTakeover,
+        colors = ButtonDefaults.buttonColors(
+          containerColor = Color(0xEBFFF8FC),
+          contentColor = Color(0xFF280842),
+        ),
+        shape = RoundedCornerShape(50),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+        modifier = Modifier
+          .height(48.dp)
+          .testTag("stage_takeover_button"),
       ) {
-        Surface(
-          onClick = onOpenTakeover,
-          shape = RoundedCornerShape(50),
-          color = MaterialTheme.colorScheme.primary,
-          modifier = Modifier.testTag("stage_takeover_button"),
-        ) {
-          Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-          ) {
-            Icon(
-              Icons.Rounded.Computer,
-              contentDescription = null,
-              tint = MaterialTheme.colorScheme.onPrimary,
-              modifier = Modifier.size(15.dp),
-            )
-            Text(
-              text = "Take Over PC",
-              style = MaterialTheme.typography.labelMedium,
-              color = MaterialTheme.colorScheme.onPrimary,
-            )
-          }
-        }
-
-        listOf(
-          BotExpression.THINKING,
-          BotExpression.UH_HUH,
-          BotExpression.WORRIED,
-          BotExpression.SORRY,
-          BotExpression.HAPPY,
-        ).forEach { expr ->
-          Surface(
-            onClick = { onPreviewExpression(expr) },
-            shape = RoundedCornerShape(50),
-            color = if (expression == expr) {
-              MaterialTheme.colorScheme.secondaryContainer
-            } else {
-              MaterialTheme.colorScheme.surfaceVariant
-            },
-          ) {
-            Text(
-              text = expr.label,
-              style = MaterialTheme.typography.labelMedium,
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            )
-          }
-        }
+        Icon(
+          Icons.Rounded.Computer,
+          contentDescription = null,
+          modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+          text = "Take Over PC",
+          style = MaterialTheme.typography.labelLarge,
+          fontWeight = FontWeight.Bold,
+          maxLines = 1,
+        )
       }
     }
   }
@@ -967,11 +1208,41 @@ private fun MessageBubbleItem(
 ) {
   val isUser = message.senderEnum == MessageSender.USER
   var expanded by remember(message.id) { mutableStateOf(true) }
+  val isFailedOrWarning = message.statusEnum == MessageStatus.WARNING || message.statusEnum == MessageStatus.FAILED
+  val haloColor = expressionHaloColor(message.expressionEnum)
 
   Row(
     modifier = Modifier.fillMaxWidth(),
     horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+    verticalAlignment = Alignment.Top,
   ) {
+    if (!isUser && bot != null) {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+          .padding(top = 2.dp, end = 8.dp)
+          .size(86.dp)
+          .clip(CircleShape)
+          .background(
+            Brush.radialGradient(
+              colors = listOf(
+                Color.White.copy(alpha = 0.34f),
+                haloColor.copy(alpha = 0.2f),
+                Color.Transparent,
+              )
+            )
+          )
+          .testTag("message_bot_chat_head_${message.id}"),
+      ) {
+        BotVectorAvatar(
+          bot = bot,
+          expression = message.expressionEnum,
+          size = 82.dp,
+          animate = true,
+        )
+      }
+    }
+
     Surface(
       shape = RoundedCornerShape(
         topStart = 20.dp,
@@ -986,7 +1257,13 @@ private fun MessageBubbleItem(
       },
       tonalElevation = if (isUser) 0.dp else 2.dp,
       border = if (isUser) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-      modifier = Modifier.widthIn(max = 520.dp),
+      modifier = if (isUser) {
+        Modifier.widthIn(max = 520.dp)
+      } else {
+        Modifier
+          .weight(1f, fill = false)
+          .widthIn(max = 520.dp)
+      },
     ) {
       Column(
         modifier = Modifier.padding(14.dp),
@@ -995,27 +1272,33 @@ private fun MessageBubbleItem(
         if (!isUser && bot != null) {
           Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
           ) {
-            BotVectorAvatar(
-              bot = bot,
-              expression = message.expressionEnum,
-              size = 30.dp,
-              animate = false,
-            )
             Text(
-              text = "${bot.name} • ${message.expressionEnum.label}",
-              style = MaterialTheme.typography.labelMedium,
+              text = bot.name,
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = FontWeight.Bold,
               color = MaterialTheme.colorScheme.primary,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
             Surface(
               shape = RoundedCornerShape(50),
-              color = MaterialTheme.colorScheme.surfaceVariant,
+              color = if (isFailedOrWarning) {
+                MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
+              } else {
+                MaterialTheme.colorScheme.surfaceVariant
+              },
             ) {
               Text(
                 text = message.statusEnum.label,
                 style = MaterialTheme.typography.labelSmall,
+                color = if (isFailedOrWarning) {
+                  MaterialTheme.colorScheme.error
+                } else {
+                  MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
               )
             }
@@ -1026,6 +1309,19 @@ private fun MessageBubbleItem(
           text = message.rawText,
           style = MaterialTheme.typography.bodyMedium,
         )
+
+        if (!isUser && isFailedOrWarning && message.parsedInstruction.isNullOrBlank()) {
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(
+              onClick = onRetry,
+              modifier = Modifier.testTag("retry_parse_button_${message.id}"),
+            ) {
+              Icon(Icons.Rounded.Refresh, contentDescription = null, Modifier.size(16.dp))
+              Spacer(Modifier.width(4.dp))
+              Text("Retry")
+            }
+          }
+        }
 
         if (message.attachedFiles.isNotEmpty() || message.linkedPaths.isNotEmpty()) {
           Row(
@@ -1100,7 +1396,7 @@ private fun MessageBubbleItem(
                       Spacer(Modifier.width(4.dp))
                       Text("Copy")
                     }
-                    if (message.statusEnum == MessageStatus.WARNING || message.statusEnum == MessageStatus.FAILED) {
+                    if (isFailedOrWarning) {
                       TextButton(onClick = onRetry) {
                         Icon(Icons.Rounded.Refresh, contentDescription = null, Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
@@ -1164,12 +1460,14 @@ private fun EmptyChatPrompt(
     Text(
       text = "Say anything casually to $botName!",
       style = MaterialTheme.typography.titleMedium,
+      fontWeight = FontWeight.Bold,
+      color = Color.White,
     )
     Spacer(Modifier.height(6.dp))
     Text(
       text = "$botName translates casual requests into clear step-by-step instructions for OpenClaw.",
       style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      color = Color(0xFFFFE5F5),
     )
     Spacer(Modifier.height(14.dp))
     listOf(

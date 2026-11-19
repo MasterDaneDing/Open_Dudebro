@@ -109,6 +109,7 @@ object StarterBots {
       accentColorHex = "#DC4D21",
       systemPersona = presetFor(BotArchetype.GLASSES_FELLOW).persona,
       openClawAgentId = "main",
+      functionPreset = BotFunctionPreset.GENERAL.name,
       pinnedDefault = true,
     ),
     CompanionBot(
@@ -123,7 +124,8 @@ object StarterBots {
       primaryColorHex = "#8EC9C5",
       accentColorHex = "#E88B28",
       systemPersona = presetFor(BotArchetype.RETRO_ROBOT).persona,
-      openClawAgentId = "ops",
+      openClawAgentId = "translator",
+      functionPreset = BotFunctionPreset.TRANSLATION.name,
       pinnedDefault = true,
     ),
     CompanionBot(
@@ -138,7 +140,8 @@ object StarterBots {
       primaryColorHex = "#F5C69A",
       accentColorHex = "#D94F2A",
       systemPersona = presetFor(BotArchetype.PROFESSOR).persona,
-      openClawAgentId = "coder",
+      openClawAgentId = "critic",
+      functionPreset = BotFunctionPreset.CRITIQUING.name,
       pinnedDefault = true,
     ),
   )
@@ -150,6 +153,9 @@ object StarterBots {
     controlUrl = "http://192.168.1.50:18789/control",
     gatewayToken = "",
     aiMode = AiRoutingMode.HYBRID_GEMINI_OPENCLAW.name,
+    defaultLlmProvider = OpenClawLlmProvider.OPENCLAW_AUTO.name,
+    defaultLlmModel = "",
+    localLlmEndpoint = "http://127.0.0.1:11434/v1",
     autoParseCasual = true,
     lastStatus = HostStatus.UNVERIFIED.name,
   )

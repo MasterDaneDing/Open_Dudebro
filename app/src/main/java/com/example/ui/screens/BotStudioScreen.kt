@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,8 +61,11 @@ import androidx.compose.ui.unit.dp
 import com.example.model.AccessoryStyle
 import com.example.model.BotArchetype
 import com.example.model.BotExpression
+import com.example.model.BotFunctionPreset
 import com.example.model.CompanionBot
 import com.example.model.HatStyle
+import com.example.model.OpenClawHost
+import com.example.model.OpenClawLlmProvider
 import com.example.model.StarterBots
 import com.example.ui.avatar.BotSvgGenerator
 import com.example.ui.avatar.BotVectorAvatar
@@ -71,7 +75,9 @@ import com.example.ui.avatar.parseHexColor
 fun BotStudioScreen(
   existingBot: CompanionBot?,
   currentUserId: String,
+  activeHost: OpenClawHost? = null,
   onSaveBot: (CompanionBot) -> Unit,
+  onSyncWithOpenClaw: (CompanionBot, (Boolean, String) -> Unit) -> Unit = { _, _ -> },
   onDeleteBot: (String) -> Unit,
   onBack: () -> Unit,
 ) {
@@ -103,6 +109,15 @@ fun BotStudioScreen(
   var agentId by remember(existingBot?.id) {
     mutableStateOf(existingBot?.openClawAgentId ?: "main")
   }
+  var functionPreset by remember(existingBot?.id) {
+    mutableStateOf(existingBot?.functionPresetEnum ?: BotFunctionPreset.GENERAL)
+  }
+  var llmProvider by remember(existingBot?.id) {
+    mutableStateOf(existingBot?.llmProviderEnum ?: OpenClawLlmProvider.HOST_DEFAULT)
+  }
+  var llmModel by remember(existingBot?.id) {
+    mutableStateOf(existingBot?.llmModel.orEmpty())
+  }
   var persona by remember(existingBot?.id) {
     mutableStateOf(
       existingBot?.systemPersona
@@ -111,6 +126,7 @@ fun BotStudioScreen(
   }
   var previewExpression by remember { mutableStateOf(BotExpression.HAPPY) }
   var showSvgDialog by remember { mutableStateOf(false) }
+  var syncFeedback by remember(existingBot?.id) { mutableStateOf<String?>(null) }
 
   val draftBot = CompanionBot(
     id = existingBot?.id.orEmpty(),
@@ -125,7 +141,11 @@ fun BotStudioScreen(
     primaryColorHex = primaryHex,
     accentColorHex = accentHex,
     systemPersona = persona,
-    openClawAgentId = agentId.ifBlank { "main" },
+    openClawAgentId = agentId.ifBlank { functionPreset.suggestedAgentId },
+    functionPreset = functionPreset.name,
+    llmProvider = llmProvider.name,
+    llmModel = llmModel,
+    openClawSynced = existingBot?.openClawSynced ?: false,
     pinnedDefault = existingBot?.pinnedDefault ?: false,
   )
 
@@ -232,8 +252,11 @@ fun BotStudioScreen(
     OutlinedTextField(
       value = mission,
       onValueChange = { mission = it.take(160) },
-      label = { Text("Bot Mission") },
-      placeholder = { Text("e.g., I help translate documents!") },
+      label = { Text("Bot Mission / Description") },
+      placeholder = { Text("e.g., I translate stuff! or Critique drafts harshly") },
+      supportingText = {
+        Text("Casual descriptions like \"I translate stuff!\" are automatically translated into OpenClaw instructions and synced.")
+      },
       singleLine = true,
       modifier = Modifier
         .fillMaxWidth()
@@ -428,7 +451,144 @@ fun BotStudioScreen(
       }
     }
 
-    // OpenClaw & Personality Fields
+    // OpenClaw Function, LLM Default & Personality Fields
+    Text("Bot Function for OpenClaw", style = MaterialTheme.typography.titleMedium)
+    val defaultFnAgentIds = remember { BotFunctionPreset.entries.map { it.suggestedAgentId }.toSet() }
+    val defaultFnMissions = remember { BotFunctionPreset.entries.map { it.defaultMission }.toSet() }
+    val defaultAllMissions = remember {
+      defaultFnMissions + BotArchetype.entries.map { StarterBots.presetFor(it).defaultMission }
+    }
+    Row(
+      modifier = Modifier.horizontalScroll(rememberScrollState()),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      BotFunctionPreset.entries.forEach { fn ->
+        val selected = functionPreset == fn
+        Surface(
+          onClick = {
+            functionPreset = fn
+            if (agentId.isBlank() || agentId in defaultFnAgentIds || agentId == "ops") {
+              agentId = fn.suggestedAgentId
+            }
+            if (mission.isBlank() || mission in defaultAllMissions) {
+              mission = fn.defaultMission
+            }
+            roleTitle = fn.displayName
+            if (existingBot == null) {
+              persona = fn.openClawDirective
+            }
+          },
+          shape = RoundedCornerShape(50),
+          color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+          border = BorderStroke(
+            width = if (selected) 2.dp else 1.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+          ),
+          modifier = Modifier.testTag("bot_function_chip_${fn.name}"),
+        ) {
+          Text(
+            text = fn.displayName,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+          )
+        }
+      }
+    }
+    Text(
+      text = "OpenClaw Directive: ${functionPreset.openClawDirective}",
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    Text("OpenClaw Default LLM", style = MaterialTheme.typography.titleMedium)
+    val providerDefaultModels = remember { OpenClawLlmProvider.entries.map { it.defaultModel }.toSet() }
+    Row(
+      modifier = Modifier.horizontalScroll(rememberScrollState()),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      OpenClawLlmProvider.entries.forEach { provider ->
+        val selected = llmProvider == provider
+        Surface(
+          onClick = {
+            llmProvider = provider
+            if (provider == OpenClawLlmProvider.HOST_DEFAULT || provider == OpenClawLlmProvider.OPENCLAW_AUTO) {
+              llmModel = ""
+            } else if (llmModel.isBlank() || llmModel in providerDefaultModels) {
+              llmModel = provider.defaultModel
+            }
+          },
+          shape = RoundedCornerShape(50),
+          color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
+          border = BorderStroke(
+            width = if (selected) 2.dp else 1.dp,
+            color = if (selected) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outlineVariant,
+          ),
+          modifier = Modifier.testTag("bot_llm_chip_${provider.name}"),
+        ) {
+          Text(
+            text = provider.displayName,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+          )
+        }
+      }
+    }
+
+    if (llmProvider != OpenClawLlmProvider.HOST_DEFAULT && llmProvider != OpenClawLlmProvider.OPENCLAW_AUTO) {
+      OutlinedTextField(
+        value = llmModel,
+        onValueChange = { llmModel = it.take(120) },
+        label = { Text("Bot Model ID on OpenClaw") },
+        placeholder = { Text(llmProvider.defaultModel.ifBlank { "provider/model-name" }) },
+        singleLine = true,
+        modifier = Modifier
+          .fillMaxWidth()
+          .testTag("bot_llm_model_input"),
+      )
+    }
+
+    val effectiveHostLlm = if (llmProvider == OpenClawLlmProvider.HOST_DEFAULT) {
+      val hostProv = activeHost?.defaultLlmProviderEnum ?: OpenClawLlmProvider.OPENCLAW_AUTO
+      val hostMod = activeHost?.defaultLlmModel?.takeIf { it.isNotBlank() } ?: hostProv.defaultModel
+      if (hostMod.isNotBlank()) "${hostProv.displayName} ($hostMod)" else hostProv.displayName
+    } else {
+      val mod = llmModel.trim().ifBlank { llmProvider.defaultModel }
+      if (mod.isNotBlank()) "${llmProvider.displayName} ($mod)" else llmProvider.displayName
+    }
+
+    Surface(
+      shape = MaterialTheme.shapes.small,
+      color = MaterialTheme.colorScheme.surfaceVariant,
+      modifier = Modifier.fillMaxWidth(),
+    ) {
+      Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+          text = "OpenClaw Connection: ${activeHost?.label ?: "No host configured"} • LLM: $effectiveHostLlm",
+          style = MaterialTheme.typography.labelMedium,
+        )
+        Text(
+          text = syncFeedback ?: if (existingBot?.openClawSynced == true) {
+            "Synced with OpenClaw host (saving updates OpenClaw automatically)."
+          } else {
+            "Saving sends agent.register to OpenClaw and attaches function & LLM details to every message."
+          },
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val cleanAgentId = draftBot.openClawAgentId.trim().replace(Regex("[^a-zA-Z0-9_-]"), "").ifBlank { "main" }
+        TextButton(
+          onClick = {
+            clipboard.setText(AnnotatedString("openclaw agents add $cleanAgentId"))
+            syncFeedback = "Copied 'openclaw agents add $cleanAgentId' to paste on your Host PC if not using a webhook bridge."
+          },
+          modifier = Modifier.testTag("copy_openclaw_cli_button"),
+        ) {
+          Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(Modifier.width(6.dp))
+          Text("Copy PC 'openclaw agents add $cleanAgentId' Command")
+        }
+      }
+    }
 
     OutlinedTextField(
       value = roleTitle,
@@ -442,7 +602,7 @@ fun BotStudioScreen(
       value = agentId,
       onValueChange = { agentId = it.take(80) },
       label = { Text("OpenClaw Agent ID") },
-      placeholder = { Text("main, coder, ops") },
+      placeholder = { Text("main, translator, proofreader, critic, coder") },
       singleLine = true,
       modifier = Modifier.fillMaxWidth(),
     )
@@ -455,6 +615,22 @@ fun BotStudioScreen(
       maxLines = 4,
       modifier = Modifier.fillMaxWidth(),
     )
+
+    OutlinedButton(
+      onClick = {
+        onSyncWithOpenClaw(draftBot) { _, message ->
+          syncFeedback = message
+        }
+      },
+      modifier = Modifier
+        .fillMaxWidth()
+        .height(48.dp)
+        .testTag("studio_sync_openclaw_button"),
+    ) {
+      Icon(Icons.Rounded.Sync, contentDescription = null)
+      Spacer(Modifier.width(8.dp))
+      Text("Test & Connect Bot to OpenClaw")
+    }
 
     Row(
       modifier = Modifier.fillMaxWidth(),
@@ -483,7 +659,7 @@ fun BotStudioScreen(
       ) {
         Icon(Icons.Rounded.Save, contentDescription = null)
         Spacer(Modifier.width(8.dp))
-        Text(if (existingBot == null) "Add Bot to Crew" else "Save Appearance")
+        Text(if (existingBot == null) "Add & Connect Bot" else "Save & Sync Bot")
       }
     }
 

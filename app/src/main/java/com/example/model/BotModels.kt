@@ -122,6 +122,108 @@ enum class AiRoutingMode(val displayName: String, val description: String) {
   }
 }
 
+enum class BotFunctionPreset(
+  val displayName: String,
+  val suggestedAgentId: String,
+  val defaultMission: String,
+  val openClawDirective: String,
+) {
+  GENERAL(
+    displayName = "General Helper",
+    suggestedAgentId = "main",
+    defaultMission = "I organize your daily OpenClaw tasks!",
+    openClawDirective = "Handle everyday OpenClaw computer tasks, file organization, and clear instruction execution.",
+  ),
+  TRANSLATION(
+    displayName = "Translation",
+    suggestedAgentId = "translator",
+    defaultMission = "I help translate documents accurately!",
+    openClawDirective = "Specialize in accurate, natural translation across languages while preserving tone, formatting, and technical terms.",
+  ),
+  PROOFREADING(
+    displayName = "Proofreading",
+    suggestedAgentId = "proofreader",
+    defaultMission = "I proofread grammar, spelling & clarity!",
+    openClawDirective = "Specialize in proofreading text for grammar, spelling, punctuation, consistency, and crisp phrasing.",
+  ),
+  CRITIQUING(
+    displayName = "Critiquing",
+    suggestedAgentId = "critic",
+    defaultMission = "I critique drafts, translations & ideas!",
+    openClawDirective = "Specialize in structured critique: evaluate accuracy, tone, edge cases, risks, and actionable improvements.",
+  ),
+  CODING(
+    displayName = "Coding & Ops",
+    suggestedAgentId = "coder",
+    defaultMission = "I inspect code, builds & host scripts!",
+    openClawDirective = "Specialize in code analysis, debugging, build checks, shell automation, and host operations.",
+  ),
+  RESEARCH(
+    displayName = "Research & Notes",
+    suggestedAgentId = "researcher",
+    defaultMission = "I summarize documents, links & notes!",
+    openClawDirective = "Specialize in summarizing files, extracting key points, and structuring clear research briefs.",
+  ),
+  ;
+
+  companion object {
+    fun safeValueOf(raw: String?): BotFunctionPreset =
+      entries.firstOrNull { it.name == raw } ?: GENERAL
+  }
+}
+
+enum class OpenClawLlmProvider(
+  val displayName: String,
+  val wireKey: String,
+  val defaultModel: String,
+  val description: String,
+  val isBotOnly: Boolean = false,
+) {
+  HOST_DEFAULT(
+    displayName = "Use Host Default",
+    wireKey = "host_default",
+    defaultModel = "",
+    description = "Inherit the default LLM configured in OpenClaw Host Settings.",
+    isBotOnly = true,
+  ),
+  OPENCLAW_AUTO(
+    displayName = "OpenClaw Gateway Default",
+    wireKey = "openclaw",
+    defaultModel = "",
+    description = "Let the OpenClaw gateway use whichever default model is active in its config.",
+  ),
+  VENICE_AI(
+    displayName = "Venice.ai",
+    wireKey = "venice",
+    defaultModel = "venice/llama-3.3-70b",
+    description = "Route OpenClaw inference through your Venice.ai API key & model.",
+  ),
+  GOOGLE(
+    displayName = "Google (Gemini)",
+    wireKey = "google",
+    defaultModel = "google/gemini-2.5-flash",
+    description = "Route OpenClaw inference through your Google Gemini API key.",
+  ),
+  LOCAL_LLM(
+    displayName = "Local LLM (Ollama / LM Studio)",
+    wireKey = "local",
+    defaultModel = "ollama/qwen2.5:14b",
+    description = "Route OpenClaw inference to a local model running on your host PC.",
+  ),
+  ;
+
+  companion object {
+    val hostOptions: List<OpenClawLlmProvider>
+      get() = entries.filter { !it.isBotOnly }
+
+    fun safeForBot(raw: String?): OpenClawLlmProvider =
+      entries.firstOrNull { it.name == raw } ?: HOST_DEFAULT
+
+    fun safeForHost(raw: String?): OpenClawLlmProvider =
+      entries.firstOrNull { it.name == raw && !it.isBotOnly } ?: OPENCLAW_AUTO
+  }
+}
+
 enum class HostStatus(val label: String) {
   ONLINE("Online"),
   OFFLINE("Offline"),
@@ -162,6 +264,10 @@ data class CompanionBot(
   val mission: String = "",
   val lastMessagePreview: String = "",
   val openClawAgentId: String = "main",
+  val functionPreset: String = BotFunctionPreset.GENERAL.name,
+  val llmProvider: String = OpenClawLlmProvider.HOST_DEFAULT.name,
+  val llmModel: String = "",
+  val openClawSynced: Boolean = false,
   val pinnedDefault: Boolean = false,
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
@@ -169,11 +275,13 @@ data class CompanionBot(
   val archetypeEnum: BotArchetype get() = BotArchetype.safeValueOf(archetype)
   val hatEnum: HatStyle get() = HatStyle.safeValueOf(hatStyle)
   val accessoryEnum: AccessoryStyle get() = AccessoryStyle.safeValueOf(accessoryStyle)
+  val functionPresetEnum: BotFunctionPreset get() = BotFunctionPreset.safeValueOf(functionPreset)
+  val llmProviderEnum: OpenClawLlmProvider get() = OpenClawLlmProvider.safeForBot(llmProvider)
   val displayMission: String get() = mission.ifBlank { roleTitle }
 
   fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
     "userId" to ownerId,
-    "name" to name.trim().take(40).ifBlank { "ClawPal" },
+    "name" to name.trim().take(40).ifBlank { "Claw Dudebro" },
     "roleTitle" to roleTitle.trim().take(60).ifBlank { "OpenClaw Companion" },
     "archetype" to archetypeEnum.name,
     "hatStyle" to hatEnum.name,
@@ -184,13 +292,17 @@ data class CompanionBot(
     "mission" to mission.trim().take(160),
     "lastMessagePreview" to lastMessagePreview.trim().take(300),
     "openClawAgentId" to openClawAgentId.trim().take(80).ifBlank { "main" },
+    "functionPreset" to functionPresetEnum.name,
+    "llmProvider" to llmProviderEnum.name,
+    "llmModel" to llmModel.trim().take(120),
+    "openClawSynced" to openClawSynced,
     "pinnedDefault" to pinnedDefault,
     "createdAt" to FieldValue.serverTimestamp(),
     "updatedAt" to FieldValue.serverTimestamp(),
   )
 
   fun toUpdateMap(): Map<String, Any> = mapOf(
-    "name" to name.trim().take(40).ifBlank { "ClawPal" },
+    "name" to name.trim().take(40).ifBlank { "Claw Dudebro" },
     "roleTitle" to roleTitle.trim().take(60).ifBlank { "OpenClaw Companion" },
     "archetype" to archetypeEnum.name,
     "hatStyle" to hatEnum.name,
@@ -201,6 +313,10 @@ data class CompanionBot(
     "mission" to mission.trim().take(160),
     "lastMessagePreview" to lastMessagePreview.trim().take(300),
     "openClawAgentId" to openClawAgentId.trim().take(80).ifBlank { "main" },
+    "functionPreset" to functionPresetEnum.name,
+    "llmProvider" to llmProviderEnum.name,
+    "llmModel" to llmModel.trim().take(120),
+    "openClawSynced" to openClawSynced,
     "pinnedDefault" to pinnedDefault,
     "updatedAt" to FieldValue.serverTimestamp(),
   )
@@ -261,12 +377,16 @@ data class OpenClawHost(
   val controlUrl: String = "http://192.168.1.50:18789/control",
   val gatewayToken: String = "",
   val aiMode: String = AiRoutingMode.HYBRID_GEMINI_OPENCLAW.name,
+  val defaultLlmProvider: String = OpenClawLlmProvider.OPENCLAW_AUTO.name,
+  val defaultLlmModel: String = "",
+  val localLlmEndpoint: String = "",
   val autoParseCasual: Boolean = true,
   val lastStatus: String = HostStatus.UNVERIFIED.name,
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
   val aiModeEnum: AiRoutingMode get() = AiRoutingMode.safeValueOf(aiMode)
+  val defaultLlmProviderEnum: OpenClawLlmProvider get() = OpenClawLlmProvider.safeForHost(defaultLlmProvider)
   val lastStatusEnum: HostStatus get() = HostStatus.safeValueOf(lastStatus)
 
   fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
@@ -276,6 +396,9 @@ data class OpenClawHost(
     "controlUrl" to controlUrl.trim().take(300),
     "gatewayToken" to gatewayToken.trim().take(256),
     "aiMode" to aiModeEnum.name,
+    "defaultLlmProvider" to defaultLlmProviderEnum.name,
+    "defaultLlmModel" to defaultLlmModel.trim().take(120),
+    "localLlmEndpoint" to localLlmEndpoint.trim().take(300),
     "autoParseCasual" to autoParseCasual,
     "lastStatus" to lastStatusEnum.name,
     "createdAt" to FieldValue.serverTimestamp(),
@@ -288,6 +411,9 @@ data class OpenClawHost(
     "controlUrl" to controlUrl.trim().take(300),
     "gatewayToken" to gatewayToken.trim().take(256),
     "aiMode" to aiModeEnum.name,
+    "defaultLlmProvider" to defaultLlmProviderEnum.name,
+    "defaultLlmModel" to defaultLlmModel.trim().take(120),
+    "localLlmEndpoint" to localLlmEndpoint.trim().take(300),
     "autoParseCasual" to autoParseCasual,
     "lastStatus" to lastStatusEnum.name,
     "updatedAt" to FieldValue.serverTimestamp(),

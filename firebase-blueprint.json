@@ -56,6 +56,24 @@
           "type": "string",
           "description": "Target OpenClaw agent identifier."
         },
+        "functionPreset": {
+          "type": "string",
+          "enum": ["GENERAL", "TRANSLATION", "PROOFREADING", "CRITIQUING", "CODING", "RESEARCH"],
+          "description": "Bot specialization passed to OpenClaw."
+        },
+        "llmProvider": {
+          "type": "string",
+          "enum": ["HOST_DEFAULT", "OPENCLAW_AUTO", "VENICE_AI", "GOOGLE", "LOCAL_LLM"],
+          "description": "Preferred OpenClaw LLM provider for this bot."
+        },
+        "llmModel": {
+          "type": "string",
+          "description": "Optional explicit OpenClaw model ID."
+        },
+        "openClawSynced": {
+          "type": "boolean",
+          "description": "Whether the bot profile has been synced to the OpenClaw host."
+        },
         "pinnedDefault": {
           "type": "boolean",
           "description": "Whether this is a starter/pinned bot."
@@ -198,6 +216,19 @@
           "type": "string",
           "enum": ["HYBRID_GEMINI_OPENCLAW", "OPENCLAW_ONLY", "GEMINI_PARSER_PREVIEW"],
           "description": "Routing mode for casual-to-instruction parsing and execution."
+        },
+        "defaultLlmProvider": {
+          "type": "string",
+          "enum": ["OPENCLAW_AUTO", "VENICE_AI", "GOOGLE", "LOCAL_LLM"],
+          "description": "Default OpenClaw LLM provider (Venice.ai, Google, Local LLM, or Gateway Default)."
+        },
+        "defaultLlmModel": {
+          "type": "string",
+          "description": "Default OpenClaw model identifier."
+        },
+        "localLlmEndpoint": {
+          "type": "string",
+          "description": "Optional local LLM endpoint URL on the host machine."
         },
         "autoParseCasual": {
           "type": "boolean",

@@ -108,24 +108,59 @@ fun BotVectorAvatar(
   )
 
   val bounceTarget = when (expression) {
-    BotExpression.UH_HUH -> 1.07f
+    BotExpression.UH_HUH -> 1.08f
+    BotExpression.WORKING -> 1.03f
+    BotExpression.THINKING -> 1.02f
+    BotExpression.ALERT -> 1.05f
     BotExpression.SORRY -> 0.96f
     else -> 1f
   }
   val exprScale by animateFloatAsState(
     targetValue = bounceTarget,
-    animationSpec = spring(dampingRatio = 0.55f, stiffness = 350f),
+    animationSpec = spring(dampingRatio = 0.5f, stiffness = 320f),
     label = "expr_scale",
   )
 
-  val isBlinking = animate && blinkCycle > 0.94f &&
+  val reactionPulse = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(1f) }
+  androidx.compose.runtime.LaunchedEffect(expression) {
+    if (animate) {
+      reactionPulse.snapTo(1.13f)
+      reactionPulse.animateTo(
+        targetValue = 1f,
+        animationSpec = spring(dampingRatio = 0.45f, stiffness = 340f),
+      )
+    }
+  }
+
+  val isBlinking = animate && blinkCycle > 0.93f &&
     expression != BotExpression.UH_HUH && expression != BotExpression.SORRY
 
   Box(modifier = modifier.size(size)) {
     Canvas(modifier = Modifier.fillMaxSize()) {
       val s = minOf(this.size.width, this.size.height) / 240f
-      val bobY = if (animate) sin(bobPhase) * 3.5f else 0f
-      val sorryTilt = if (expression == BotExpression.SORRY) -4.5f else 0f
+      val bobY = if (!animate) {
+        0f
+      } else {
+        when (expression) {
+          BotExpression.THINKING -> sin(bobPhase * 1.25f) * 6.5f
+          BotExpression.WORKING -> -kotlin.math.abs(sin(bobPhase * 2f)) * 9f
+          BotExpression.UH_HUH -> -kotlin.math.abs(sin(bobPhase * 2f)) * 10f
+          BotExpression.ALERT -> -kotlin.math.abs(sin(bobPhase * 2.5f)) * 7f
+          BotExpression.WORRIED -> sin(bobPhase * 3f) * 3.5f
+          BotExpression.SORRY -> sin(bobPhase) * 4.5f
+          BotExpression.HAPPY -> sin(bobPhase) * 5.5f
+        }
+      }
+      val headTilt = when (expression) {
+        BotExpression.THINKING -> if (animate) sin(bobPhase) * 7.5f else 5f
+        BotExpression.WORKING -> if (animate) sin(bobPhase * 2f) * 5.5f else 0f
+        BotExpression.UH_HUH -> if (animate) sin(bobPhase * 2f) * 4.5f else 0f
+        BotExpression.WORRIED -> if (animate) sin(bobPhase * 4f) * 4.5f else -3f
+        BotExpression.SORRY -> if (animate) -6.5f + sin(bobPhase) * 3.5f else -6f
+        BotExpression.ALERT -> if (animate) sin(bobPhase * 3f) * 5f else 0f
+        BotExpression.HAPPY -> if (animate) sin(bobPhase) * 2.8f else 0f
+      }
+      val combinedScale = exprScale * reactionPulse.value
       val inkW = 4.6f * s
 
       translate(
@@ -133,16 +168,16 @@ fun BotVectorAvatar(
         top = (this.size.height - 240f * s) / 2f + bobY * s,
       ) {
         rotate(
-          degrees = sorryTilt,
+          degrees = headTilt,
           pivot = Offset(120f * s, 140f * s),
         ) {
           // Subtle scale around face center for expression pop
           val cx = 120f * s
           val cy = 132f * s
-          translate(left = cx * (1f - exprScale), top = cy * (1f - exprScale)) {
+          translate(left = cx * (1f - combinedScale), top = cy * (1f - combinedScale)) {
             drawBotCharacter(
-              scale = s * exprScale,
-              inkWidth = inkW * exprScale,
+              scale = s * combinedScale,
+              inkWidth = inkW * combinedScale,
               archetype = archetype,
               hatStyle = hatStyle,
               accessoryStyle = accessoryStyle,
@@ -490,11 +525,12 @@ private fun DrawScope.drawBotCharacter(
 
   // 8. Eyes & Eyebrows per expression
   val eyeOffsetX = when (expression) {
-    BotExpression.THINKING -> 2.5f
+    BotExpression.THINKING -> if (animate) 2.5f + sin(phase * 1.5f) * 3.8f else 2.5f
+    BotExpression.WORKING -> if (animate) sin(phase * 2f) * 2.5f else 0f
     else -> 0f
   }
   val eyeOffsetY = when (expression) {
-    BotExpression.THINKING -> -3f
+    BotExpression.THINKING -> if (animate) -3.5f + cos(phase * 1.5f) * 1.5f else -3f
     else -> 0f
   }
   drawEyesAndBrows(
@@ -1036,13 +1072,22 @@ private fun DrawScope.drawExpressionOverlays(
 
   when (expression) {
     BotExpression.THINKING -> {
-      val drift = if (animate) sin(phase * 2f) * 3f else 0f
-      drawCircle(Color.White, radius = r(5f), center = p(188f, 64f + drift))
-      drawCircle(InkColor, radius = r(5f), center = p(188f, 64f + drift), style = thinStroke)
-      drawCircle(Color.White, radius = r(8f), center = p(202f, 48f - drift))
-      drawCircle(InkColor, radius = r(8f), center = p(202f, 48f - drift), style = thinStroke)
-      drawCircle(Color.White, radius = r(12f), center = p(214f, 28f + drift))
-      drawCircle(InkColor, radius = r(12f), center = p(214f, 28f + drift), style = thinStroke)
+      val drift = if (animate) sin(phase * 2f) * 3.5f else 0f
+      drawCircle(Color.White, radius = r(5.5f), center = p(184f, 68f + drift))
+      drawCircle(InkColor, radius = r(5.5f), center = p(184f, 68f + drift), style = thinStroke)
+      drawCircle(Color.White, radius = r(8.5f), center = p(197f, 52f - drift))
+      drawCircle(InkColor, radius = r(8.5f), center = p(197f, 52f - drift), style = thinStroke)
+      val cloudCenter = p(211f, 30f + drift * 0.6f)
+      drawOval(Color.White, topLeft = p(189f, 15f + drift * 0.6f), size = Size(r(44f), r(28f)))
+      drawOval(InkColor, topLeft = p(189f, 15f + drift * 0.6f), size = Size(r(44f), r(28f)), style = thinStroke)
+      for (i in 0..2) {
+        val pulse = if (animate) (0.7f + 0.55f * kotlin.math.max(0f, sin(phase * 3f - i * 1.1f))) else 1f
+        drawCircle(
+          color = Color(0xFFFF2E93),
+          radius = r(2.8f * pulse),
+          center = Offset(cloudCenter.x + r((i - 1) * 9.5f), cloudCenter.y - r(1f)),
+        )
+      }
     }
     BotExpression.UH_HUH -> {
       // Glowing "Aha!" lightbulb/sparkle bursts on top right
@@ -1090,19 +1135,37 @@ private fun DrawScope.drawExpressionOverlays(
       }
     }
     BotExpression.ALERT -> {
-      drawRoundRect(
-        color = Color(0xFFE53935),
-        topLeft = p(196f, 30f),
-        size = Size(r(10f), r(24f)),
-        cornerRadius = CornerRadius(r(5f), r(5f)),
-      )
-      drawCircle(color = Color(0xFFE53935), radius = r(5.5f), center = p(201f, 64f))
+      val alertPulse = if (animate) sparkPulse else 1f
+      val cx = 201f
+      val cy = 44f
+      rotate(degrees = if (animate) sin(phase * 3f) * 8f else 0f, pivot = p(cx, cy)) {
+        drawRoundRect(
+          color = Color(0xFFE53935),
+          topLeft = p(196f, 24f),
+          size = Size(r(10f * alertPulse), r(24f * alertPulse)),
+          cornerRadius = CornerRadius(r(5f), r(5f)),
+        )
+        drawCircle(color = Color(0xFFE53935), radius = r(5.5f * alertPulse), center = p(201f, 59f))
+      }
     }
     BotExpression.WORKING -> {
-      val spin = if (animate) phase * 45f else 0f
-      rotate(degrees = spin, pivot = p(202f, 44f)) {
-        drawCircle(SparkGold, radius = r(10f), center = p(202f, 44f), style = thinStroke)
-        drawCircle(Color(0xFF475B63), radius = r(4f), center = p(202f, 44f))
+      val spinDeg = if (animate) (phase * 180f / PI.toFloat()) * 2f else 0f
+      val gx = 202f
+      val gy = 44f
+      rotate(degrees = spinDeg, pivot = p(gx, gy)) {
+        for (i in 0 until 6) {
+          val a = (i * 60.0 * PI / 180.0).toFloat()
+          drawLine(
+            color = SparkGold,
+            start = p(gx + cos(a) * 9f, gy + sin(a) * 9f),
+            end = p(gx + cos(a) * 16f, gy + sin(a) * 16f),
+            strokeWidth = r(5f),
+            cap = StrokeCap.Round,
+          )
+        }
+        drawCircle(SparkGold, radius = r(10f), center = p(gx, gy))
+        drawCircle(InkColor, radius = r(10f), center = p(gx, gy), style = thinStroke)
+        drawCircle(Color(0xFF475B63), radius = r(4f), center = p(gx, gy))
       }
     }
     BotExpression.HAPPY -> Unit
