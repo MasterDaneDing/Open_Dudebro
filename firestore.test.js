@@ -1,0 +1,377 @@
+const {
+  initializeTestEnvironment,
+  assertFails,
+  assertSucceeds,
+} = require("@firebase/rules-unit-testing");
+const { test, before, after, beforeEach } = require("node:test");
+const fs = require("node:fs");
+
+let testEnv;
+const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
+const ALICE_UID = "alice_claw_123";
+const BOB_UID = "bob_claw_456";
+
+const [emulatorHost, emulatorPortStr] = (
+  process.env.FIRESTORE_EMULATOR_HOST || "127.0.0.1:8085"
+).split(":");
+const emulatorPort = parseInt(emulatorPortStr, 10);
+
+before(async () => {
+  const rules = fs.readFileSync("./firestore.rules", "utf8");
+  testEnv = await initializeTestEnvironment({
+    projectId: PROJECT_ID,
+    firestore: {
+      rules,
+      host: emulatorHost,
+      port: emulatorPort,
+    },
+  });
+});
+
+after(async () => {
+  if (testEnv) {
+    await testEnv.cleanup();
+  }
+});
+
+beforeEach(async () => {
+  if (testEnv) {
+    await testEnv.clearFirestore();
+  }
+});
+
+function sampleBotPayload(uid, overrides = {}) {
+  const now = new Date(Date.now() - 2000);
+  return {
+    userId: uid,
+    name: "Bimbo",
+    roleTitle: "Daily Claw Companion",
+    archetype: "GLASSES_FELLOW",
+    hatStyle: "NONE",
+    accessoryStyle: "FOREHEAD_GLASSES",
+    primaryColorHex: "#EEA05E",
+    accentColorHex: "#DC4D21",
+    systemPersona: "Warm, clear, cheerful assistant for OpenClaw tasks.",
+    openClawAgentId: "main",
+    pinnedDefault: true,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function sampleMessagePayload(uid, botId, overrides = {}) {
+  const now = new Date(Date.now() - 1000);
+  return {
+    userId: uid,
+    botId,
+    sender: "USER",
+    rawText: "hey buddy tidy up my downloads folder please",
+    parsedInstruction:
+      "Inspect ~/Downloads, group PDFs into ~/Downloads/Invoices, and summarize moved files.",
+    instructionGoal: "Organize PDF files in Downloads",
+    instructionSteps: [
+      "List files in ~/Downloads modified in the past 7 days",
+      "Move PDF invoices into ~/Downloads/Invoices",
+    ],
+    expression: "THINKING",
+    status: "PARSING",
+    attachedFiles: ["receipt_nov.pdf"],
+    linkedPaths: ["~/Downloads"],
+    takeoverSuggested: false,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+test("Unauthenticated user: denied read and write on all collections", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/bots`).get());
+  await assertFails(
+    unauthDb
+      .collection(`users/${ALICE_UID}/bots`)
+      .doc("bot_1")
+      .set(sampleBotPayload(ALICE_UID))
+  );
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/hosts`).get());
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/linkedFiles`).get());
+});
+
+test("Owner CRUD: bots create, partial update, query, and delete succeed", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const botsRef = aliceDb.collection(`users/${ALICE_UID}/bots`);
+
+  await assertSucceeds(botsRef.doc("bot_1").set(sampleBotPayload(ALICE_UID)));
+
+  // Partial update of appearance & character rename
+  await assertSucceeds(
+    botsRef.doc("bot_1").update({
+      name: "Captain Bimbo",
+      hatStyle: "BERET",
+      accessoryStyle: "STUBBLE",
+      accentColorHex: "#E85D2A",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // Validate all 5 additional character templates
+  for (const arch of ["DINOSAUR", "GOBLIN", "YANKI_BIKER", "CHINESE_MASTER", "PIGTAIL_GIRL"]) {
+    await assertSucceeds(
+      botsRef.doc(`bot_${arch}`).set(
+        sampleBotPayload(ALICE_UID, {
+          name: `Custom_${arch}`,
+          archetype: arch,
+        })
+      )
+    );
+  }
+
+  // Reject unsupported archetype
+  await assertFails(
+    botsRef.doc("bot_invalid_arch").set(
+      sampleBotPayload(ALICE_UID, { archetype: "ALIEN_MONSTER" })
+    )
+  );
+
+  // List query matching Kotlin repository
+  await assertSucceeds(botsRef.orderBy("createdAt").get());
+
+  // Reject ghost field / @DocumentId 'id' leakage / immutable createdAt change
+  await assertFails(
+    botsRef.doc("bot_2").set(sampleBotPayload(ALICE_UID, { id: "bot_2" }))
+  );
+  await assertFails(
+    botsRef.doc("bot_1").update({
+      createdAt: new Date(Date.now() - 100),
+      updatedAt: new Date(Date.now() - 100),
+    })
+  );
+  await assertFails(
+    botsRef.doc("bot_1").update({
+      primaryColorHex: "NOT_HEX",
+      updatedAt: new Date(Date.now() - 100),
+    })
+  );
+
+  await assertSucceeds(botsRef.doc("bot_1").delete());
+});
+
+test("Cross-user isolation: Bob cannot read or mutate Alice's bots, messages, hosts, or files", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  await assertSucceeds(
+    aliceDb
+      .collection(`users/${ALICE_UID}/bots`)
+      .doc("bot_1")
+      .set(sampleBotPayload(ALICE_UID))
+  );
+
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/bots`).get());
+  await assertFails(
+    bobDb.collection(`users/${ALICE_UID}/bots`).doc("bot_1").get()
+  );
+  await assertFails(
+    bobDb
+      .collection(`users/${ALICE_UID}/bots`)
+      .doc("bot_1")
+      .update({ name: "Hijacked", updatedAt: new Date(Date.now() - 500) })
+  );
+  await assertFails(
+    bobDb.collection(`users/${ALICE_UID}/bots`).doc("bot_1").delete()
+  );
+});
+
+test("Bot messages: requires parent bot existence, supports optional fields omitted, and enforces updates", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const botsRef = aliceDb.collection(`users/${ALICE_UID}/bots`);
+
+  // Orphaned message without parent bot must fail
+  await assertFails(
+    botsRef
+      .doc("missing_bot")
+      .collection("messages")
+      .doc("msg_1")
+      .set(sampleMessagePayload(ALICE_UID, "missing_bot"))
+  );
+
+  await assertSucceeds(botsRef.doc("bot_1").set(sampleBotPayload(ALICE_UID)));
+
+  // Valid message with optional parsedInstruction & instructionGoal omitted (filtered out nulls)
+  const minimalMsg = {
+    userId: ALICE_UID,
+    botId: "bot_1",
+    sender: "USER",
+    rawText: "hello there!",
+    instructionSteps: [],
+    expression: "HAPPY",
+    status: "IDLE",
+    attachedFiles: [],
+    linkedPaths: [],
+    takeoverSuggested: false,
+    createdAt: new Date(Date.now() - 1000),
+    updatedAt: new Date(Date.now() - 1000),
+  };
+  await assertSucceeds(
+    botsRef.doc("bot_1").collection("messages").doc("msg_1").set(minimalMsg)
+  );
+
+  // Valid partial update transitioning expression THINKING -> UH_HUH
+  await assertSucceeds(
+    botsRef
+      .doc("bot_1")
+      .collection("messages")
+      .doc("msg_1")
+      .update({
+        parsedInstruction: "Execute clean check on host.",
+        instructionGoal: "Check host status",
+        instructionSteps: ["Ping gateway", "Report status"],
+        expression: "UH_HUH",
+        status: "COMPLETED",
+        updatedAt: new Date(Date.now() - 500),
+      })
+  );
+
+  // Future timestamp must fail
+  await assertFails(
+    botsRef
+      .doc("bot_1")
+      .collection("messages")
+      .doc("msg_2")
+      .set(
+        sampleMessagePayload(ALICE_UID, "bot_1", {
+          createdAt: new Date(Date.now() + 60000),
+          updatedAt: new Date(Date.now() + 60000),
+        })
+      )
+  );
+});
+
+test("Hosts and LinkedFiles: CRUD and validation parity", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const now = new Date(Date.now() - 1000);
+
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/hosts`).doc("host_1").set({
+      userId: ALICE_UID,
+      label: "Windows Studio PC",
+      baseUrl: "http://192.168.1.42:18789",
+      controlUrl: "http://192.168.1.42:18789/control",
+      gatewayToken: "secret-token-123",
+      aiMode: "HYBRID_GEMINI_OPENCLAW",
+      autoParseCasual: true,
+      lastStatus: "UNVERIFIED",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/hosts`).doc("host_1").update({
+      lastStatus: "ONLINE",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/linkedFiles`).doc("file_1").set({
+      userId: ALICE_UID,
+      displayName: "report_q4.pdf",
+      uriOrPath: "C:\\Users\\Demo\\Documents\\report_q4.pdf",
+      linkType: "HOST_PATH",
+      mimeOrExt: "application/pdf",
+      sizeBytes: 204800,
+      notes: "Quarterly summary for OpenClaw review",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Negative sizeBytes must fail
+  await assertFails(
+    aliceDb.collection(`users/${ALICE_UID}/linkedFiles`).doc("file_bad").set({
+      userId: ALICE_UID,
+      displayName: "bad.txt",
+      uriOrPath: "/tmp/bad.txt",
+      linkType: "HOST_PATH",
+      mimeOrExt: "text/plain",
+      sizeBytes: -5,
+      notes: "",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+});
+
+test("ChatRooms & bot missions: mission update, room CRUD, room messages, and cross-user isolation", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const now = new Date(Date.now() - 1000);
+
+  // Bot created with mission & lastMessagePreview + mission update anytime
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/bots`).doc("bot_volt").set(
+      sampleBotPayload(ALICE_UID, {
+        name: "Volt-50",
+        archetype: "RETRO_ROBOT",
+        mission: "I help translate documents!",
+        lastMessagePreview: "Ready to translate!",
+      })
+    )
+  );
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/bots`).doc("bot_volt").update({
+      mission: "I translate JP & EN technical specs!",
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  // ChatRoom CRUD
+  const roomsRef = aliceDb.collection(`users/${ALICE_UID}/chatRooms`);
+  await assertSucceeds(
+    roomsRef.doc("room_cafe").set({
+      userId: ALICE_UID,
+      title: "Cafe Translation Squad",
+      topic: "Translate & critique documents together",
+      botIds: ["bot_volt", "bot_maru"],
+      lastMessagePreview: "Volt-50 & Prof. Maru are at the cafe!",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Room message requires existing parent room
+  await assertFails(
+    roomsRef.doc("missing_room").collection("messages").doc("m1").set({
+      userId: ALICE_UID,
+      roomId: "missing_room",
+      senderType: "USER",
+      senderBotName: "You",
+      rawText: "Translate this!",
+      expression: "HAPPY",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    roomsRef.doc("room_cafe").collection("messages").doc("m1").set({
+      userId: ALICE_UID,
+      roomId: "room_cafe",
+      senderType: "BOT",
+      senderBotId: "bot_volt",
+      senderBotName: "Volt-50",
+      replyToBotName: "Prof. Maru",
+      rawText: "Here is the translated draft!",
+      expression: "UH_HUH",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Cross-user isolation on chatRooms
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/chatRooms`).get());
+  await assertFails(
+    bobDb.collection(`users/${ALICE_UID}/chatRooms/room_cafe/messages`).get()
+  );
+});

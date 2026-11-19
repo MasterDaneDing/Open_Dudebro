@@ -1,0 +1,334 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Shared Security Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidHexColor(hex) {
+      return hex is string && hex.size() == 7 && hex.matches('^#[0-9A-Fa-f]{6}$');
+    }
+
+    function isValidStringList(lst, maxItems, maxItemLen) {
+      return lst is list &&
+             lst.size() <= maxItems &&
+             (lst.size() == 0 || (lst[0] is string && lst[0].size() <= maxItemLen));
+    }
+
+    // --- Entity Validation Helpers ---
+    function isValidCompanionBot(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 40 &&
+             data.roleTitle is string && data.roleTitle.size() >= 1 && data.roleTitle.size() <= 60 &&
+             data.archetype in [
+               'GLASSES_FELLOW', 'PROFESSOR', 'RETRO_ROBOT', 'DINOSAUR',
+               'GOBLIN', 'YANKI_BIKER', 'CHINESE_MASTER', 'PIGTAIL_GIRL'
+             ] &&
+             data.hatStyle in ['NONE', 'BERET', 'CAP', 'PROPELLER', 'MORTARBOARD', 'CROWN', 'HEADBAND', 'ANTENNA_DISH'] &&
+             data.accessoryStyle in ['NONE', 'FOREHEAD_GLASSES', 'ROUND_GLASSES', 'MONOCLE', 'BOWTIE', 'STUBBLE', 'SCARF', 'SPARK_BADGE'] &&
+             isValidHexColor(data.primaryColorHex) &&
+             isValidHexColor(data.accentColorHex) &&
+              data.systemPersona is string && data.systemPersona.size() <= 500 &&
+              (!('mission' in data) || (data.mission is string && data.mission.size() <= 160)) &&
+              (!('lastMessagePreview' in data) || (data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300)) &&
+              data.openClawAgentId is string && data.openClawAgentId.size() <= 80 &&
+              data.pinnedDefault is bool;
+    }
+
+    function isValidChatRoom(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 60 &&
+             data.topic is string && data.topic.size() <= 160 &&
+             isValidStringList(data.botIds, 8, 128) &&
+             data.botIds.size() >= 1 &&
+             data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300;
+    }
+
+    function isValidRoomMessage(data, userId, roomId) {
+      return data.userId is string && data.userId == userId &&
+             data.roomId is string && data.roomId == roomId &&
+             data.senderType in ['USER', 'BOT', 'SYSTEM'] &&
+             (!('senderBotId' in data) || data.senderBotId == null || (data.senderBotId is string && data.senderBotId.size() <= 128)) &&
+             data.senderBotName is string && data.senderBotName.size() >= 1 && data.senderBotName.size() <= 50 &&
+             (!('replyToBotName' in data) || data.replyToBotName == null || (data.replyToBotName is string && data.replyToBotName.size() <= 50)) &&
+             data.rawText is string && data.rawText.size() >= 1 && data.rawText.size() <= 4000 &&
+             (!('parsedInstruction' in data) || data.parsedInstruction == null || (data.parsedInstruction is string && data.parsedInstruction.size() <= 4000)) &&
+             data.expression in ['HAPPY', 'THINKING', 'UH_HUH', 'WORRIED', 'SORRY', 'WORKING', 'ALERT'];
+    }
+
+    function isValidBotMessage(data, userId, botId) {
+      return data.userId is string && data.userId == userId &&
+             data.botId is string && data.botId == botId &&
+             data.sender in ['USER', 'BOT', 'SYSTEM'] &&
+             data.rawText is string && data.rawText.size() >= 1 && data.rawText.size() <= 4000 &&
+             (!('parsedInstruction' in data) || data.parsedInstruction == null || (data.parsedInstruction is string && data.parsedInstruction.size() <= 4000)) &&
+             (!('instructionGoal' in data) || data.instructionGoal == null || (data.instructionGoal is string && data.instructionGoal.size() <= 200)) &&
+             isValidStringList(data.instructionSteps, 12, 300) &&
+             data.expression in ['HAPPY', 'THINKING', 'UH_HUH', 'WORRIED', 'SORRY', 'WORKING', 'ALERT'] &&
+             data.status in ['IDLE', 'PARSING', 'DISPATCHED', 'COMPLETED', 'WARNING', 'FAILED'] &&
+             isValidStringList(data.attachedFiles, 10, 200) &&
+             isValidStringList(data.linkedPaths, 10, 500) &&
+             data.takeoverSuggested is bool;
+    }
+
+    function isValidOpenClawHost(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.label is string && data.label.size() >= 1 && data.label.size() <= 50 &&
+             data.baseUrl is string && data.baseUrl.size() >= 1 && data.baseUrl.size() <= 300 &&
+             data.controlUrl is string && data.controlUrl.size() <= 300 &&
+             data.gatewayToken is string && data.gatewayToken.size() <= 256 &&
+             data.aiMode in ['HYBRID_GEMINI_OPENCLAW', 'OPENCLAW_ONLY', 'GEMINI_PARSER_PREVIEW'] &&
+             data.autoParseCasual is bool &&
+             data.lastStatus in ['ONLINE', 'OFFLINE', 'UNVERIFIED'];
+    }
+
+    function isValidLinkedFile(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+             data.uriOrPath is string && data.uriOrPath.size() >= 1 && data.uriOrPath.size() <= 500 &&
+             data.linkType in ['ANDROID_ATTACHMENT', 'HOST_PATH', 'CLOUD_URL'] &&
+             data.mimeOrExt is string && data.mimeOrExt.size() <= 60 &&
+             data.sizeBytes is int && data.sizeBytes >= 0 &&
+             data.notes is string && data.notes.size() <= 250;
+    }
+
+    // --- Collection Rules ---
+    match /users/{userId}/bots/{botId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(botId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(botId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'name', 'roleTitle', 'archetype', 'hatStyle',
+                         'accessoryStyle', 'primaryColorHex', 'accentColorHex',
+                         'systemPersona', 'openClawAgentId', 'pinnedDefault',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'name', 'roleTitle', 'archetype', 'hatStyle',
+                         'accessoryStyle', 'primaryColorHex', 'accentColorHex',
+                         'systemPersona', 'mission', 'lastMessagePreview',
+                         'openClawAgentId', 'pinnedDefault', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidCompanionBot(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(botId) &&
+                       isValidCompanionBot(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'name', 'roleTitle', 'archetype', 'hatStyle',
+                         'accessoryStyle', 'primaryColorHex', 'accentColorHex',
+                         'systemPersona', 'mission', 'lastMessagePreview',
+                         'openClawAgentId', 'pinnedDefault', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(botId);
+
+      match /messages/{messageId} {
+        allow list: if isOwner(userId) && isValidId(botId);
+        allow get: if isOwner(userId) && isValidId(botId) && isValidId(messageId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(botId) &&
+                         isValidId(messageId) &&
+                         exists(/databases/$(database)/documents/users/$(userId)/bots/$(botId)) &&
+                         incoming().keys().hasAll([
+                           'userId', 'botId', 'sender', 'rawText',
+                           'instructionSteps', 'expression', 'status',
+                           'attachedFiles', 'linkedPaths', 'takeoverSuggested',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'botId', 'sender', 'rawText',
+                           'parsedInstruction', 'instructionGoal', 'instructionSteps',
+                           'expression', 'status', 'attachedFiles', 'linkedPaths',
+                           'takeoverSuggested', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidBotMessage(incoming(), userId, botId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(botId) &&
+                         isValidId(messageId) &&
+                         isValidBotMessage(incoming(), userId, botId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().botId == existing().botId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'rawText', 'parsedInstruction', 'instructionGoal',
+                           'instructionSteps', 'expression', 'status',
+                           'takeoverSuggested', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(botId) && isValidId(messageId);
+      }
+    }
+
+    match /users/{userId}/chatRooms/{roomId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(roomId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(roomId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'title', 'topic', 'botIds',
+                         'lastMessagePreview', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'title', 'topic', 'botIds',
+                         'lastMessagePreview', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidChatRoom(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(roomId) &&
+                       isValidChatRoom(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'topic', 'botIds', 'lastMessagePreview', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(roomId);
+
+      match /messages/{messageId} {
+        allow list: if isOwner(userId) && isValidId(roomId);
+        allow get: if isOwner(userId) && isValidId(roomId) && isValidId(messageId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(roomId) &&
+                         isValidId(messageId) &&
+                         exists(/databases/$(database)/documents/users/$(userId)/chatRooms/$(roomId)) &&
+                         incoming().keys().hasAll([
+                           'userId', 'roomId', 'senderType', 'senderBotName',
+                           'rawText', 'expression', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'roomId', 'senderType', 'senderBotId',
+                           'senderBotName', 'replyToBotName', 'rawText',
+                           'parsedInstruction', 'expression', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidRoomMessage(incoming(), userId, roomId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(roomId) &&
+                         isValidId(messageId) &&
+                         isValidRoomMessage(incoming(), userId, roomId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().roomId == existing().roomId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'rawText', 'parsedInstruction', 'expression', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(roomId) && isValidId(messageId);
+      }
+    }
+
+    match /users/{userId}/hosts/{hostId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(hostId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(hostId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'label', 'baseUrl', 'controlUrl', 'gatewayToken',
+                         'aiMode', 'autoParseCasual', 'lastStatus', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'label', 'baseUrl', 'controlUrl', 'gatewayToken',
+                         'aiMode', 'autoParseCasual', 'lastStatus', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidOpenClawHost(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(hostId) &&
+                       isValidOpenClawHost(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'label', 'baseUrl', 'controlUrl', 'gatewayToken',
+                         'aiMode', 'autoParseCasual', 'lastStatus', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(hostId);
+    }
+
+    match /users/{userId}/linkedFiles/{fileId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(fileId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(fileId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'displayName', 'uriOrPath', 'linkType',
+                         'mimeOrExt', 'sizeBytes', 'notes', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'displayName', 'uriOrPath', 'linkType',
+                         'mimeOrExt', 'sizeBytes', 'notes', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidLinkedFile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(fileId) &&
+                       isValidLinkedFile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'displayName', 'uriOrPath', 'linkType',
+                         'mimeOrExt', 'sizeBytes', 'notes', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(fileId);
+    }
+  }
+}

@@ -1,0 +1,1222 @@
+package com.example.ui.screens
+
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DriveFileRenameOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.example.model.BotExpression
+import com.example.model.BotMessage
+import com.example.model.CompanionBot
+import com.example.model.FileLinkType
+import com.example.model.LinkedFile
+import com.example.model.MessageSender
+import com.example.model.MessageStatus
+import com.example.model.OpenClawHost
+import com.example.ui.avatar.BotVectorAvatar
+import com.example.ui.util.ReplyHaptics
+import com.example.viewmodel.UiState
+
+@Composable
+fun ChatWorkspaceScreen(
+  botsState: UiState<List<CompanionBot>>,
+  selectedBotId: String,
+  messagesState: UiState<List<BotMessage>>,
+  hostsState: UiState<List<OpenClawHost>>,
+  linkedFilesState: UiState<List<LinkedFile>>,
+  liveExpression: BotExpression,
+  pendingAttachments: List<LinkedFile>,
+  isBusy: Boolean,
+  onSelectBot: (String) -> Unit,
+  onBack: () -> Unit,
+  onAddBotClick: () -> Unit,
+  onEditBotClick: (CompanionBot) -> Unit,
+  onRenameBot: (CompanionBot, String) -> Unit,
+  onUpdateMission: (CompanionBot, String) -> Unit,
+  onDeleteBotClick: (String) -> Unit,
+  onSendMessage: (String, CompanionBot, OpenClawHost?) -> Unit,
+  onRetryMessage: (BotMessage, CompanionBot, OpenClawHost?) -> Unit,
+  onAttachDeviceFile: (String, String, String, Long) -> Unit,
+  onAddHostPathLink: (String, String) -> Unit,
+  onToggleAttachment: (LinkedFile) -> Unit,
+  onPreviewExpression: (BotExpression) -> Unit,
+  onOpenTakeover: () -> Unit,
+) {
+  val context = LocalContext.current
+  val haptic = LocalHapticFeedback.current
+  val clipboard = LocalClipboardManager.current
+  val bots = (botsState as? UiState.Success)?.data.orEmpty()
+  val activeBot = bots.firstOrNull { it.id == selectedBotId } ?: bots.firstOrNull()
+  val hosts = (hostsState as? UiState.Success)?.data.orEmpty()
+  val activeHost = hosts.firstOrNull()
+  val linkedFiles = (linkedFilesState as? UiState.Success)?.data.orEmpty()
+  val messages = (messagesState as? UiState.Success)?.data.orEmpty()
+
+  var minusMode by remember { mutableStateOf(false) }
+  var composerText by remember { mutableStateOf("") }
+  var showLinkDialog by remember { mutableStateOf(false) }
+  var showAttachSheet by remember { mutableStateOf(false) }
+  var botPendingDelete by remember { mutableStateOf<CompanionBot?>(null) }
+  var botPendingRename by remember { mutableStateOf<CompanionBot?>(null) }
+  var botPendingMissionEdit by remember { mutableStateOf<CompanionBot?>(null) }
+
+  // Subtle Grok-like vibration when a bot starts thinking or finishes replying
+  var hapticsBaselineReady by remember(selectedBotId) { mutableStateOf(false) }
+  var seenBotStatuses by remember(selectedBotId) { mutableStateOf<Map<String, MessageStatus>>(emptyMap()) }
+  LaunchedEffect(selectedBotId, messagesState) {
+    val loaded = (messagesState as? UiState.Success)?.data ?: return@LaunchedEffect
+    val currentBotStatuses = loaded
+      .filter { it.senderEnum == MessageSender.BOT }
+      .associate { it.id to it.statusEnum }
+
+    if (!hapticsBaselineReady) {
+      seenBotStatuses = currentBotStatuses
+      hapticsBaselineReady = true
+      return@LaunchedEffect
+    }
+
+    var shouldPulseReply = false
+    var shouldTickThinking = false
+    currentBotStatuses.forEach { (id, status) ->
+      val prevStatus = seenBotStatuses[id]
+      if (prevStatus == null) {
+        if (status == MessageStatus.COMPLETED || status == MessageStatus.WARNING || status == MessageStatus.FAILED) {
+          shouldPulseReply = true
+        } else if (status == MessageStatus.PARSING || status == MessageStatus.DISPATCHED) {
+          shouldTickThinking = true
+        }
+      } else if (prevStatus != status) {
+        if (status == MessageStatus.COMPLETED || status == MessageStatus.WARNING || status == MessageStatus.FAILED) {
+          shouldPulseReply = true
+        } else if (status == MessageStatus.DISPATCHED) {
+          shouldTickThinking = true
+        }
+      }
+    }
+
+    if (shouldPulseReply) {
+      ReplyHaptics.triggerReplyPulse(context, haptic)
+    } else if (shouldTickThinking) {
+      ReplyHaptics.triggerSoftTick(context, haptic)
+    }
+    seenBotStatuses = currentBotStatuses
+  }
+
+  val listState = rememberLazyListState()
+  LaunchedEffect(messages.size) {
+    if (messages.isNotEmpty()) {
+      listState.animateScrollToItem(messages.lastIndex)
+    }
+  }
+
+  val documentLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.OpenMultipleDocuments(),
+  ) { uris ->
+    uris.forEach { uri ->
+      val meta = resolveUriMetadata(context, uri)
+      onAttachDeviceFile(meta.name, uri.toString(), meta.mime, meta.size)
+    }
+  }
+
+  val photoLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.PickVisualMedia(),
+  ) { uri ->
+    if (uri != null) {
+      val meta = resolveUriMetadata(context, uri)
+      onAttachDeviceFile(meta.name, uri.toString(), meta.mime.ifBlank { "image/*" }, meta.size)
+    }
+  }
+
+  Column(
+    modifier = Modifier
+      .fillMaxSize()
+      .padding(horizontal = 12.dp),
+  ) {
+    // 1. Back + Bot Crew Strip (+ Add Bot / - Remove Bot)
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+      IconButton(
+        onClick = onBack,
+        modifier = Modifier
+          .size(48.dp)
+          .testTag("chat_back_home_button"),
+      ) {
+        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to chats")
+      }
+      Box(modifier = Modifier.weight(1f)) {
+        BotCrewBar(
+          bots = bots,
+          activeBotId = activeBot?.id.orEmpty(),
+          minusMode = minusMode,
+          onToggleMinusMode = { minusMode = !minusMode },
+          onSelectBot = onSelectBot,
+          onAddBot = onAddBotClick,
+          onRequestDeleteBot = { botPendingDelete = it },
+        )
+      }
+    }
+
+    Spacer(Modifier.height(6.dp))
+
+    // 2. Live Animated Bot Stage
+    if (activeBot != null) {
+      LiveBotStageCard(
+        bot = activeBot,
+        expression = liveExpression,
+        activeHost = activeHost,
+        isBusy = isBusy,
+        onCustomizeBot = { onEditBotClick(activeBot) },
+        onRequestRename = { botPendingRename = activeBot },
+        onRequestEditMission = { botPendingMissionEdit = activeBot },
+        onPreviewExpression = onPreviewExpression,
+        onOpenTakeover = onOpenTakeover,
+      )
+    } else if (botsState is UiState.Loading) {
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .height(130.dp),
+        contentAlignment = Alignment.Center,
+      ) {
+        CircularProgressIndicator()
+      }
+    } else {
+      EmptyBotCrewCard(onAddBotClick = onAddBotClick)
+    }
+
+    Spacer(Modifier.height(8.dp))
+
+    // 3. Conversation & Parsed OpenClaw Instructions Feed
+    Box(
+      modifier = Modifier
+        .weight(1f)
+        .fillMaxWidth(),
+    ) {
+      when (messagesState) {
+        is UiState.Loading -> {
+          Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+          }
+        }
+        is UiState.Error -> {
+          Surface(
+            color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
+            shape = MaterialTheme.shapes.medium,
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(8.dp),
+          ) {
+            Text(
+              text = messagesState.message,
+              color = MaterialTheme.colorScheme.error,
+              modifier = Modifier.padding(14.dp),
+            )
+          }
+        }
+        is UiState.Success -> {
+          if (messages.isEmpty()) {
+            EmptyChatPrompt(
+              botName = activeBot?.name ?: "your bot",
+              onSampleClick = { sample -> composerText = sample },
+            )
+          } else {
+            LazyColumn(
+              state = listState,
+              contentPadding = PaddingValues(vertical = 8.dp),
+              verticalArrangement = Arrangement.spacedBy(10.dp),
+              modifier = Modifier.fillMaxSize(),
+            ) {
+              items(messages, key = { it.id }) { msg ->
+                MessageBubbleItem(
+                  message = msg,
+                  bot = activeBot,
+                  onCopyInstruction = { text -> clipboard.setText(AnnotatedString(text)) },
+                  onRetry = {
+                    if (activeBot != null) onRetryMessage(msg, activeBot, activeHost)
+                  },
+                  onOpenTakeover = onOpenTakeover,
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Pending File & Path Chips
+    AnimatedVisibility(visible = pendingAttachments.isNotEmpty()) {
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .horizontalScroll(rememberScrollState())
+          .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
+        pendingAttachments.forEach { file ->
+          Surface(
+            shape = RoundedCornerShape(50),
+            color = MaterialTheme.colorScheme.secondaryContainer,
+          ) {
+            Row(
+              modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+              Icon(
+                imageVector = if (file.linkTypeEnum == FileLinkType.ANDROID_ATTACHMENT) {
+                  Icons.Rounded.AttachFile
+                } else {
+                  Icons.Rounded.Link
+                },
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+              )
+              Text(
+                text = file.displayName,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 140.dp),
+              )
+              IconButton(
+                onClick = { onToggleAttachment(file) },
+                modifier = Modifier.size(24.dp),
+              ) {
+                Icon(
+                  Icons.Rounded.Close,
+                  contentDescription = "Remove attachment",
+                  modifier = Modifier.size(14.dp),
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 5. Casual Message Composer
+    Surface(
+      shape = RoundedCornerShape(24.dp),
+      color = MaterialTheme.colorScheme.surface,
+      tonalElevation = 2.dp,
+      border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(bottom = 10.dp),
+    ) {
+      Row(
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.Bottom,
+      ) {
+        IconButton(
+          onClick = { showAttachSheet = true },
+          modifier = Modifier
+            .size(48.dp)
+            .testTag("attach_menu_button"),
+        ) {
+          Icon(
+            Icons.Rounded.AttachFile,
+            contentDescription = "Attach or link files",
+            tint = MaterialTheme.colorScheme.primary,
+          )
+        }
+
+        OutlinedTextField(
+          value = composerText,
+          onValueChange = { composerText = it },
+          placeholder = {
+            Text(
+              text = "Chat casually with ${activeBot?.name ?: "bot"}...",
+              style = MaterialTheme.typography.bodyMedium,
+            )
+          },
+          maxLines = 4,
+          shape = RoundedCornerShape(18.dp),
+          modifier = Modifier
+            .weight(1f)
+            .testTag("casual_chat_input"),
+        )
+
+        Spacer(Modifier.width(6.dp))
+
+        FilledIconButton(
+          onClick = {
+            if (activeBot != null && composerText.isNotBlank() && !isBusy) {
+              val textToSend = composerText
+              composerText = ""
+              onSendMessage(textToSend, activeBot, activeHost)
+            }
+          },
+          enabled = activeBot != null && composerText.isNotBlank() && !isBusy,
+          colors = IconButtonDefaults.filledIconButtonColors(
+            containerColor = MaterialTheme.colorScheme.primary,
+          ),
+          modifier = Modifier
+            .size(48.dp)
+            .testTag("send_chat_button"),
+        ) {
+          if (isBusy) {
+            CircularProgressIndicator(
+              modifier = Modifier.size(20.dp),
+              color = MaterialTheme.colorScheme.onPrimary,
+              strokeWidth = 2.dp,
+            )
+          } else {
+            Icon(
+              Icons.AutoMirrored.Rounded.Send,
+              contentDescription = "Send to bot",
+            )
+          }
+        }
+      }
+    }
+  }
+
+  if (showAttachSheet) {
+    AlertDialog(
+      onDismissRequest = { showAttachSheet = false },
+      title = { Text("Attach or Link Files") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          OutlinedButton(
+            onClick = {
+              showAttachSheet = false
+              documentLauncher.launch(arrayOf("*/*"))
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(48.dp)
+              .testTag("pick_device_file_button"),
+          ) {
+            Icon(Icons.Rounded.FolderOpen, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Attach Device File")
+          }
+          OutlinedButton(
+            onClick = {
+              showAttachSheet = false
+              photoLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(48.dp)
+              .testTag("pick_photo_button"),
+          ) {
+            Icon(Icons.Rounded.Image, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Attach Screenshot / Photo")
+          }
+          OutlinedButton(
+            onClick = {
+              showAttachSheet = false
+              showLinkDialog = true
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(48.dp)
+              .testTag("link_host_path_button"),
+          ) {
+            Icon(Icons.Rounded.Link, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Link Host PC Path or URL")
+          }
+          if (linkedFiles.isNotEmpty()) {
+            Text(
+              text = "Recent Vault Files (tap to attach):",
+              style = MaterialTheme.typography.labelMedium,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            linkedFiles.take(4).forEach { file ->
+              val selected = pendingAttachments.any { it.uriOrPath == file.uriOrPath }
+              Surface(
+                onClick = { onToggleAttachment(file) },
+                shape = MaterialTheme.shapes.small,
+                color = if (selected) {
+                  MaterialTheme.colorScheme.secondaryContainer
+                } else {
+                  MaterialTheme.colorScheme.surfaceVariant
+                },
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                Text(
+                  text = "${if (selected) "✓ " else ""}${file.displayName}",
+                  style = MaterialTheme.typography.bodySmall,
+                  modifier = Modifier.padding(10.dp),
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+            }
+          }
+        }
+      },
+      confirmButton = {
+        TextButton(onClick = { showAttachSheet = false }) { Text("Done") }
+      },
+    )
+  }
+
+  if (showLinkDialog) {
+    var pathLabel by remember { mutableStateOf("") }
+    var pathValue by remember { mutableStateOf("") }
+    AlertDialog(
+      onDismissRequest = { showLinkDialog = false },
+      title = { Text("Link Host File or URL") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          OutlinedTextField(
+            value = pathLabel,
+            onValueChange = { pathLabel = it },
+            label = { Text("Friendly Name") },
+            placeholder = { Text("e.g., Invoices Folder") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+          )
+          OutlinedTextField(
+            value = pathValue,
+            onValueChange = { pathValue = it },
+            label = { Text("Host Path or URL") },
+            placeholder = { Text("e.g., C:\\Users\\Me\\Downloads or https://...") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+          )
+        }
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            if (pathValue.isNotBlank()) {
+              onAddHostPathLink(
+                pathLabel.ifBlank { pathValue.substringAfterLast('/').substringAfterLast('\\').ifBlank { "Linked File" } },
+                pathValue.trim(),
+              )
+              showLinkDialog = false
+            }
+          },
+        ) {
+          Text("Link")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showLinkDialog = false }) { Text("Cancel") }
+      },
+    )
+  }
+
+  botPendingDelete?.let { target ->
+    AlertDialog(
+      onDismissRequest = { botPendingDelete = null },
+      title = { Text("Remove ${target.name}?") },
+      text = { Text("This will remove ${target.name} and its saved message thread from your crew.") },
+      confirmButton = {
+        Button(
+          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+          onClick = {
+            onDeleteBotClick(target.id)
+            botPendingDelete = null
+          },
+        ) {
+          Text("Remove Bot")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { botPendingDelete = null }) { Text("Cancel") }
+      },
+    )
+  }
+
+  botPendingRename?.let { target ->
+    var draftName by remember(target.id) { mutableStateOf(target.name) }
+    AlertDialog(
+      onDismissRequest = { botPendingRename = null },
+      title = { Text("Rename Character") },
+      text = {
+        OutlinedTextField(
+          value = draftName,
+          onValueChange = { draftName = it.take(40) },
+          label = { Text("Character Name") },
+          singleLine = true,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("rename_bot_dialog_input"),
+        )
+      },
+      confirmButton = {
+        Button(
+          enabled = draftName.trim().isNotEmpty(),
+          onClick = {
+            onRenameBot(target, draftName)
+            botPendingRename = null
+          },
+          modifier = Modifier.testTag("confirm_rename_bot_button"),
+        ) {
+          Text("Save Name")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { botPendingRename = null }) { Text("Cancel") }
+      },
+    )
+  }
+
+  botPendingMissionEdit?.let { target ->
+    var draftMission by remember(target.id) { mutableStateOf(target.displayMission) }
+    AlertDialog(
+      onDismissRequest = { botPendingMissionEdit = null },
+      title = { Text("${target.name}'s Mission") },
+      text = {
+        OutlinedTextField(
+          value = draftMission,
+          onValueChange = { draftMission = it.take(160) },
+          label = { Text("Mission") },
+          placeholder = { Text("e.g., I help translate documents!") },
+          minLines = 2,
+          maxLines = 3,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("chat_edit_mission_input"),
+        )
+      },
+      confirmButton = {
+        Button(
+          enabled = draftMission.trim().isNotEmpty(),
+          onClick = {
+            onUpdateMission(target, draftMission)
+            botPendingMissionEdit = null
+          },
+          modifier = Modifier.testTag("confirm_edit_mission_button"),
+        ) {
+          Text("Save Mission")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { botPendingMissionEdit = null }) { Text("Cancel") }
+      },
+    )
+  }
+}
+
+@Composable
+private fun BotCrewBar(
+  bots: List<CompanionBot>,
+  activeBotId: String,
+  minusMode: Boolean,
+  onToggleMinusMode: () -> Unit,
+  onSelectBot: (String) -> Unit,
+  onAddBot: () -> Unit,
+  onRequestDeleteBot: (CompanionBot) -> Unit,
+) {
+  LazyRow(
+    contentPadding = PaddingValues(vertical = 6.dp),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    items(bots, key = { it.id }) { bot ->
+      val selected = bot.id == activeBotId
+      Surface(
+        onClick = {
+          if (minusMode) onRequestDeleteBot(bot) else onSelectBot(bot.id)
+        },
+        shape = RoundedCornerShape(18.dp),
+        color = when {
+          minusMode -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
+          selected -> MaterialTheme.colorScheme.primaryContainer
+          else -> MaterialTheme.colorScheme.surface
+        },
+        border = BorderStroke(
+          width = if (selected) 2.dp else 1.dp,
+          color = when {
+            minusMode -> MaterialTheme.colorScheme.error
+            selected -> MaterialTheme.colorScheme.primary
+            else -> MaterialTheme.colorScheme.outlineVariant
+          },
+        ),
+        modifier = Modifier.testTag("crew_bot_chip_${bot.name}"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          BotVectorAvatar(
+            bot = bot,
+            expression = if (selected) BotExpression.HAPPY else BotExpression.HAPPY,
+            size = 34.dp,
+            animate = false,
+          )
+          Text(
+            text = bot.name,
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1,
+          )
+          if (minusMode) {
+            Icon(
+              Icons.Rounded.DeleteOutline,
+              contentDescription = "Remove ${bot.name}",
+              tint = MaterialTheme.colorScheme.error,
+              modifier = Modifier.size(16.dp),
+            )
+          }
+        }
+      }
+    }
+
+    item {
+      FilledIconButton(
+        onClick = onAddBot,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+        modifier = Modifier
+          .size(48.dp)
+          .testTag("add_bot_button"),
+      ) {
+        Icon(Icons.Rounded.Add, contentDescription = "Add new bot")
+      }
+    }
+
+    item {
+      FilledIconButton(
+        onClick = onToggleMinusMode,
+        colors = IconButtonDefaults.filledIconButtonColors(
+          containerColor = if (minusMode) {
+            MaterialTheme.colorScheme.error
+          } else {
+            MaterialTheme.colorScheme.surfaceVariant
+          },
+          contentColor = if (minusMode) {
+            MaterialTheme.colorScheme.onError
+          } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+          },
+        ),
+        modifier = Modifier
+          .size(48.dp)
+          .testTag("minus_bot_button"),
+      ) {
+        Icon(Icons.Rounded.Remove, contentDescription = "Toggle remove bot mode")
+      }
+    }
+  }
+}
+
+@Composable
+private fun LiveBotStageCard(
+  bot: CompanionBot,
+  expression: BotExpression,
+  activeHost: OpenClawHost?,
+  isBusy: Boolean,
+  onCustomizeBot: () -> Unit,
+  onRequestRename: () -> Unit,
+  onRequestEditMission: () -> Unit,
+  onPreviewExpression: (BotExpression) -> Unit,
+  onOpenTakeover: () -> Unit,
+) {
+  Card(
+    shape = MaterialTheme.shapes.large,
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Column(modifier = Modifier.padding(14.dp)) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        BotVectorAvatar(
+          bot = bot,
+          expression = expression,
+          size = 88.dp,
+          animate = true,
+          modifier = Modifier.testTag("live_bot_avatar"),
+        )
+
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(4.dp),
+              modifier = Modifier
+                .weight(1f, fill = false)
+                .defaultMinSize(minHeight = 48.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(onClick = onRequestRename)
+                .padding(horizontal = 4.dp)
+                .testTag("quick_rename_bot_button"),
+            ) {
+              Text(
+                text = bot.name,
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+              Icon(
+                imageVector = Icons.Rounded.DriveFileRenameOutline,
+                contentDescription = "Rename ${bot.name}",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+              )
+            }
+            Surface(
+              shape = RoundedCornerShape(50),
+              color = MaterialTheme.colorScheme.tertiaryContainer,
+            ) {
+              Text(
+                text = expression.label,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+              )
+            }
+          }
+          Surface(
+            onClick = onRequestEditMission,
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+            modifier = Modifier.testTag("edit_mission_button"),
+          ) {
+            Text(
+              text = if (isBusy) expression.bubbleHint else "Mission: ${bot.displayMission}",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSecondaryContainer,
+              maxLines = 2,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+          }
+          Text(
+            text = "OpenClaw: ${activeHost?.label ?: "No Host"} • agent:${bot.openClawAgentId}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.secondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          IconButton(
+            onClick = onCustomizeBot,
+            modifier = Modifier
+              .size(48.dp)
+              .clip(CircleShape)
+              .background(MaterialTheme.colorScheme.primaryContainer)
+              .testTag("edit_bot_appearance_button"),
+          ) {
+            Icon(
+              Icons.Rounded.Edit,
+              contentDescription = "Customize bot appearance",
+              tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+          }
+        }
+      }
+
+      Spacer(Modifier.height(8.dp))
+
+      Row(
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Surface(
+          onClick = onOpenTakeover,
+          shape = RoundedCornerShape(50),
+          color = MaterialTheme.colorScheme.primary,
+          modifier = Modifier.testTag("stage_takeover_button"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+          ) {
+            Icon(
+              Icons.Rounded.Computer,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.onPrimary,
+              modifier = Modifier.size(15.dp),
+            )
+            Text(
+              text = "Take Over PC",
+              style = MaterialTheme.typography.labelMedium,
+              color = MaterialTheme.colorScheme.onPrimary,
+            )
+          }
+        }
+
+        listOf(
+          BotExpression.THINKING,
+          BotExpression.UH_HUH,
+          BotExpression.WORRIED,
+          BotExpression.SORRY,
+          BotExpression.HAPPY,
+        ).forEach { expr ->
+          Surface(
+            onClick = { onPreviewExpression(expr) },
+            shape = RoundedCornerShape(50),
+            color = if (expression == expr) {
+              MaterialTheme.colorScheme.secondaryContainer
+            } else {
+              MaterialTheme.colorScheme.surfaceVariant
+            },
+          ) {
+            Text(
+              text = expr.label,
+              style = MaterialTheme.typography.labelMedium,
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun MessageBubbleItem(
+  message: BotMessage,
+  bot: CompanionBot?,
+  onCopyInstruction: (String) -> Unit,
+  onRetry: () -> Unit,
+  onOpenTakeover: () -> Unit,
+) {
+  val isUser = message.senderEnum == MessageSender.USER
+  var expanded by remember(message.id) { mutableStateOf(true) }
+
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+  ) {
+    Surface(
+      shape = RoundedCornerShape(
+        topStart = 20.dp,
+        topEnd = 20.dp,
+        bottomStart = if (isUser) 20.dp else 6.dp,
+        bottomEnd = if (isUser) 6.dp else 20.dp,
+      ),
+      color = if (isUser) {
+        MaterialTheme.colorScheme.primaryContainer
+      } else {
+        MaterialTheme.colorScheme.surface
+      },
+      tonalElevation = if (isUser) 0.dp else 2.dp,
+      border = if (isUser) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+      modifier = Modifier.widthIn(max = 520.dp),
+    ) {
+      Column(
+        modifier = Modifier.padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        if (!isUser && bot != null) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            BotVectorAvatar(
+              bot = bot,
+              expression = message.expressionEnum,
+              size = 30.dp,
+              animate = false,
+            )
+            Text(
+              text = "${bot.name} • ${message.expressionEnum.label}",
+              style = MaterialTheme.typography.labelMedium,
+              color = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.weight(1f))
+            Surface(
+              shape = RoundedCornerShape(50),
+              color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+              Text(
+                text = message.statusEnum.label,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+              )
+            }
+          }
+        }
+
+        Text(
+          text = message.rawText,
+          style = MaterialTheme.typography.bodyMedium,
+        )
+
+        if (message.attachedFiles.isNotEmpty() || message.linkedPaths.isNotEmpty()) {
+          Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            message.attachedFiles.forEach { f ->
+              AssistChip(
+                onClick = {},
+                label = { Text(f, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                leadingIcon = { Icon(Icons.Rounded.AttachFile, contentDescription = null, Modifier.size(14.dp)) },
+              )
+            }
+            message.linkedPaths.forEach { p ->
+              AssistChip(
+                onClick = {},
+                label = { Text(p, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                leadingIcon = { Icon(Icons.Rounded.Link, contentDescription = null, Modifier.size(14.dp)) },
+              )
+            }
+          }
+        }
+
+        if (!message.parsedInstruction.isNullOrBlank()) {
+          Surface(
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .clickable { expanded = !expanded },
+              ) {
+                Icon(
+                  Icons.Rounded.AutoAwesome,
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.secondary,
+                  modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                  text = message.instructionGoal ?: "Parsed OpenClaw Instruction",
+                  style = MaterialTheme.typography.titleSmall,
+                  modifier = Modifier.weight(1f),
+                )
+                Icon(
+                  if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                  contentDescription = "Toggle instruction details",
+                )
+              }
+
+              AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                  Text(
+                    text = message.parsedInstruction,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                  )
+                  message.instructionSteps.forEachIndexed { idx, step ->
+                    Text(
+                      text = "${idx + 1}. $step",
+                      style = MaterialTheme.typography.bodySmall,
+                      fontWeight = FontWeight.Medium,
+                    )
+                  }
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { onCopyInstruction(message.parsedInstruction) }) {
+                      Icon(Icons.Rounded.ContentCopy, contentDescription = null, Modifier.size(16.dp))
+                      Spacer(Modifier.width(4.dp))
+                      Text("Copy")
+                    }
+                    if (message.statusEnum == MessageStatus.WARNING || message.statusEnum == MessageStatus.FAILED) {
+                      TextButton(onClick = onRetry) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Retry Host")
+                      }
+                    }
+                    if (message.takeoverSuggested) {
+                      TextButton(onClick = onOpenTakeover) {
+                        Icon(Icons.Rounded.Computer, contentDescription = null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Take Over PC")
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun EmptyBotCrewCard(onAddBotClick: () -> Unit) {
+  Card(
+    shape = MaterialTheme.shapes.large,
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Column(
+      modifier = Modifier
+        .padding(20.dp)
+        .fillMaxWidth(),
+      horizontalAlignment = Alignment.CenterHorizontally,
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Text("No bots in your crew yet!", style = MaterialTheme.typography.titleMedium)
+      Button(onClick = onAddBotClick) {
+        Icon(Icons.Rounded.Add, contentDescription = null)
+        Spacer(Modifier.width(6.dp))
+        Text("Create First Bot")
+      }
+    }
+  }
+}
+
+@Composable
+private fun EmptyChatPrompt(
+  botName: String,
+  onSampleClick: (String) -> Unit,
+) {
+  Column(
+    modifier = Modifier
+      .fillMaxSize()
+      .padding(16.dp),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.Center,
+  ) {
+    Text(
+      text = "Say anything casually to $botName!",
+      style = MaterialTheme.typography.titleMedium,
+    )
+    Spacer(Modifier.height(6.dp))
+    Text(
+      text = "$botName translates casual requests into clear step-by-step instructions for OpenClaw.",
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(14.dp))
+    listOf(
+      "Hey buddy, check my Downloads folder and tidy up last week's PDFs into Invoices",
+      "Can you open my project repo on the PC, run the build, and tell me if anything broke?",
+      "Help me log into my dashboard on the host PC—I'll take over if there's 2FA",
+    ).forEach { sample ->
+      Surface(
+        onClick = { onSampleClick(sample) },
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+          .fillMaxWidth()
+          .padding(vertical = 4.dp),
+      ) {
+        Text(
+          text = "\"$sample\"",
+          style = MaterialTheme.typography.bodySmall,
+          modifier = Modifier.padding(12.dp),
+        )
+      }
+    }
+  }
+}
+
+private data class ResolvedFileMeta(
+  val name: String,
+  val mime: String,
+  val size: Long,
+)
+
+private fun resolveUriMetadata(context: Context, uri: Uri): ResolvedFileMeta {
+  var name = uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
+  var size = 0L
+  val mime = context.contentResolver.getType(uri).orEmpty()
+  try {
+    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (nameIdx >= 0) name = cursor.getString(nameIdx) ?: name
+        if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
+      }
+    }
+  } catch (_: Exception) {
+    // Fallback to URI segment
+  }
+  return ResolvedFileMeta(name = name, mime = mime, size = size.coerceAtLeast(0L))
+}

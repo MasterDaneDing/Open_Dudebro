@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-clawpal-cb188399-f212-4558-823b-57fe6369f9c5</string>
+    <string name="recaptcha_site_key" translatable="false">6Ld1UScuAAAAANp_XfKF-X5pytnsmdkqiuXZdP8h</string>
+</resources>

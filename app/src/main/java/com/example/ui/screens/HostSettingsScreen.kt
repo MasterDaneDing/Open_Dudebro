@@ -1,0 +1,320 @@
+package com.example.ui.screens
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DesktopWindows
+import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.WifiTethering
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import com.example.data.openclaw.OpenClawPingResult
+import com.example.model.AiRoutingMode
+import com.example.model.HostStatus
+import com.example.model.OpenClawHost
+import com.example.viewmodel.UiState
+
+@Composable
+fun HostSettingsScreen(
+  hostsState: UiState<List<OpenClawHost>>,
+  currentUserId: String,
+  userEmail: String?,
+  pingResult: OpenClawPingResult?,
+  onBack: () -> Unit = {},
+  onSaveHost: (OpenClawHost) -> Unit,
+  onDeleteHost: (String) -> Unit,
+  onPingHost: (OpenClawHost) -> Unit,
+  onSignOut: () -> Unit,
+) {
+  val hosts = (hostsState as? UiState.Success)?.data.orEmpty()
+  val primaryHost = hosts.firstOrNull()
+
+  var editingId by remember(primaryHost?.id) { mutableStateOf(primaryHost?.id.orEmpty()) }
+  var label by remember(primaryHost?.id) { mutableStateOf(primaryHost?.label ?: "My OpenClaw PC") }
+  var baseUrl by remember(primaryHost?.id) { mutableStateOf(primaryHost?.baseUrl ?: "http://192.168.1.50:18789") }
+  var controlUrl by remember(primaryHost?.id) { mutableStateOf(primaryHost?.controlUrl ?: "http://192.168.1.50:18789/control") }
+  var gatewayToken by remember(primaryHost?.id) { mutableStateOf(primaryHost?.gatewayToken.orEmpty()) }
+  var aiMode by remember(primaryHost?.id) { mutableStateOf(primaryHost?.aiModeEnum ?: AiRoutingMode.HYBRID_GEMINI_OPENCLAW) }
+  var autoParseCasual by remember(primaryHost?.id) { mutableStateOf(primaryHost?.autoParseCasual ?: true) }
+
+  Column(
+    modifier = Modifier
+      .fillMaxSize()
+      .verticalScroll(rememberScrollState())
+      .padding(16.dp),
+    verticalArrangement = Arrangement.spacedBy(14.dp),
+  ) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      IconButton(
+        onClick = onBack,
+        modifier = Modifier
+          .size(48.dp)
+          .testTag("host_back_to_chats_button"),
+      ) {
+        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back to Chats")
+      }
+      Text("OpenClaw Host & Settings", style = MaterialTheme.typography.headlineSmall)
+    }
+
+    if (hosts.isNotEmpty()) {
+      Text("Saved Host Computers", style = MaterialTheme.typography.titleMedium)
+      hosts.forEach { host ->
+        val selected = host.id == editingId
+        Surface(
+          onClick = {
+            editingId = host.id
+            label = host.label
+            baseUrl = host.baseUrl
+            controlUrl = host.controlUrl
+            gatewayToken = host.gatewayToken
+            aiMode = host.aiModeEnum
+            autoParseCasual = host.autoParseCasual
+          },
+          shape = MaterialTheme.shapes.medium,
+          color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+          border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Icon(Icons.Rounded.DesktopWindows, contentDescription = null)
+            Column(modifier = Modifier.weight(1f)) {
+              Text(host.label, style = MaterialTheme.typography.titleSmall)
+              Text(host.baseUrl, style = MaterialTheme.typography.labelSmall)
+            }
+            Surface(
+              shape = RoundedCornerShape(50),
+              color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+              Text(
+                text = host.lastStatusEnum.label,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+              )
+            }
+            if (hosts.size > 1) {
+              IconButton(
+                onClick = { onDeleteHost(host.id) },
+                modifier = Modifier.size(48.dp),
+              ) {
+                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete host")
+              }
+            }
+          }
+        }
+      }
+      OutlinedButton(
+        onClick = {
+          editingId = ""
+          label = "New OpenClaw PC"
+          baseUrl = "http://192.168.1.100:18789"
+          controlUrl = "http://192.168.1.100:18789/control"
+          gatewayToken = ""
+          aiMode = AiRoutingMode.HYBRID_GEMINI_OPENCLAW
+          autoParseCasual = true
+        },
+      ) {
+        Icon(Icons.Rounded.Add, contentDescription = null, Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text("Add Another Host")
+      }
+    }
+
+    Card(
+      shape = MaterialTheme.shapes.large,
+      colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+      modifier = Modifier.fillMaxWidth(),
+    ) {
+      Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+          value = label,
+          onValueChange = { label = it.take(50) },
+          label = { Text("Host Name") },
+          singleLine = true,
+          modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+          value = baseUrl,
+          onValueChange = { baseUrl = it.take(300) },
+          label = { Text("OpenClaw Gateway URL") },
+          placeholder = { Text("http://192.168.1.50:18789 or https://...") },
+          singleLine = true,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("host_url_input"),
+        )
+        OutlinedTextField(
+          value = controlUrl,
+          onValueChange = { controlUrl = it.take(300) },
+          label = { Text("Take Over Computer Control URL (Web/noVNC)") },
+          singleLine = true,
+          modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+          value = gatewayToken,
+          onValueChange = { gatewayToken = it.take(256) },
+          label = { Text("Gateway Bearer Token (optional)") },
+          visualTransformation = PasswordVisualTransformation(),
+          singleLine = true,
+          modifier = Modifier.fillMaxWidth(),
+        )
+
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.SpaceBetween,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(modifier = Modifier.weight(1f)) {
+            Text("Auto-Parse Casual Chat", style = MaterialTheme.typography.titleSmall)
+            Text(
+              text = "Rewrite casual prompts into structured OpenClaw instructions.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+          Switch(
+            checked = autoParseCasual,
+            onCheckedChange = { autoParseCasual = it },
+          )
+        }
+
+        Text("AI & Instruction Routing", style = MaterialTheme.typography.titleSmall)
+        AiRoutingMode.entries.forEach { mode ->
+          Surface(
+            onClick = { aiMode = mode },
+            shape = MaterialTheme.shapes.small,
+            color = if (aiMode == mode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Row(
+              modifier = Modifier.padding(10.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              RadioButton(selected = aiMode == mode, onClick = { aiMode = mode })
+              Column(modifier = Modifier.weight(1f)) {
+                Text(mode.displayName, style = MaterialTheme.typography.labelLarge)
+                Text(mode.description, style = MaterialTheme.typography.bodySmall)
+              }
+            }
+          }
+        }
+
+        if (pingResult != null) {
+          Text(
+            text = pingResult.detail,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (pingResult.reachable) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+          )
+        }
+
+        val draftHost = OpenClawHost(
+          id = editingId,
+          userId = currentUserId,
+          label = label,
+          baseUrl = baseUrl,
+          controlUrl = controlUrl,
+          gatewayToken = gatewayToken,
+          aiMode = aiMode.name,
+          autoParseCasual = autoParseCasual,
+          lastStatus = primaryHost?.lastStatus ?: HostStatus.UNVERIFIED.name,
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+          OutlinedButton(
+            onClick = { onPingHost(draftHost) },
+            modifier = Modifier
+              .height(48.dp)
+              .testTag("test_host_connection_button"),
+          ) {
+            Icon(Icons.Rounded.WifiTethering, contentDescription = null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Test Ping")
+          }
+          Button(
+            onClick = { onSaveHost(draftHost) },
+            modifier = Modifier
+              .weight(1f)
+              .height(48.dp)
+              .testTag("save_host_button"),
+          ) {
+            Icon(Icons.Rounded.Save, contentDescription = null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Save Host")
+          }
+        }
+      }
+    }
+
+    Card(
+      shape = MaterialTheme.shapes.large,
+      colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+      modifier = Modifier.fillMaxWidth(),
+    ) {
+      Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Account & Cross-Device Sync", style = MaterialTheme.typography.titleMedium)
+        Text(
+          text = "Signed in as ${userEmail ?: "Google User"}. Your bots, SVG customizations, linked files, and host profiles sync via Firestore—ready for a future Windows PC ClawPal companion.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(
+          onClick = onSignOut,
+          colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+          modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .testTag("sign_out_button"),
+        ) {
+          Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null)
+          Spacer(Modifier.width(8.dp))
+          Text("Sign Out")
+        }
+      }
+    }
+
+    Spacer(Modifier.height(20.dp))
+  }
+}
