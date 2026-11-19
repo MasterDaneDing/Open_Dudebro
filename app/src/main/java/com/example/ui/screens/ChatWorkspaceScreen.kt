@@ -478,8 +478,10 @@ fun ChatWorkspaceScreen(
           onValueChange = { composerText = it },
           placeholder = {
             Text(
-              text = "Chat casually with ${activeBot?.name ?: "bot"}...",
+              text = "Message ${activeBot?.name ?: "bot"}...",
               style = MaterialTheme.typography.bodyMedium,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
             )
           },
           maxLines = 4,
@@ -530,14 +532,16 @@ fun ChatWorkspaceScreen(
       title = { Text("Attach or Link Files") },
       text = {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          val attachBtnPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
           OutlinedButton(
             onClick = {
               showAttachSheet = false
               documentLauncher.launch(arrayOf("*/*"))
             },
+            contentPadding = attachBtnPadding,
             modifier = Modifier
               .fillMaxWidth()
-              .height(48.dp)
+              .defaultMinSize(minHeight = 48.dp)
               .testTag("pick_device_file_button"),
           ) {
             Icon(Icons.Rounded.FolderOpen, contentDescription = null)
@@ -549,9 +553,10 @@ fun ChatWorkspaceScreen(
               showAttachSheet = false
               photoLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             },
+            contentPadding = attachBtnPadding,
             modifier = Modifier
               .fillMaxWidth()
-              .height(48.dp)
+              .defaultMinSize(minHeight = 48.dp)
               .testTag("pick_photo_button"),
           ) {
             Icon(Icons.Rounded.Image, contentDescription = null)
@@ -563,9 +568,10 @@ fun ChatWorkspaceScreen(
               showAttachSheet = false
               showLinkDialog = true
             },
+            contentPadding = attachBtnPadding,
             modifier = Modifier
               .fillMaxWidth()
-              .height(48.dp)
+              .defaultMinSize(minHeight = 48.dp)
               .testTag("link_host_path_button"),
           ) {
             Icon(Icons.Rounded.Link, contentDescription = null)
@@ -827,28 +833,30 @@ fun ChatWorkspaceScreen(
                 showBotDetailsDialog = false
                 botPendingRename = activeBot
               },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
               modifier = Modifier
                 .weight(1f)
-                .height(48.dp)
+                .defaultMinSize(minHeight = 48.dp)
                 .testTag("quick_rename_bot_button"),
             ) {
               Icon(Icons.Rounded.DriveFileRenameOutline, contentDescription = null, modifier = Modifier.size(16.dp))
               Spacer(Modifier.width(4.dp))
-              Text("Rename")
+              Text("Rename", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
             OutlinedButton(
               onClick = {
                 showBotDetailsDialog = false
                 botPendingMissionEdit = activeBot
               },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
               modifier = Modifier
                 .weight(1f)
-                .height(48.dp)
+                .defaultMinSize(minHeight = 48.dp)
                 .testTag("edit_mission_button"),
             ) {
               Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
               Spacer(Modifier.width(4.dp))
-              Text("Mission")
+              Text("Mission", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
           }
 
@@ -857,9 +865,10 @@ fun ChatWorkspaceScreen(
               showBotDetailsDialog = false
               onEditBotClick(activeBot)
             },
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             modifier = Modifier
               .fillMaxWidth()
-              .height(48.dp)
+              .defaultMinSize(minHeight = 48.dp)
               .testTag("edit_bot_appearance_button"),
           ) {
             Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))

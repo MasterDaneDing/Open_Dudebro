@@ -326,7 +326,9 @@ private fun AuthenticatedWorkspace(
   val primaryHost = hosts.firstOrNull()
   val activeBot = bots.firstOrNull { it.id == selectedBotId } ?: bots.firstOrNull()
   val isHomeRoute = currentRoute == ROUTE_HOME
-  val isChatRoute = currentRoute == ROUTE_CHAT || currentRoute.startsWith("room/")
+  val isTakeoverRoute = currentRoute == ROUTE_TAKEOVER
+  val isNeonPinkRoute = currentRoute == ROUTE_CHAT || currentRoute.startsWith("room/") || isTakeoverRoute
+  val useNeonChrome = isHomeRoute || isTakeoverRoute
   val showNavChrome = currentRoute in setOf(ROUTE_HOME, ROUTE_TAKEOVER, ROUTE_FILES, ROUTE_SETTINGS)
 
   val navigateToTopTab: (String) -> Unit = { targetRoute ->
@@ -357,7 +359,7 @@ private fun AuthenticatedWorkspace(
     modifier = Modifier
       .fillMaxSize()
       .then(
-        if (isChatRoute) {
+        if (isNeonPinkRoute) {
           Modifier
             .background(
               Brush.verticalGradient(
@@ -387,8 +389,8 @@ private fun AuthenticatedWorkspace(
 
     Scaffold(
       containerColor = when {
+        isNeonPinkRoute -> Color.Transparent
         isHomeRoute -> Color(0xFF190629)
-        isChatRoute -> Color.Transparent
         else -> MaterialTheme.colorScheme.background
       },
       contentWindowInsets = WindowInsets.safeDrawing,
@@ -397,7 +399,7 @@ private fun AuthenticatedWorkspace(
         if (showNavChrome && !useRail) {
           NavigationBar(
             windowInsets = WindowInsets.navigationBars,
-            containerColor = if (isHomeRoute) Color(0xFF280842) else MaterialTheme.colorScheme.surface,
+            containerColor = if (useNeonChrome) Color(0xFF280842) else MaterialTheme.colorScheme.surface,
           ) {
             topTabs.forEach { tab ->
               val selected = currentRoute == tab.route
@@ -411,7 +413,7 @@ private fun AuthenticatedWorkspace(
                   )
                 },
                 label = { Text(tab.label) },
-                colors = if (isHomeRoute) {
+                colors = if (useNeonChrome) {
                   NavigationBarItemDefaults.colors(
                     selectedIconColor = Color.White,
                     selectedTextColor = Color(0xFFFFB8E8),
@@ -436,7 +438,7 @@ private fun AuthenticatedWorkspace(
         if (showNavChrome && useRail) {
           NavigationRail(
             modifier = Modifier.fillMaxHeight(),
-            containerColor = if (isHomeRoute) Color(0xFF280842) else MaterialTheme.colorScheme.surface,
+            containerColor = if (useNeonChrome) Color(0xFF280842) else MaterialTheme.colorScheme.surface,
           ) {
             topTabs.forEach { tab ->
               val selected = currentRoute == tab.route

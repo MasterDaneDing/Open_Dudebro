@@ -6,11 +6,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.PanTool
 import androidx.compose.material.icons.rounded.Pause
@@ -48,8 +51,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,6 +92,25 @@ fun ComputerTakeoverScreen(
   Column(
     modifier = Modifier
       .fillMaxSize()
+      .background(
+        Brush.verticalGradient(
+          colors = listOf(
+            Color(0xFFFF1A8C),
+            Color(0xFFFF3DA8),
+            Color(0xFFE6007A),
+          )
+        )
+      )
+      .background(
+        Brush.radialGradient(
+          colors = listOf(
+            Color(0x55FF9CE6),
+            Color.Transparent,
+          ),
+          center = Offset(540f, 380f),
+          radius = 850f,
+        )
+      )
       .verticalScroll(rememberScrollState())
       .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -96,16 +123,29 @@ fun ComputerTakeoverScreen(
         BotVectorAvatar(
           bot = activeBot,
           expression = if (takeoverActive) BotExpression.ALERT else BotExpression.WORKING,
-          size = 64.dp,
+          size = 76.dp,
           animate = true,
         )
       }
       Column(modifier = Modifier.weight(1f)) {
-        Text("Take Over Host PC", style = MaterialTheme.typography.headlineSmall)
+        Text(
+          text = "Take Over Host PC",
+          style = MaterialTheme.typography.headlineSmall.copy(
+            shadow = Shadow(
+              color = Color(0x66220018),
+              offset = Offset(0f, 3f),
+              blurRadius = 6f,
+            )
+          ),
+          color = Color.White,
+          fontWeight = FontWeight.ExtraBold,
+        )
         Text(
           text = activeHost?.let { "${it.label} (${it.baseUrl})" } ?: "No OpenClaw host configured",
           style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          color = Color(0xFFFFE5F5),
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
         )
       }
     }
@@ -120,46 +160,58 @@ fun ComputerTakeoverScreen(
           MaterialTheme.colorScheme.surface
         },
       ),
-      elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+      border = BorderStroke(1.dp, Color(0x55FF9CE6)),
+      elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
       modifier = Modifier.fillMaxWidth(),
     ) {
       Column(
         modifier = Modifier.padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
       ) {
-        Row(
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.SpaceBetween,
-          modifier = Modifier.fillMaxWidth(),
+        Surface(
+          shape = RoundedCornerShape(50),
+          color = when (activeHost?.lastStatusEnum) {
+            HostStatus.ONLINE -> MaterialTheme.colorScheme.secondaryContainer
+            HostStatus.OFFLINE -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
+            else -> MaterialTheme.colorScheme.surfaceVariant
+          },
         ) {
-          Surface(
-            shape = RoundedCornerShape(50),
-            color = when (activeHost?.lastStatusEnum) {
-              HostStatus.ONLINE -> MaterialTheme.colorScheme.secondaryContainer
-              HostStatus.OFFLINE -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
-              else -> MaterialTheme.colorScheme.surfaceVariant
-            },
-          ) {
-            Text(
-              text = "Host: ${activeHost?.lastStatusEnum?.label ?: "Unconfigured"}",
-              style = MaterialTheme.typography.labelMedium,
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            )
+          Text(
+            text = "Host: ${activeHost?.lastStatusEnum?.label ?: "Unconfigured"}",
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+          )
+        }
+
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          if (activeHost != null) {
+            OutlinedButton(
+              onClick = { onPingHost(activeHost) },
+              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+              modifier = Modifier
+                .weight(1f)
+                .defaultMinSize(minHeight = 48.dp)
+                .testTag("takeover_ping_button"),
+            ) {
+              Icon(Icons.Rounded.WifiTethering, contentDescription = null, Modifier.size(16.dp))
+              Spacer(Modifier.width(6.dp))
+              Text("Ping", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
           }
-          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (activeHost != null) {
-              OutlinedButton(
-                onClick = { onPingHost(activeHost) },
-                modifier = Modifier.testTag("takeover_ping_button"),
-              ) {
-                Icon(Icons.Rounded.WifiTethering, contentDescription = null, Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Ping")
-              }
-            }
-            OutlinedButton(onClick = onOpenHostSettings) {
-              Text("Edit Host")
-            }
+          OutlinedButton(
+            onClick = onOpenHostSettings,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+            modifier = Modifier
+              .weight(1f)
+              .defaultMinSize(minHeight = 48.dp)
+              .testTag("takeover_edit_host_button"),
+          ) {
+            Icon(Icons.Rounded.Edit, contentDescription = null, Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Edit Host", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
           }
         }
 
@@ -180,12 +232,14 @@ fun ComputerTakeoverScreen(
             )
           },
           colors = ButtonDefaults.buttonColors(
-            containerColor = if (takeoverActive) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+            containerColor = if (takeoverActive) Color(0xFF2E9D5B) else Color(0xFFFF2E93),
+            contentColor = Color.White,
           ),
           shape = RoundedCornerShape(16.dp),
+          contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
           modifier = Modifier
             .fillMaxWidth()
-            .height(54.dp)
+            .defaultMinSize(minHeight = 52.dp)
             .testTag("takeover_toggle_button"),
         ) {
           Icon(
@@ -196,6 +250,7 @@ fun ComputerTakeoverScreen(
           Text(
             text = if (takeoverActive) "Hand Control Back to OpenClaw" else "Take Over Host Computer Now",
             style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
           )
         }
 
@@ -205,13 +260,13 @@ fun ComputerTakeoverScreen(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
           val quickActionLabelStyle = MaterialTheme.typography.labelLarge.copy(fontSize = 13.sp)
-          val quickActionPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+          val quickActionPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
           OutlinedButton(
             onClick = { onSendControl(activeHost, HostControlAction.PAUSE_AGENT, "") },
             contentPadding = quickActionPadding,
             modifier = Modifier
               .weight(1f)
-              .height(48.dp)
+              .defaultMinSize(minHeight = 48.dp)
               .testTag("takeover_pause_button"),
           ) {
             Icon(Icons.Rounded.Pause, contentDescription = null, Modifier.size(15.dp))
@@ -223,7 +278,7 @@ fun ComputerTakeoverScreen(
             contentPadding = quickActionPadding,
             modifier = Modifier
               .weight(1f)
-              .height(48.dp)
+              .defaultMinSize(minHeight = 48.dp)
               .testTag("takeover_resume_button"),
           ) {
             Icon(Icons.Rounded.PlayArrow, contentDescription = null, Modifier.size(15.dp))
@@ -236,7 +291,7 @@ fun ComputerTakeoverScreen(
             contentPadding = quickActionPadding,
             modifier = Modifier
               .weight(1f)
-              .height(48.dp)
+              .defaultMinSize(minHeight = 48.dp)
               .testTag("takeover_abort_button"),
           ) {
             Icon(Icons.Rounded.Stop, contentDescription = null, Modifier.size(15.dp))
@@ -253,36 +308,14 @@ fun ComputerTakeoverScreen(
       Card(
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(1.dp, Color(0x55FF9CE6)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
         modifier = Modifier.fillMaxWidth(),
       ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-          Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth(),
-          ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-              Icon(Icons.Rounded.Computer, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-              Text("Live Host Console", style = MaterialTheme.typography.titleMedium)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-              OutlinedButton(
-                onClick = { showLiveWebConsole = !showLiveWebConsole },
-                modifier = Modifier.testTag("toggle_live_webview_button"),
-              ) {
-                Text(if (showLiveWebConsole) "Hide View" else "Open View")
-              }
-              OutlinedButton(
-                onClick = {
-                  runCatching {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(controlUrl)))
-                  }
-                },
-              ) {
-                Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = "Open in browser", Modifier.size(16.dp))
-              }
-            }
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Rounded.Computer, contentDescription = null, tint = Color(0xFFFF2E93))
+            Text("Live Host Console", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
           }
 
           Text(
@@ -290,6 +323,40 @@ fun ComputerTakeoverScreen(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
+
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            OutlinedButton(
+              onClick = { showLiveWebConsole = !showLiveWebConsole },
+              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+              modifier = Modifier
+                .weight(1f)
+                .defaultMinSize(minHeight = 48.dp)
+                .testTag("toggle_live_webview_button"),
+            ) {
+              Text(
+                text = if (showLiveWebConsole) "Hide View" else "Open View",
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+            OutlinedButton(
+              onClick = {
+                runCatching {
+                  context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(controlUrl)))
+                }
+              },
+              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+              modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+            ) {
+              Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, Modifier.size(16.dp))
+              Spacer(Modifier.width(6.dp))
+              Text("Browser", maxLines = 1, softWrap = false)
+            }
+          }
 
           AnimatedVisibility(visible = showLiveWebConsole) {
             AndroidView(
@@ -317,12 +384,14 @@ fun ComputerTakeoverScreen(
     Card(
       shape = MaterialTheme.shapes.large,
       colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+      border = BorderStroke(1.dp, Color(0x55FF9CE6)),
+      elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
       modifier = Modifier.fillMaxWidth(),
     ) {
-      Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-          Icon(Icons.Rounded.Keyboard, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
-          Text("Direct Host Input / Action", style = MaterialTheme.typography.titleMedium)
+      Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Icon(Icons.Rounded.Keyboard, contentDescription = null, tint = Color(0xFFFF2E93))
+          Text("Direct Host Input / Action", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         }
         OutlinedTextField(
           value = remoteCommandInput,
@@ -334,7 +403,10 @@ fun ComputerTakeoverScreen(
             .fillMaxWidth()
             .testTag("remote_input_field"),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
           Button(
             onClick = {
               if (remoteCommandInput.isNotBlank()) {
@@ -343,18 +415,27 @@ fun ComputerTakeoverScreen(
               }
             },
             enabled = remoteCommandInput.isNotBlank(),
-            modifier = Modifier.weight(1f),
+            colors = ButtonDefaults.buttonColors(
+              containerColor = Color(0xFFFF2E93),
+              contentColor = Color.White,
+            ),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier
+              .weight(1f)
+              .defaultMinSize(minHeight = 48.dp),
           ) {
             Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, Modifier.size(16.dp))
             Spacer(Modifier.width(6.dp))
-            Text("Send Input")
+            Text("Send Input", maxLines = 1, softWrap = false)
           }
           OutlinedButton(
             onClick = { onSendControl(activeHost, HostControlAction.SCREEN_SNAPSHOT, "") },
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.defaultMinSize(minHeight = 48.dp),
           ) {
             Icon(Icons.Rounded.Refresh, contentDescription = null, Modifier.size(16.dp))
             Spacer(Modifier.width(4.dp))
-            Text("Snapshot")
+            Text("Snapshot", maxLines = 1, softWrap = false)
           }
         }
       }
