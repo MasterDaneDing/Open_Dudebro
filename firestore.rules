@@ -43,6 +43,14 @@ service cloud.firestore {
              (lst.size() == 0 || (lst[0] is string && lst[0].size() <= maxItemLen));
     }
 
+    function isValidOptionalMediaFields(data) {
+      return (!('mediaUrl' in data) || data.mediaUrl == null || (data.mediaUrl is string && data.mediaUrl.size() <= 1500)) &&
+             (!('mediaType' in data) || data.mediaType == null || data.mediaType in ['IMAGE', 'VIDEO']) &&
+             (!('mediaPrompt' in data) || data.mediaPrompt == null || (data.mediaPrompt is string && data.mediaPrompt.size() <= 1000)) &&
+             (!('mediaModel' in data) || data.mediaModel == null || (data.mediaModel is string && data.mediaModel.size() <= 120)) &&
+             (!('mediaDurationSec' in data) || data.mediaDurationSec == null || (data.mediaDurationSec is int && data.mediaDurationSec >= 0 && data.mediaDurationSec <= 600));
+    }
+
     // --- Entity Validation Helpers ---
     function isValidCompanionBot(data, userId) {
       return data.userId is string && data.userId == userId &&
@@ -56,15 +64,15 @@ service cloud.firestore {
              data.accessoryStyle in ['NONE', 'FOREHEAD_GLASSES', 'ROUND_GLASSES', 'MONOCLE', 'BOWTIE', 'STUBBLE', 'SCARF', 'SPARK_BADGE'] &&
              isValidHexColor(data.primaryColorHex) &&
              isValidHexColor(data.accentColorHex) &&
-              data.systemPersona is string && data.systemPersona.size() <= 500 &&
-              (!('mission' in data) || (data.mission is string && data.mission.size() <= 160)) &&
-              (!('lastMessagePreview' in data) || (data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300)) &&
-              data.openClawAgentId is string && data.openClawAgentId.size() <= 80 &&
-              (!('functionPreset' in data) || data.functionPreset in ['GENERAL', 'TRANSLATION', 'PROOFREADING', 'CRITIQUING', 'CODING', 'RESEARCH']) &&
-              (!('llmProvider' in data) || data.llmProvider in ['HOST_DEFAULT', 'OPENCLAW_AUTO', 'VENICE_AI', 'GOOGLE', 'LOCAL_LLM']) &&
-              (!('llmModel' in data) || (data.llmModel is string && data.llmModel.size() <= 120)) &&
-              (!('openClawSynced' in data) || data.openClawSynced is bool) &&
-              data.pinnedDefault is bool;
+             data.systemPersona is string && data.systemPersona.size() <= 500 &&
+             (!('mission' in data) || (data.mission is string && data.mission.size() <= 160)) &&
+             (!('lastMessagePreview' in data) || (data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300)) &&
+             data.openClawAgentId is string && data.openClawAgentId.size() <= 80 &&
+             (!('functionPreset' in data) || data.functionPreset in ['GENERAL', 'TRANSLATION', 'PROOFREADING', 'CRITIQUING', 'CODING', 'RESEARCH']) &&
+             (!('llmProvider' in data) || data.llmProvider in ['HOST_DEFAULT', 'OPENCLAW_AUTO', 'VENICE_AI', 'GOOGLE', 'LOCAL_LLM']) &&
+             (!('llmModel' in data) || (data.llmModel is string && data.llmModel.size() <= 120)) &&
+             (!('openClawSynced' in data) || data.openClawSynced is bool) &&
+             data.pinnedDefault is bool;
     }
 
     function isValidChatRoom(data, userId) {
@@ -85,7 +93,8 @@ service cloud.firestore {
              (!('replyToBotName' in data) || data.replyToBotName == null || (data.replyToBotName is string && data.replyToBotName.size() <= 50)) &&
              data.rawText is string && data.rawText.size() >= 1 && data.rawText.size() <= 4000 &&
              (!('parsedInstruction' in data) || data.parsedInstruction == null || (data.parsedInstruction is string && data.parsedInstruction.size() <= 4000)) &&
-             data.expression in ['HAPPY', 'THINKING', 'UH_HUH', 'WORRIED', 'SORRY', 'WORKING', 'ALERT'];
+             data.expression in ['HAPPY', 'THINKING', 'UH_HUH', 'WORRIED', 'SORRY', 'WORKING', 'ALERT'] &&
+             isValidOptionalMediaFields(data);
     }
 
     function isValidBotMessage(data, userId, botId) {
@@ -100,7 +109,8 @@ service cloud.firestore {
              data.status in ['IDLE', 'PARSING', 'DISPATCHED', 'COMPLETED', 'WARNING', 'FAILED'] &&
              isValidStringList(data.attachedFiles, 10, 200) &&
              isValidStringList(data.linkedPaths, 10, 500) &&
-             data.takeoverSuggested is bool;
+             data.takeoverSuggested is bool &&
+             isValidOptionalMediaFields(data);
     }
 
     function isValidOpenClawHost(data, userId) {
@@ -127,6 +137,22 @@ service cloud.firestore {
              data.notes is string && data.notes.size() <= 250;
     }
 
+    function isValidGeneratedMedia(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.mediaUrl is string && data.mediaUrl.size() >= 1 && data.mediaUrl.size() <= 1500 &&
+             data.mediaType in ['IMAGE', 'VIDEO'] &&
+             data.prompt is string && data.prompt.size() <= 1000 &&
+             data.modelUsed is string && data.modelUsed.size() <= 120 &&
+             data.durationSec is int && data.durationSec >= 0 && data.durationSec <= 600 &&
+             data.sourceBotName is string && data.sourceBotName.size() <= 60;
+    }
+
+    function isValidUserPreferences(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.globalVeniceModel is string && data.globalVeniceModel.size() >= 1 && data.globalVeniceModel.size() <= 120 &&
+             data.veniceApiKeyOverride is string && data.veniceApiKeyOverride.size() <= 256;
+    }
+
     function isValidGeneralChat(data, userId) {
       return data.userId is string && data.userId == userId &&
              data.title is string && data.title.size() >= 1 && data.title.size() <= 80 &&
@@ -141,7 +167,8 @@ service cloud.firestore {
              data.sender in ['USER', 'BOT', 'SYSTEM'] &&
              data.rawText is string && data.rawText.size() >= 1 && data.rawText.size() <= 4000 &&
              data.modelLabel is string && data.modelLabel.size() <= 80 &&
-             data.status in ['IDLE', 'PARSING', 'DISPATCHED', 'COMPLETED', 'WARNING', 'FAILED'];
+             data.status in ['IDLE', 'PARSING', 'DISPATCHED', 'COMPLETED', 'WARNING', 'FAILED'] &&
+             isValidOptionalMediaFields(data);
     }
 
     // --- Collection Rules ---
@@ -203,7 +230,9 @@ service cloud.firestore {
                            'userId', 'botId', 'sender', 'rawText',
                            'parsedInstruction', 'instructionGoal', 'instructionSteps',
                            'expression', 'status', 'attachedFiles', 'linkedPaths',
-                           'takeoverSuggested', 'createdAt', 'updatedAt'
+                           'takeoverSuggested', 'mediaUrl', 'mediaType',
+                           'mediaPrompt', 'mediaModel', 'mediaDurationSec',
+                           'createdAt', 'updatedAt'
                          ]) &&
                          isValidTimestamp(incoming().createdAt) &&
                          isValidTimestamp(incoming().updatedAt) &&
@@ -220,7 +249,8 @@ service cloud.firestore {
                          incoming().diff(existing()).affectedKeys().hasOnly([
                            'rawText', 'parsedInstruction', 'instructionGoal',
                            'instructionSteps', 'expression', 'status',
-                           'takeoverSuggested', 'updatedAt'
+                           'takeoverSuggested', 'mediaUrl', 'mediaType',
+                           'mediaPrompt', 'mediaModel', 'mediaDurationSec', 'updatedAt'
                          ]);
 
         allow delete: if isOwner(userId) && isValidId(botId) && isValidId(messageId);
@@ -272,7 +302,10 @@ service cloud.firestore {
                          incoming().keys().hasOnly([
                            'userId', 'roomId', 'senderType', 'senderBotId',
                            'senderBotName', 'replyToBotName', 'rawText',
-                           'parsedInstruction', 'expression', 'createdAt', 'updatedAt'
+                           'parsedInstruction', 'expression',
+                           'mediaUrl', 'mediaType', 'mediaPrompt',
+                           'mediaModel', 'mediaDurationSec',
+                           'createdAt', 'updatedAt'
                          ]) &&
                          isValidTimestamp(incoming().createdAt) &&
                          isValidTimestamp(incoming().updatedAt) &&
@@ -287,7 +320,9 @@ service cloud.firestore {
                          incoming().createdAt == existing().createdAt &&
                          isValidTimestamp(incoming().updatedAt) &&
                          incoming().diff(existing()).affectedKeys().hasOnly([
-                           'rawText', 'parsedInstruction', 'expression', 'updatedAt'
+                           'rawText', 'parsedInstruction', 'expression',
+                           'mediaUrl', 'mediaType', 'mediaPrompt',
+                           'mediaModel', 'mediaDurationSec', 'updatedAt'
                          ]);
 
         allow delete: if isOwner(userId) && isValidId(roomId) && isValidId(messageId);
@@ -361,6 +396,66 @@ service cloud.firestore {
       allow delete: if isOwner(userId) && isValidId(fileId);
     }
 
+    match /users/{userId}/generatedMedia/{mediaId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(mediaId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(mediaId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'mediaUrl', 'mediaType', 'prompt', 'modelUsed',
+                         'durationSec', 'sourceBotName', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'mediaUrl', 'mediaType', 'prompt', 'modelUsed',
+                         'durationSec', 'sourceBotName', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidGeneratedMedia(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(mediaId) &&
+                       isValidGeneratedMedia(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'mediaUrl', 'mediaType', 'prompt', 'modelUsed', 'durationSec', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(mediaId);
+    }
+
+    match /users/{userId}/settings/{settingId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(settingId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(settingId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'globalVeniceModel', 'veniceApiKeyOverride', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'globalVeniceModel', 'veniceApiKeyOverride', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidUserPreferences(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(settingId) &&
+                       isValidUserPreferences(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'globalVeniceModel', 'veniceApiKeyOverride', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(settingId);
+    }
+
     match /users/{userId}/generalChats/{chatId} {
       allow list: if isOwner(userId);
       allow get: if isOwner(userId) && isValidId(chatId);
@@ -405,7 +500,9 @@ service cloud.firestore {
                          ]) &&
                          incoming().keys().hasOnly([
                            'userId', 'chatId', 'sender', 'rawText',
-                           'modelLabel', 'status', 'createdAt', 'updatedAt'
+                           'modelLabel', 'status', 'mediaUrl', 'mediaType',
+                           'mediaPrompt', 'mediaModel', 'mediaDurationSec',
+                           'createdAt', 'updatedAt'
                          ]) &&
                          isValidTimestamp(incoming().createdAt) &&
                          isValidTimestamp(incoming().updatedAt) &&
@@ -420,7 +517,9 @@ service cloud.firestore {
                          incoming().createdAt == existing().createdAt &&
                          isValidTimestamp(incoming().updatedAt) &&
                          incoming().diff(existing()).affectedKeys().hasOnly([
-                           'rawText', 'modelLabel', 'status', 'updatedAt'
+                           'rawText', 'modelLabel', 'status',
+                           'mediaUrl', 'mediaType', 'mediaPrompt',
+                           'mediaModel', 'mediaDurationSec', 'updatedAt'
                          ]);
 
         allow delete: if isOwner(userId) && isValidId(chatId) && isValidId(messageId);

@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -69,6 +70,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,6 +79,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -97,20 +100,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.files.MediaSaveHelper
 import com.example.model.BotExpression
 import com.example.model.BotMessage
 import com.example.model.CompanionBot
 import com.example.model.FileLinkType
+import com.example.model.GeneratedMediaType
 import com.example.model.LinkedFile
 import com.example.model.MessageSender
 import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.WheelLlmOption
 import com.example.ui.avatar.BotVectorAvatar
+import com.example.ui.components.InlineMediaCard
 import com.example.ui.components.LlmRotaryWheelSelector
+import com.example.ui.components.MediaLightboxDialog
 import com.example.ui.components.SectionSettingsIconButton
 import com.example.ui.util.ReplyHaptics
 import com.example.viewmodel.UiState
+import kotlinx.coroutines.launch
 
 @Composable
 fun ChatWorkspaceScreen(
@@ -123,6 +131,9 @@ fun ChatWorkspaceScreen(
   pendingAttachments: List<LinkedFile>,
   selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
+  pendingChatDraft: String? = null,
+  onConsumePendingChatDraft: () -> Unit = {},
+  onShowBanner: (String) -> Unit = {},
   onSelectBot: (String) -> Unit,
   onSelectWheelModel: (WheelLlmOption) -> Unit,
   onBack: () -> Unit,
@@ -141,6 +152,7 @@ fun ChatWorkspaceScreen(
   onOpenHostSettings: () -> Unit,
 ) {
   val context = LocalContext.current
+  val scope = rememberCoroutineScope()
   val haptic = LocalHapticFeedback.current
   val clipboard = LocalClipboardManager.current
   val bots = (botsState as? UiState.Success)?.data.orEmpty()
@@ -158,6 +170,14 @@ fun ChatWorkspaceScreen(
   var botPendingDelete by remember { mutableStateOf<CompanionBot?>(null) }
   var botPendingRename by remember { mutableStateOf<CompanionBot?>(null) }
   var botPendingMissionEdit by remember { mutableStateOf<CompanionBot?>(null) }
+  var lightboxMessage by remember { mutableStateOf<BotMessage?>(null) }
+
+  LaunchedEffect(pendingChatDraft) {
+    if (!pendingChatDraft.isNullOrBlank()) {
+      composerText = pendingChatDraft
+      onConsumePendingChatDraft()
+    }
+  }
 
   // Subtle Grok-like vibration when a bot starts thinking or finishes replying
   var hapticsBaselineReady by remember(selectedBotId) { mutableStateOf(false) }
@@ -212,6 +232,9 @@ fun ChatWorkspaceScreen(
     contract = ActivityResultContracts.OpenMultipleDocuments(),
   ) { uris ->
     uris.forEach { uri ->
+      runCatching {
+        context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
       val meta = resolveUriMetadata(context, uri)
       onAttachDeviceFile(meta.name, uri.toString(), meta.mime, meta.size)
     }
@@ -240,7 +263,7 @@ fun ChatWorkspaceScreen(
       ),
   ) {
     Image(
-      painter = painterResource(id = R.drawable.img_greek_forum_togas),
+      painter = painterResource(id = R.drawable.img_cha_chaan_teng),
       contentDescription = null,
       contentScale = ContentScale.Crop,
       modifier = Modifier
@@ -355,11 +378,27 @@ fun ChatWorkspaceScreen(
                     MessageBubbleItem(
                       message = msg,
                       bot = activeBot,
+                      activeHost = activeHost,
                       onCopyInstruction = { text -> clipboard.setText(AnnotatedString(text)) },
                       onRetry = {
                         if (activeBot != null) onRetryMessage(msg, activeBot, activeHost)
                       },
                       onOpenTakeover = onOpenTakeover,
+                      onAnimateImage = { url ->
+                        composerText = "Animate this image with lively cinematic motion: $url"
+                      },
+                      onSaveMedia = { url, type ->
+                        scope.launch {
+                          MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                            .onSuccess { onShowBanner(it) }
+                            .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
+                        }
+                      },
+                      onCopyMediaPrompt = { promptText ->
+                        clipboard.setText(AnnotatedString(promptText))
+                        onShowBanner("Prompt copied to clipboard!")
+                      },
+                      onOpenLightbox = { lightboxMessage = msg },
                     )
                   }
                 }
@@ -486,9 +525,9 @@ fun ChatWorkspaceScreen(
     // 5. Casual Message Composer
     Surface(
       shape = RoundedCornerShape(24.dp),
-      color = Color(0xFAFFF9F2),
+      color = Color(0xFF7B00FF),
       tonalElevation = 4.dp,
-      border = BorderStroke(2.dp, Color(0xFF280842)),
+      border = BorderStroke(2.dp, Color(0xFFFF9CE6)),
       modifier = Modifier
         .fillMaxWidth()
         .padding(bottom = 10.dp),
@@ -506,7 +545,7 @@ fun ChatWorkspaceScreen(
           Icon(
             Icons.Rounded.AttachFile,
             contentDescription = "Attach or link files",
-            tint = MaterialTheme.colorScheme.primary,
+            tint = Color.White,
           )
         }
 
@@ -517,10 +556,20 @@ fun ChatWorkspaceScreen(
             Text(
               text = "Task ${activeBot?.name ?: "bot"} (${selectedWheelModel.wheelLabel})...",
               style = MaterialTheme.typography.bodyMedium,
+              color = Color(0xFFE6C8FF),
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
           },
+          colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = Color.White,
+            unfocusedTextColor = Color.White,
+            focusedContainerColor = Color(0xFF5D00C9),
+            unfocusedContainerColor = Color(0xFF5D00C9),
+            focusedBorderColor = Color(0xFFFF9CE6),
+            unfocusedBorderColor = Color(0x99E2A4FF),
+            cursorColor = Color(0xFFFF9CE6),
+          ),
           maxLines = 4,
           shape = RoundedCornerShape(18.dp),
           modifier = Modifier
@@ -540,7 +589,10 @@ fun ChatWorkspaceScreen(
           },
           enabled = activeBot != null && composerText.isNotBlank() && !isBusy,
           colors = IconButtonDefaults.filledIconButtonColors(
-            containerColor = MaterialTheme.colorScheme.primary,
+            containerColor = Color(0xFFFF2E93),
+            contentColor = Color.White,
+            disabledContainerColor = Color(0x66FF2E93),
+            disabledContentColor = Color(0xAAFFFFFF),
           ),
           modifier = Modifier
             .size(48.dp)
@@ -549,7 +601,7 @@ fun ChatWorkspaceScreen(
           if (isBusy) {
             CircularProgressIndicator(
               modifier = Modifier.size(20.dp),
-              color = MaterialTheme.colorScheme.onPrimary,
+              color = Color.White,
               strokeWidth = 2.dp,
             )
           } else {
@@ -945,6 +997,34 @@ fun ChatWorkspaceScreen(
       },
     )
   }
+
+  lightboxMessage?.let { targetMsg ->
+    val url = targetMsg.mediaUrl
+    if (!url.isNullOrBlank()) {
+      MediaLightboxDialog(
+        mediaUrl = url,
+        mediaType = targetMsg.mediaTypeEnum,
+        prompt = targetMsg.mediaPrompt ?: targetMsg.rawText,
+        modelUsed = targetMsg.mediaModel.orEmpty(),
+        durationSec = targetMsg.mediaDurationSec,
+        activeHost = activeHost,
+        onDismiss = { lightboxMessage = null },
+        onSaveToPhone = {
+          scope.launch {
+            MediaSaveHelper.saveMediaToPhone(context, url, targetMsg.mediaTypeEnum, activeHost)
+              .onSuccess { onShowBanner(it) }
+              .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
+          }
+        },
+        onSendToChat = if (targetMsg.mediaTypeEnum == GeneratedMediaType.IMAGE) {
+          {
+            composerText = "Animate this image with lively cinematic motion: $url"
+            lightboxMessage = null
+          }
+        } else null,
+      )
+    }
+  }
 }
 
 @Composable
@@ -1260,9 +1340,14 @@ private fun LiveBotStageCard(
 private fun MessageBubbleItem(
   message: BotMessage,
   bot: CompanionBot?,
+  activeHost: OpenClawHost?,
   onCopyInstruction: (String) -> Unit,
   onRetry: () -> Unit,
   onOpenTakeover: () -> Unit,
+  onAnimateImage: (String) -> Unit,
+  onSaveMedia: (String, GeneratedMediaType) -> Unit,
+  onCopyMediaPrompt: (String) -> Unit,
+  onOpenLightbox: () -> Unit,
 ) {
   val isUser = message.senderEnum == MessageSender.USER
   var expanded by remember(message.id) { mutableStateOf(true) }
@@ -1367,6 +1452,24 @@ private fun MessageBubbleItem(
           text = message.rawText,
           style = MaterialTheme.typography.bodyMedium,
         )
+
+        val mediaUrl = message.mediaUrl
+        if (!mediaUrl.isNullOrBlank()) {
+          InlineMediaCard(
+            mediaUrl = mediaUrl,
+            mediaType = message.mediaTypeEnum,
+            prompt = message.mediaPrompt ?: message.rawText,
+            modelUsed = message.mediaModel.orEmpty(),
+            durationSec = message.mediaDurationSec,
+            activeHost = activeHost,
+            onAnimateThis = if (message.mediaTypeEnum == GeneratedMediaType.IMAGE) onAnimateImage else null,
+            onSaveToPhone = { onSaveMedia(mediaUrl, message.mediaTypeEnum) },
+            onCopyPrompt = {
+              onCopyMediaPrompt(message.mediaPrompt?.takeIf { it.isNotBlank() } ?: message.rawText)
+            },
+            onOpenLightbox = onOpenLightbox,
+          )
+        }
 
         if (!isUser && isFailedOrWarning && message.parsedInstruction.isNullOrBlank()) {
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

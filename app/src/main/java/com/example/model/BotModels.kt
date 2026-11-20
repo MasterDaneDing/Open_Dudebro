@@ -195,7 +195,7 @@ enum class OpenClawLlmProvider(
   VENICE_AI(
     displayName = "Venice.ai",
     wireKey = "venice",
-    defaultModel = "venice/llama-3.3-70b",
+    defaultModel = "claude-sonnet-4-6",
     description = "Route OpenClaw inference through your Venice.ai API key & model.",
   ),
   GOOGLE(
@@ -222,6 +222,24 @@ enum class OpenClawLlmProvider(
     fun safeForHost(raw: String?): OpenClawLlmProvider =
       entries.firstOrNull { it.name == raw && !it.isBotOnly } ?: OPENCLAW_AUTO
   }
+}
+
+data class VeniceModelInfo(
+  val id: String,
+  val label: String = id,
+  val category: String = "Text",
+)
+
+object VeniceModelCatalog {
+  val popularPresets: List<VeniceModelInfo> = listOf(
+    VeniceModelInfo("claude-sonnet-4-6", "claude-sonnet-4-6", "Coding"),
+    VeniceModelInfo("claude-opus-4-8", "claude-opus-4-8", "Reasoning"),
+    VeniceModelInfo("claude-haiku-5-5", "claude-haiku-5-5", "Fast"),
+    VeniceModelInfo("deepseek-v4-1", "deepseek-v4-1", "Coding"),
+    VeniceModelInfo("qwen-2.5-coder-32b", "qwen-2.5-coder-32b", "Coding"),
+  )
+
+  val defaultModelId: String = "claude-sonnet-4-6"
 }
 
 enum class WheelLlmOption(
@@ -263,6 +281,27 @@ enum class FileLinkType(val label: String) {
       entries.firstOrNull { it.name == raw } ?: HOST_PATH
   }
 }
+
+enum class GeneratedMediaType(val label: String) {
+  IMAGE("Image"),
+  VIDEO("Video"),
+  ;
+
+  companion object {
+    fun safeValueOf(raw: String?): GeneratedMediaType =
+      entries.firstOrNull { it.name == raw } ?: IMAGE
+  }
+}
+
+data class MediaAttachmentPayload(
+  val displayName: String,
+  val uriOrPath: String,
+  val mimeType: String,
+  val linkType: FileLinkType,
+  val extractedContent: String = "",
+  val uploadedHostId: String = "",
+  val isPdf: Boolean = false,
+)
 
 @Keep
 @IgnoreExtraProperties
@@ -354,12 +393,19 @@ data class BotMessage(
   val attachedFiles: List<String> = emptyList(),
   val linkedPaths: List<String> = emptyList(),
   val takeoverSuggested: Boolean = false,
+  val mediaUrl: String? = null,
+  val mediaType: String? = null,
+  val mediaPrompt: String? = null,
+  val mediaModel: String? = null,
+  val mediaDurationSec: Int? = null,
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
   val senderEnum: MessageSender get() = MessageSender.safeValueOf(sender)
   val expressionEnum: BotExpression get() = BotExpression.safeValueOf(expression)
   val statusEnum: MessageStatus get() = MessageStatus.safeValueOf(status)
+  val hasMedia: Boolean get() = !mediaUrl.isNullOrBlank()
+  val mediaTypeEnum: GeneratedMediaType get() = GeneratedMediaType.safeValueOf(mediaType)
 
   fun toCreateMap(ownerId: String, targetBotId: String): Map<String, Any> {
     val base = mutableMapOf<String, Any?>(
@@ -375,6 +421,11 @@ data class BotMessage(
       "attachedFiles" to attachedFiles.take(10).map { it.take(200) },
       "linkedPaths" to linkedPaths.take(10).map { it.take(500) },
       "takeoverSuggested" to takeoverSuggested,
+      "mediaUrl" to mediaUrl?.trim()?.take(1500)?.takeIf { it.isNotEmpty() },
+      "mediaType" to mediaType?.takeIf { !mediaUrl.isNullOrBlank() }?.let { GeneratedMediaType.safeValueOf(it).name },
+      "mediaPrompt" to mediaPrompt?.trim()?.take(1000)?.takeIf { it.isNotEmpty() },
+      "mediaModel" to mediaModel?.trim()?.take(120)?.takeIf { it.isNotEmpty() },
+      "mediaDurationSec" to mediaDurationSec?.coerceIn(0, 600),
       "createdAt" to FieldValue.serverTimestamp(),
       "updatedAt" to FieldValue.serverTimestamp(),
     )
@@ -467,6 +518,54 @@ data class LinkedFile(
 
 @Keep
 @IgnoreExtraProperties
+data class GeneratedMediaItem(
+  @DocumentId val id: String = "",
+  val userId: String = "",
+  val mediaUrl: String = "",
+  val mediaType: String = GeneratedMediaType.IMAGE.name,
+  val prompt: String = "",
+  val modelUsed: String = "",
+  val durationSec: Int = 0,
+  val sourceBotName: String = "",
+  @ServerTimestamp val createdAt: Timestamp? = null,
+  @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+  val mediaTypeEnum: GeneratedMediaType get() = GeneratedMediaType.safeValueOf(mediaType)
+
+  fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
+    "userId" to ownerId,
+    "mediaUrl" to mediaUrl.trim().take(1500),
+    "mediaType" to mediaTypeEnum.name,
+    "prompt" to prompt.trim().take(1000).ifBlank { "Generated via OpenClaw" },
+    "modelUsed" to modelUsed.trim().take(120),
+    "durationSec" to durationSec.coerceIn(0, 600),
+    "sourceBotName" to sourceBotName.trim().take(60),
+    "createdAt" to FieldValue.serverTimestamp(),
+    "updatedAt" to FieldValue.serverTimestamp(),
+  )
+}
+
+@Keep
+@IgnoreExtraProperties
+data class UserVenicePreferences(
+  @DocumentId val id: String = "",
+  val userId: String = "",
+  val globalVeniceModel: String = VeniceModelCatalog.defaultModelId,
+  val veniceApiKeyOverride: String = "",
+  @ServerTimestamp val createdAt: Timestamp? = null,
+  @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+  fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
+    "userId" to ownerId,
+    "globalVeniceModel" to globalVeniceModel.trim().take(120).ifBlank { VeniceModelCatalog.defaultModelId },
+    "veniceApiKeyOverride" to veniceApiKeyOverride.trim().take(256),
+    "createdAt" to FieldValue.serverTimestamp(),
+    "updatedAt" to FieldValue.serverTimestamp(),
+  )
+}
+
+@Keep
+@IgnoreExtraProperties
 data class ChatRoom(
   @DocumentId val id: String = "",
   val userId: String = "",
@@ -509,11 +608,18 @@ data class RoomMessage(
   val rawText: String = "",
   val parsedInstruction: String? = null,
   val expression: String = BotExpression.HAPPY.name,
+  val mediaUrl: String? = null,
+  val mediaType: String? = null,
+  val mediaPrompt: String? = null,
+  val mediaModel: String? = null,
+  val mediaDurationSec: Int? = null,
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
   val senderTypeEnum: MessageSender get() = MessageSender.safeValueOf(senderType)
   val expressionEnum: BotExpression get() = BotExpression.safeValueOf(expression)
+  val hasMedia: Boolean get() = !mediaUrl.isNullOrBlank()
+  val mediaTypeEnum: GeneratedMediaType get() = GeneratedMediaType.safeValueOf(mediaType)
 
   fun toCreateMap(ownerId: String, targetRoomId: String): Map<String, Any> {
     val base = mutableMapOf<String, Any?>(
@@ -526,6 +632,11 @@ data class RoomMessage(
       "rawText" to rawText.trim().take(4000).ifBlank { "..." },
       "parsedInstruction" to parsedInstruction?.trim()?.take(4000)?.takeIf { it.isNotEmpty() },
       "expression" to expressionEnum.name,
+      "mediaUrl" to mediaUrl?.trim()?.take(1500)?.takeIf { it.isNotEmpty() },
+      "mediaType" to mediaType?.takeIf { !mediaUrl.isNullOrBlank() }?.let { GeneratedMediaType.safeValueOf(it).name },
+      "mediaPrompt" to mediaPrompt?.trim()?.take(1000)?.takeIf { it.isNotEmpty() },
+      "mediaModel" to mediaModel?.trim()?.take(120)?.takeIf { it.isNotEmpty() },
+      "mediaDurationSec" to mediaDurationSec?.coerceIn(0, 600),
       "createdAt" to FieldValue.serverTimestamp(),
       "updatedAt" to FieldValue.serverTimestamp(),
     )
@@ -569,22 +680,38 @@ data class GeneralChatMessage(
   val rawText: String = "",
   val modelLabel: String = "",
   val status: String = MessageStatus.IDLE.name,
+  val mediaUrl: String? = null,
+  val mediaType: String? = null,
+  val mediaPrompt: String? = null,
+  val mediaModel: String? = null,
+  val mediaDurationSec: Int? = null,
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
   val senderEnum: MessageSender get() = MessageSender.safeValueOf(sender)
   val statusEnum: MessageStatus get() = MessageStatus.safeValueOf(status)
+  val hasMedia: Boolean get() = !mediaUrl.isNullOrBlank()
+  val mediaTypeEnum: GeneratedMediaType get() = GeneratedMediaType.safeValueOf(mediaType)
 
-  fun toCreateMap(ownerId: String, targetChatId: String): Map<String, Any> = mapOf(
-    "userId" to ownerId,
-    "chatId" to targetChatId,
-    "sender" to senderEnum.name,
-    "rawText" to rawText.trim().take(4000).ifBlank { "..." },
-    "modelLabel" to modelLabel.trim().take(80),
-    "status" to statusEnum.name,
-    "createdAt" to FieldValue.serverTimestamp(),
-    "updatedAt" to FieldValue.serverTimestamp(),
-  )
+  fun toCreateMap(ownerId: String, targetChatId: String): Map<String, Any> {
+    val base = mutableMapOf<String, Any?>(
+      "userId" to ownerId,
+      "chatId" to targetChatId,
+      "sender" to senderEnum.name,
+      "rawText" to rawText.trim().take(4000).ifBlank { "..." },
+      "modelLabel" to modelLabel.trim().take(80),
+      "status" to statusEnum.name,
+      "mediaUrl" to mediaUrl?.trim()?.take(1500)?.takeIf { it.isNotEmpty() },
+      "mediaType" to mediaType?.takeIf { !mediaUrl.isNullOrBlank() }?.let { GeneratedMediaType.safeValueOf(it).name },
+      "mediaPrompt" to mediaPrompt?.trim()?.take(1000)?.takeIf { it.isNotEmpty() },
+      "mediaModel" to mediaModel?.trim()?.take(120)?.takeIf { it.isNotEmpty() },
+      "mediaDurationSec" to mediaDurationSec?.coerceIn(0, 600),
+      "createdAt" to FieldValue.serverTimestamp(),
+      "updatedAt" to FieldValue.serverTimestamp(),
+    )
+    @Suppress("UNCHECKED_CAST")
+    return base.filterValues { it != null } as Map<String, Any>
+  }
 }
 
 fun normalizeHex(raw: String, fallback: String): String {

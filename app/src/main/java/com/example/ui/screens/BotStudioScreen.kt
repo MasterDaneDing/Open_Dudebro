@@ -67,15 +67,22 @@ import com.example.model.HatStyle
 import com.example.model.OpenClawHost
 import com.example.model.OpenClawLlmProvider
 import com.example.model.StarterBots
+import com.example.model.VeniceModelCatalog
+import com.example.model.VeniceModelInfo
 import com.example.ui.avatar.BotSvgGenerator
 import com.example.ui.avatar.BotVectorAvatar
 import com.example.ui.avatar.parseHexColor
+import com.example.ui.components.VeniceModelPickerPanel
 
 @Composable
 fun BotStudioScreen(
   existingBot: CompanionBot?,
   currentUserId: String,
   activeHost: OpenClawHost? = null,
+  globalVeniceModel: String = VeniceModelCatalog.defaultModelId,
+  veniceLiveModels: List<VeniceModelInfo> = VeniceModelCatalog.popularPresets,
+  isFetchingVeniceModels: Boolean = false,
+  onFetchVeniceModels: () -> Unit = {},
   onSaveBot: (CompanionBot) -> Unit,
   onSyncWithOpenClaw: (CompanionBot, (Boolean, String) -> Unit) -> Unit = { _, _ -> },
   onDeleteBot: (String) -> Unit,
@@ -500,7 +507,12 @@ fun BotStudioScreen(
       color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 
-    Text("OpenClaw Default LLM", style = MaterialTheme.typography.titleMedium)
+    Text("Model Override", style = MaterialTheme.typography.titleMedium)
+    Text(
+      text = "Defaults to Use Host Default ($globalVeniceModel / Host config), or lock this bot to a specific coding or chat model.",
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
     val providerDefaultModels = remember { OpenClawLlmProvider.entries.map { it.defaultModel }.toSet() }
     Row(
       modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -513,6 +525,10 @@ fun BotStudioScreen(
             llmProvider = provider
             if (provider == OpenClawLlmProvider.HOST_DEFAULT || provider == OpenClawLlmProvider.OPENCLAW_AUTO) {
               llmModel = ""
+            } else if (provider == OpenClawLlmProvider.VENICE_AI) {
+              if (llmModel.isBlank() || llmModel in providerDefaultModels) {
+                llmModel = globalVeniceModel.ifBlank { provider.defaultModel }
+              }
             } else if (llmModel.isBlank() || llmModel in providerDefaultModels) {
               llmModel = provider.defaultModel
             }
@@ -534,7 +550,27 @@ fun BotStudioScreen(
       }
     }
 
-    if (llmProvider != OpenClawLlmProvider.HOST_DEFAULT && llmProvider != OpenClawLlmProvider.OPENCLAW_AUTO) {
+    if (llmProvider == OpenClawLlmProvider.VENICE_AI) {
+      Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+          .fillMaxWidth()
+          .testTag("bot_venice_override_panel"),
+      ) {
+        VeniceModelPickerPanel(
+          selectedModelId = llmModel.ifBlank { globalVeniceModel },
+          onSelectModelId = { llmModel = it },
+          availableModels = veniceLiveModels,
+          isFetchingModels = isFetchingVeniceModels,
+          onFetchLiveModels = onFetchVeniceModels,
+          showApiKeyOverride = false,
+          testTagPrefix = "bot_venice",
+          modifier = Modifier.padding(12.dp),
+        )
+      }
+    } else if (llmProvider != OpenClawLlmProvider.HOST_DEFAULT && llmProvider != OpenClawLlmProvider.OPENCLAW_AUTO) {
       OutlinedTextField(
         value = llmModel,
         onValueChange = { llmModel = it.take(120) },

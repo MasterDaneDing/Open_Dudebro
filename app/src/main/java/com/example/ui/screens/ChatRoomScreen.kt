@@ -46,6 +46,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,6 +55,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,25 +64,32 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.files.MediaSaveHelper
 import com.example.model.BotExpression
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
+import com.example.model.GeneratedMediaType
 import com.example.model.MessageSender
 import com.example.model.OpenClawHost
 import com.example.model.RoomMessage
 import com.example.model.WheelLlmOption
 import com.example.ui.avatar.BotVectorAvatar
+import com.example.ui.components.InlineMediaCard
 import com.example.ui.components.LlmRotaryWheelSelector
+import com.example.ui.components.MediaLightboxDialog
 import com.example.ui.util.ReplyHaptics
 import com.example.viewmodel.UiState
+import kotlinx.coroutines.launch
 
 @Composable
 fun ChatRoomScreen(
@@ -91,6 +100,7 @@ fun ChatRoomScreen(
   activeExpressions: Map<String, BotExpression>,
   selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
+  onShowBanner: (String) -> Unit = {},
   onBack: () -> Unit,
   onSelectWheelModel: (WheelLlmOption) -> Unit,
   onSendRoomMessage: (ChatRoom, List<CompanionBot>, List<RoomMessage>, String, Boolean, WheelLlmOption) -> Unit,
@@ -99,7 +109,9 @@ fun ChatRoomScreen(
   onDispatchToOpenClaw: (CompanionBot, OpenClawHost?, String) -> Unit,
 ) {
   val context = LocalContext.current
+  val scope = rememberCoroutineScope()
   val haptic = LocalHapticFeedback.current
+  val clipboard = LocalClipboardManager.current
   val participants = remember(room, allBots) {
     if (room == null) emptyList()
     else {
@@ -113,6 +125,7 @@ fun ChatRoomScreen(
   var composerText by remember { mutableStateOf("") }
   var showRoomSettingsDialog by remember { mutableStateOf(false) }
   var missionEditingBot by remember { mutableStateOf<CompanionBot?>(null) }
+  var lightboxMessage by remember { mutableStateOf<RoomMessage?>(null) }
 
   val roomKey = room?.id.orEmpty()
   var roomHapticsReady by remember(roomKey) { mutableStateOf(false) }
@@ -145,10 +158,10 @@ fun ChatRoomScreen(
   }
 
   Box(modifier = Modifier.fillMaxSize()) {
-    // Full-bleed sunlit Greek Forum characters in togas chat background — crystal clear!
+    // Full-bleed Cha Chaan Teng cafe chat background
     Image(
-      painter = painterResource(id = R.drawable.img_greek_forum_togas),
-      contentDescription = "Greek Forum with mascot characters wearing togas",
+      painter = painterResource(id = R.drawable.img_cha_chaan_teng),
+      contentDescription = "Cha Chaan Teng lounge background",
       contentScale = ContentScale.Crop,
       modifier = Modifier.fillMaxSize(),
     )
@@ -194,7 +207,7 @@ fun ChatRoomScreen(
 
         Column(modifier = Modifier.weight(1f)) {
           Text(
-            text = room?.title ?: "Greek Forum Room",
+            text = room?.title ?: "Cha Chaan Teng Lounge",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.ExtraBold,
             color = Color.White,
@@ -202,7 +215,7 @@ fun ChatRoomScreen(
             overflow = TextOverflow.Ellipsis,
           )
           Text(
-            text = room?.topic?.ifBlank { "${participants.size} bots debating in the forum" } ?: "",
+            text = room?.topic?.ifBlank { "${participants.size} bots chatting in the Cha Chaan Teng" } ?: "",
             style = MaterialTheme.typography.bodySmall,
             color = Color(0xFFFFF3C4),
             fontWeight = FontWeight.SemiBold,
@@ -226,7 +239,7 @@ fun ChatRoomScreen(
         }
       }
 
-      // 2. Airy translucent Forum Participant Strip letting the Greek Forum Togas art shine behind
+      // 2. Airy translucent Participant Strip letting the Cha Chaan Teng art shine behind
       Surface(
         shape = MaterialTheme.shapes.large,
         color = Color(0x281D0430),
@@ -387,12 +400,28 @@ fun ChatRoomScreen(
                   message = msg,
                   speakerBot = speakerBot,
                   isUser = isUser,
+                  activeHost = activeHost,
                   onRunOnOpenClaw = { instruction ->
                     val targetBot = speakerBot ?: participants.firstOrNull()
                     if (targetBot != null) {
                       onDispatchToOpenClaw(targetBot, activeHost, instruction)
                     }
                   },
+                  onAnimateImage = { url ->
+                    composerText = "Animate this image with lively cinematic motion: $url"
+                  },
+                  onSaveMedia = { url, type ->
+                    scope.launch {
+                      MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                        .onSuccess { onShowBanner(it) }
+                        .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
+                    }
+                  },
+                  onCopyMediaPrompt = { promptText ->
+                    clipboard.setText(AnnotatedString(promptText))
+                    onShowBanner("Prompt copied to clipboard!")
+                  },
+                  onOpenLightbox = { lightboxMessage = msg },
                 )
               }
             }
@@ -448,9 +477,9 @@ fun ChatRoomScreen(
 
     Surface(
       shape = RoundedCornerShape(24.dp),
-      color = Color(0xFAFFF9F2),
+      color = Color(0xFF7B00FF),
       tonalElevation = 4.dp,
-      border = BorderStroke(2.dp, Color(0xFF280842)),
+      border = BorderStroke(2.dp, Color(0xFFFF9CE6)),
       modifier = Modifier
         .fillMaxWidth()
         .padding(bottom = 10.dp),
@@ -464,12 +493,22 @@ fun ChatRoomScreen(
           onValueChange = { composerText = it },
           placeholder = {
             Text(
-              "Ask the forum (${selectedWheelModel.wheelLabel})...",
+              "Ask the Cha Chaan Teng lounge (${selectedWheelModel.wheelLabel})...",
               style = MaterialTheme.typography.bodyMedium,
+              color = Color(0xFFE6C8FF),
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
           },
+          colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = Color.White,
+            unfocusedTextColor = Color.White,
+            focusedContainerColor = Color(0xFF5D00C9),
+            unfocusedContainerColor = Color(0xFF5D00C9),
+            focusedBorderColor = Color(0xFFFF9CE6),
+            unfocusedBorderColor = Color(0x99E2A4FF),
+            cursorColor = Color(0xFFFF9CE6),
+          ),
           maxLines = 4,
           shape = RoundedCornerShape(18.dp),
           modifier = Modifier
@@ -487,7 +526,10 @@ fun ChatRoomScreen(
           },
           enabled = room != null && composerText.isNotBlank() && !isBusy,
           colors = IconButtonDefaults.filledIconButtonColors(
-            containerColor = MaterialTheme.colorScheme.primary,
+            containerColor = Color(0xFFFF2E93),
+            contentColor = Color.White,
+            disabledContainerColor = Color(0x66FF2E93),
+            disabledContentColor = Color(0xAAFFFFFF),
           ),
           modifier = Modifier
             .size(48.dp)
@@ -496,7 +538,7 @@ fun ChatRoomScreen(
           if (isBusy) {
             CircularProgressIndicator(
               modifier = Modifier.size(20.dp),
-              color = MaterialTheme.colorScheme.onPrimary,
+              color = Color.White,
               strokeWidth = 2.dp,
             )
           } else {
@@ -514,7 +556,7 @@ fun ChatRoomScreen(
     var chosenIds by remember(room.id) { mutableStateOf(room.botIds.toSet()) }
     AlertDialog(
       onDismissRequest = { showRoomSettingsDialog = false },
-      title = { Text("Forum Room Settings") },
+      title = { Text("Lounge Room Settings") },
       text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
           OutlinedTextField(
@@ -612,6 +654,34 @@ fun ChatRoomScreen(
       },
     )
   }
+
+  lightboxMessage?.let { targetMsg ->
+    val url = targetMsg.mediaUrl
+    if (!url.isNullOrBlank()) {
+      MediaLightboxDialog(
+        mediaUrl = url,
+        mediaType = targetMsg.mediaTypeEnum,
+        prompt = targetMsg.mediaPrompt ?: targetMsg.rawText,
+        modelUsed = targetMsg.mediaModel.orEmpty(),
+        durationSec = targetMsg.mediaDurationSec,
+        activeHost = activeHost,
+        onDismiss = { lightboxMessage = null },
+        onSaveToPhone = {
+          scope.launch {
+            MediaSaveHelper.saveMediaToPhone(context, url, targetMsg.mediaTypeEnum, activeHost)
+              .onSuccess { onShowBanner(it) }
+              .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
+          }
+        },
+        onSendToChat = if (targetMsg.mediaTypeEnum == GeneratedMediaType.IMAGE) {
+          {
+            composerText = "Animate this image with lively cinematic motion: $url"
+            lightboxMessage = null
+          }
+        } else null,
+      )
+    }
+  }
 }
 
 @Composable
@@ -619,7 +689,12 @@ private fun RoomMessageBubble(
   message: RoomMessage,
   speakerBot: CompanionBot?,
   isUser: Boolean,
+  activeHost: OpenClawHost?,
   onRunOnOpenClaw: (String) -> Unit,
+  onAnimateImage: (String) -> Unit,
+  onSaveMedia: (String, GeneratedMediaType) -> Unit,
+  onCopyMediaPrompt: (String) -> Unit,
+  onOpenLightbox: () -> Unit,
 ) {
   Row(
     modifier = Modifier.fillMaxWidth(),
@@ -710,6 +785,24 @@ private fun RoomMessageBubble(
           text = message.rawText,
           style = MaterialTheme.typography.bodyMedium,
         )
+
+        val mediaUrl = message.mediaUrl
+        if (!mediaUrl.isNullOrBlank()) {
+          InlineMediaCard(
+            mediaUrl = mediaUrl,
+            mediaType = message.mediaTypeEnum,
+            prompt = message.mediaPrompt ?: message.rawText,
+            modelUsed = message.mediaModel.orEmpty(),
+            durationSec = message.mediaDurationSec,
+            activeHost = activeHost,
+            onAnimateThis = if (message.mediaTypeEnum == GeneratedMediaType.IMAGE) onAnimateImage else null,
+            onSaveToPhone = { onSaveMedia(mediaUrl, message.mediaTypeEnum) },
+            onCopyPrompt = {
+              onCopyMediaPrompt(message.mediaPrompt?.takeIf { it.isNotBlank() } ?: message.rawText)
+            },
+            onOpenLightbox = onOpenLightbox,
+          )
+        }
 
         if (!message.parsedInstruction.isNullOrBlank()) {
           Surface(

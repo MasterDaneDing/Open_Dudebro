@@ -8,6 +8,8 @@ import com.example.model.ChatRoom
 import com.example.model.CompanionBot
 import com.example.model.GeneralChatMessage
 import com.example.model.GeneralChatThread
+import com.example.model.GeneratedMediaItem
+import com.example.model.GeneratedMediaType
 import com.example.model.HostStatus
 import com.example.model.LinkedFile
 import com.example.model.MessageSender
@@ -15,6 +17,8 @@ import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.RoomMessage
 import com.example.model.StarterBots
+import com.example.model.UserVenicePreferences
+import com.example.model.VeniceModelCatalog
 import com.example.model.WheelLlmOption
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
@@ -102,6 +106,34 @@ class ClawPalRepository(
       }
       .catch { error ->
         logFlowErrorIfActive(error, OperationType.LIST, path, userId)
+        throw error
+      }
+  }
+
+  fun observeGeneratedMedia(userId: String): Flow<List<GeneratedMediaItem>> {
+    val path = "users/$userId/generatedMedia"
+    return db.collection("users").document(userId).collection("generatedMedia")
+      .orderBy("createdAt", Query.Direction.DESCENDING)
+      .snapshots()
+      .map { snapshot ->
+        snapshot.toObjects(GeneratedMediaItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+      }
+      .catch { error ->
+        logFlowErrorIfActive(error, OperationType.LIST, path, userId)
+        throw error
+      }
+  }
+
+  fun observeUserVenicePreferences(userId: String): Flow<UserVenicePreferences?> {
+    val path = "users/$userId/settings/venice"
+    return db.collection("users").document(userId).collection("settings").document("venice")
+      .snapshots()
+      .map { snapshot ->
+        if (!snapshot.exists()) null
+        else snapshot.toObject(UserVenicePreferences::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+      }
+      .catch { error ->
+        logFlowErrorIfActive(error, OperationType.GET, path, userId)
         throw error
       }
   }
@@ -477,6 +509,11 @@ class ClawPalRepository(
     expression: BotExpression,
     status: MessageStatus,
     takeoverSuggested: Boolean,
+    mediaUrl: String? = null,
+    mediaType: GeneratedMediaType? = null,
+    mediaPrompt: String? = null,
+    mediaModel: String? = null,
+    mediaDurationSec: Int? = null,
   ): Result<Unit> {
     val docPath = "users/$userId/bots/$botId/messages/$messageId"
     return try {
@@ -490,6 +527,11 @@ class ClawPalRepository(
         "expression" to expression.name,
         "status" to status.name,
         "takeoverSuggested" to takeoverSuggested,
+        "mediaUrl" to mediaUrl?.trim()?.take(1500)?.takeIf { it.isNotEmpty() },
+        "mediaType" to mediaType?.takeIf { !mediaUrl.isNullOrBlank() }?.name,
+        "mediaPrompt" to mediaPrompt?.trim()?.take(1000)?.takeIf { it.isNotEmpty() },
+        "mediaModel" to mediaModel?.trim()?.take(120)?.takeIf { it.isNotEmpty() },
+        "mediaDurationSec" to mediaDurationSec?.takeIf { !mediaUrl.isNullOrBlank() }?.coerceIn(0, 600),
         "updatedAt" to FieldValue.serverTimestamp(),
       ).filterValues { it != null }
       db.collection("users").document(uid)
@@ -594,6 +636,78 @@ class ClawPalRepository(
       throw e
     } catch (e: Exception) {
       handleFirestoreError(e, OperationType.DELETE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun addGeneratedMedia(userId: String, item: GeneratedMediaItem): Result<String> {
+    var docPath = "users/$userId/generatedMedia"
+    return try {
+      val uid = requireUserId(userId)
+      if (item.mediaUrl.isBlank()) {
+        return Result.failure(IllegalArgumentException("Generated media URL must not be blank"))
+      }
+      val docRef = db.collection("users").document(uid).collection("generatedMedia").document()
+      docPath = docRef.path
+      docRef.set(item.toCreateMap(uid)).await()
+      Result.success(docRef.id)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.CREATE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun deleteGeneratedMedia(userId: String, mediaId: String): Result<Unit> {
+    val docPath = "users/$userId/generatedMedia/$mediaId"
+    return try {
+      val uid = requireUserId(userId)
+      require(mediaId.isNotBlank()) { "Media ID must not be blank" }
+      db.collection("users").document(uid).collection("generatedMedia").document(mediaId).delete().await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.DELETE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun saveUserVenicePreferences(
+    userId: String,
+    globalVeniceModel: String,
+    veniceApiKeyOverride: String,
+  ): Result<Unit> {
+    val docPath = "users/$userId/settings/venice"
+    return try {
+      val uid = requireUserId(userId)
+      val cleanModel = globalVeniceModel.trim().take(120).ifBlank { VeniceModelCatalog.defaultModelId }
+      val cleanKey = veniceApiKeyOverride.trim().take(256)
+      val docRef = db.collection("users").document(uid).collection("settings").document("venice")
+      val existingSnap = docRef.get().await()
+      if (!existingSnap.exists()) {
+        docRef.set(
+          UserVenicePreferences(
+            userId = uid,
+            globalVeniceModel = cleanModel,
+            veniceApiKeyOverride = cleanKey,
+          ).toCreateMap(uid)
+        ).await()
+      } else {
+        docRef.update(
+          mapOf(
+            "globalVeniceModel" to cleanModel,
+            "veniceApiKeyOverride" to cleanKey,
+            "updatedAt" to FieldValue.serverTimestamp(),
+          )
+        ).await()
+      }
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.WRITE, docPath)
       Result.failure(e)
     }
   }
@@ -709,21 +823,30 @@ class ClawPalRepository(
     rawText: String,
     modelLabel: String,
     status: MessageStatus,
+    mediaUrl: String? = null,
+    mediaType: GeneratedMediaType? = null,
+    mediaPrompt: String? = null,
+    mediaModel: String? = null,
+    mediaDurationSec: Int? = null,
   ): Result<Unit> {
     val docPath = "users/$userId/generalChats/$chatId/messages/$messageId"
     return try {
       val uid = requireUserId(userId)
       require(chatId.isNotBlank() && messageId.isNotBlank()) { "IDs must not be blank" }
       val chatDoc = db.collection("users").document(uid).collection("generalChats").document(chatId)
+      val updates = mutableMapOf<String, Any?>(
+        "rawText" to rawText.trim().take(4000).ifBlank { "..." },
+        "modelLabel" to modelLabel.trim().take(80),
+        "status" to status.name,
+        "mediaUrl" to mediaUrl?.trim()?.take(1500)?.takeIf { it.isNotEmpty() },
+        "mediaType" to mediaType?.takeIf { !mediaUrl.isNullOrBlank() }?.name,
+        "mediaPrompt" to mediaPrompt?.trim()?.take(1000)?.takeIf { it.isNotEmpty() },
+        "mediaModel" to mediaModel?.trim()?.take(120)?.takeIf { it.isNotEmpty() },
+        "mediaDurationSec" to mediaDurationSec?.takeIf { !mediaUrl.isNullOrBlank() }?.coerceIn(0, 600),
+        "updatedAt" to FieldValue.serverTimestamp(),
+      ).filterValues { it != null }
       chatDoc.collection("messages").document(messageId)
-        .update(
-          mapOf(
-            "rawText" to rawText.trim().take(4000).ifBlank { "..." },
-            "modelLabel" to modelLabel.trim().take(80),
-            "status" to status.name,
-            "updatedAt" to FieldValue.serverTimestamp(),
-          )
-        )
+        .update(updates)
         .await()
       chatDoc.update(
         mapOf(

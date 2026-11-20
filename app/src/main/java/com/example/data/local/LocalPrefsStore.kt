@@ -7,8 +7,12 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.model.VeniceModelCatalog
+import com.example.model.VeniceModelInfo
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import org.json.JSONArray
+import org.json.JSONObject
 
 private val Context.clawPalDataStore: DataStore<Preferences> by preferencesDataStore(
   name = "clawpal_local_prefs"
@@ -20,6 +24,8 @@ data class LocalUiPrefs(
   val takeoverActive: Boolean = false,
   val veniceApiKey: String = "",
   val googleApiKey: String = "",
+  val globalVeniceModel: String = VeniceModelCatalog.defaultModelId,
+  val cachedVeniceModels: List<VeniceModelInfo> = emptyList(),
 )
 
 class LocalPrefsStore(private val context: Context) {
@@ -29,6 +35,8 @@ class LocalPrefsStore(private val context: Context) {
     val TAKEOVER_ACTIVE = booleanPreferencesKey("takeover_active")
     val VENICE_API_KEY = stringPreferencesKey("venice_api_key")
     val GOOGLE_API_KEY = stringPreferencesKey("google_api_key")
+    val GLOBAL_VENICE_MODEL = stringPreferencesKey("global_venice_model")
+    val CACHED_VENICE_MODELS = stringPreferencesKey("cached_venice_models_json")
   }
 
   val prefsFlow: Flow<LocalUiPrefs> = context.clawPalDataStore.data.map { prefs ->
@@ -38,6 +46,9 @@ class LocalPrefsStore(private val context: Context) {
       takeoverActive = prefs[Keys.TAKEOVER_ACTIVE] ?: false,
       veniceApiKey = prefs[Keys.VENICE_API_KEY] ?: "",
       googleApiKey = prefs[Keys.GOOGLE_API_KEY] ?: "",
+      globalVeniceModel = prefs[Keys.GLOBAL_VENICE_MODEL]?.takeIf { it.isNotBlank() }
+        ?: VeniceModelCatalog.defaultModelId,
+      cachedVeniceModels = decodeModels(prefs[Keys.CACHED_VENICE_MODELS].orEmpty()),
     )
   }
 
@@ -53,10 +64,56 @@ class LocalPrefsStore(private val context: Context) {
     context.clawPalDataStore.edit { it[Keys.TAKEOVER_ACTIVE] = active }
   }
 
-  suspend fun setProviderApiKeys(veniceKey: String, googleKey: String) {
+  suspend fun setProviderApiKeys(
+    veniceKey: String,
+    googleKey: String,
+    globalVeniceModel: String? = null,
+  ) {
     context.clawPalDataStore.edit {
       it[Keys.VENICE_API_KEY] = veniceKey.trim()
       it[Keys.GOOGLE_API_KEY] = googleKey.trim()
+      if (!globalVeniceModel.isNullOrBlank()) {
+        it[Keys.GLOBAL_VENICE_MODEL] = globalVeniceModel.trim()
+      }
+    }
+  }
+
+  suspend fun setCachedVeniceModels(models: List<VeniceModelInfo>) {
+    val arr = JSONArray()
+    models.take(250).forEach { m ->
+      arr.put(
+        JSONObject()
+          .put("id", m.id)
+          .put("label", m.label)
+          .put("category", m.category)
+      )
+    }
+    context.clawPalDataStore.edit {
+      it[Keys.CACHED_VENICE_MODELS] = arr.toString()
+    }
+  }
+
+  private fun decodeModels(raw: String): List<VeniceModelInfo> {
+    if (raw.isBlank()) return emptyList()
+    return try {
+      val arr = JSONArray(raw)
+      buildList {
+        for (i in 0 until arr.length()) {
+          val obj = arr.optJSONObject(i) ?: continue
+          val id = obj.optString("id").trim()
+          if (id.isNotEmpty()) {
+            add(
+              VeniceModelInfo(
+                id = id,
+                label = obj.optString("label", id).ifBlank { id },
+                category = obj.optString("category", "Text").ifBlank { "Text" },
+              )
+            )
+          }
+        }
+      }
+    } catch (_: Exception) {
+      emptyList()
     }
   }
 }

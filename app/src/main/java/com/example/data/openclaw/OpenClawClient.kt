@@ -7,11 +7,16 @@ import com.example.model.BotExpression
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
 import com.example.model.GeneralChatMessage
+import com.example.model.GeneratedMediaType
+import com.example.model.MediaAttachmentPayload
 import com.example.model.MessageSender
 import com.example.model.OpenClawHost
 import com.example.model.OpenClawLlmProvider
 import com.example.model.RoomMessage
+import com.example.model.VeniceModelCatalog
+import com.example.model.VeniceModelInfo
 import com.example.model.WheelLlmOption
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +40,11 @@ data class OpenClawDispatchResult(
   val parsedInstruction: String?,
   val expression: BotExpression,
   val takeoverSuggested: Boolean,
+  val mediaUrl: String? = null,
+  val mediaType: GeneratedMediaType? = null,
+  val mediaPrompt: String? = null,
+  val mediaModel: String? = null,
+  val mediaDurationSec: Int? = null,
 )
 
 data class OpenClawSyncResult(
@@ -48,6 +58,7 @@ data class OpenClawSyncResult(
 data class LocalProviderKeys(
   val veniceApiKey: String = "",
   val googleApiKey: String = "",
+  val globalVeniceModel: String = VeniceModelCatalog.defaultModelId,
 )
 
 data class EffectiveLlmConfig(
@@ -77,7 +88,7 @@ class OpenClawClient {
   private val client = OkHttpClient.Builder()
     .connectTimeout(8, TimeUnit.SECONDS)
     .readTimeout(45, TimeUnit.SECONDS)
-    .writeTimeout(15, TimeUnit.SECONDS)
+    .writeTimeout(20, TimeUnit.SECONDS)
     .build()
 
   private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -90,8 +101,9 @@ class OpenClawClient {
     val provider = when (wheel) {
       WheelLlmOption.OPENCLAW_LOCAL -> OpenClawLlmProvider.LOCAL_LLM
       WheelLlmOption.OPENCLAW_THIRD_PARTY -> {
-        if (host.defaultLlmProviderEnum == OpenClawLlmProvider.GOOGLE ||
-          (providerKeys.googleApiKey.isNotBlank() && providerKeys.veniceApiKey.isBlank())
+        if (host.defaultLlmProviderEnum == OpenClawLlmProvider.GOOGLE &&
+          providerKeys.googleApiKey.isNotBlank() &&
+          providerKeys.veniceApiKey.isBlank()
         ) {
           OpenClawLlmProvider.GOOGLE
         } else {
@@ -107,10 +119,16 @@ class OpenClawClient {
       }
     }
     val modelId = when {
-      wheel == WheelLlmOption.OPENCLAW_DEFAULT && host.defaultLlmModel.isNotBlank() -> host.defaultLlmModel.trim()
+      wheel == WheelLlmOption.OPENCLAW_DEFAULT && host.defaultLlmModel.isNotBlank() ->
+        host.defaultLlmModel.trim()
       wheel == WheelLlmOption.OPENCLAW_LOCAL &&
         host.defaultLlmProviderEnum == OpenClawLlmProvider.LOCAL_LLM &&
         host.defaultLlmModel.isNotBlank() -> host.defaultLlmModel.trim()
+      provider == OpenClawLlmProvider.VENICE_AI -> {
+        host.defaultLlmModel.takeIf { host.defaultLlmProviderEnum == OpenClawLlmProvider.VENICE_AI && it.isNotBlank() }
+          ?: providerKeys.globalVeniceModel.takeIf { it.isNotBlank() }
+          ?: provider.defaultModel
+      }
       else -> provider.defaultModel
     }
     return EffectiveLlmConfig(
@@ -126,25 +144,95 @@ class OpenClawClient {
     wheelOverride: WheelLlmOption? = null,
     providerKeys: LocalProviderKeys = LocalProviderKeys(),
   ): EffectiveLlmConfig {
+    // Per-bot override takes priority when explicitly configured on the bot
+    val botProvider = bot.llmProviderEnum
+    if (botProvider != OpenClawLlmProvider.HOST_DEFAULT &&
+      (wheelOverride == null || wheelOverride == WheelLlmOption.OPENCLAW_DEFAULT)
+    ) {
+      val modelId = bot.llmModel.trim().ifBlank {
+        if (botProvider == OpenClawLlmProvider.VENICE_AI) {
+          providerKeys.globalVeniceModel.ifBlank { botProvider.defaultModel }
+        } else {
+          botProvider.defaultModel
+        }
+      }
+      return EffectiveLlmConfig(
+        provider = botProvider,
+        modelId = modelId,
+        localEndpoint = host.localLlmEndpoint.trim(),
+      )
+    }
+
     if (wheelOverride != null) {
       return resolveWheelLlm(wheelOverride, host, providerKeys)
     }
-    val botProvider = bot.llmProviderEnum
-    val provider = if (botProvider == OpenClawLlmProvider.HOST_DEFAULT) {
-      host.defaultLlmProviderEnum
-    } else {
-      botProvider
-    }
+
+    val hostProvider = host.defaultLlmProviderEnum
     val modelId = when {
-      botProvider != OpenClawLlmProvider.HOST_DEFAULT && bot.llmModel.isNotBlank() -> bot.llmModel.trim()
-      botProvider == OpenClawLlmProvider.HOST_DEFAULT && host.defaultLlmModel.isNotBlank() -> host.defaultLlmModel.trim()
-      else -> provider.defaultModel
+      host.defaultLlmModel.isNotBlank() -> host.defaultLlmModel.trim()
+      hostProvider == OpenClawLlmProvider.VENICE_AI ->
+        providerKeys.globalVeniceModel.ifBlank { hostProvider.defaultModel }
+      else -> hostProvider.defaultModel
     }
     return EffectiveLlmConfig(
-      provider = provider,
+      provider = hostProvider,
       modelId = modelId,
       localEndpoint = host.localLlmEndpoint.trim(),
     )
+  }
+
+  suspend fun fetchVeniceLiveModels(apiKey: String = ""): Result<List<VeniceModelInfo>> = withContext(Dispatchers.IO) {
+    val reqBuilder = Request.Builder()
+      .url("https://api.venice.ai/api/v1/models")
+      .get()
+      .addHeader("Accept", "application/json")
+    val cleanKey = apiKey.trim()
+    if (cleanKey.isNotBlank()) {
+      reqBuilder.addHeader("Authorization", "Bearer $cleanKey")
+    }
+
+    try {
+      client.newCall(reqBuilder.build()).execute().use { resp ->
+        val raw = resp.body?.string().orEmpty()
+        if (!resp.isSuccessful) {
+          return@withContext Result.failure(
+            IllegalStateException("Venice.ai returned HTTP ${resp.code}: ${raw.take(180)}")
+          )
+        }
+        val json = JSONObject(raw)
+        val arr = json.optJSONArray("data") ?: JSONArray()
+        val live = buildList {
+          for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val id = item.optString("id").trim()
+            if (id.isEmpty()) continue
+            val modelType = item.optString("type", "").lowercase(Locale.US)
+            // Keep text & code models (skip pure image/upscale/tts models for the LLM text picker unless unlabeled)
+            if (modelType.isNotBlank() && modelType !in setOf("text", "chat", "code", "llm", "")) {
+              continue
+            }
+            val spec = item.optJSONObject("model_spec")
+            val name = spec?.optString("name")?.takeIf { it.isNotBlank() } ?: id
+            val caps = spec?.optJSONObject("capabilities")
+            val isCode = caps?.optBoolean("supportsFunctionCalling", false) == true ||
+              id.contains("coder", true) || id.contains("claude", true) || id.contains("deepseek", true)
+            val category = if (isCode) "Coding & Chat" else "Text"
+            add(VeniceModelInfo(id = id, label = name, category = category))
+          }
+        }.distinctBy { it.id }
+
+        if (live.isEmpty()) {
+          Result.success(VeniceModelCatalog.popularPresets)
+        } else {
+          Result.success(live)
+        }
+      }
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed fetching live Venice models: ${e.message}", e)
+      Result.failure(e)
+    }
   }
 
   fun buildBotSystemPrompt(bot: CompanionBot): String {
@@ -157,7 +245,7 @@ class OpenClawClient {
       if (bot.systemPersona.isNotBlank()) {
         appendLine("Persona & Style: ${bot.systemPersona}")
       }
-      append("Always perform your assigned function (${fn.displayName}) faithfully. If a user message is casual, clearly confirm the structured OpenClaw steps and deliver the result.")
+      append("Always perform your assigned function (${fn.displayName}) faithfully. If a user asks you to generate an image or video/animation, return the generated image or video URL in your response.")
     }
   }
 
@@ -197,10 +285,6 @@ class OpenClawClient {
     OpenClawPingResult(false, 0, latency, lastErr)
   }
 
-  /**
-   * Registers or updates a companion bot's function, mission, and default OpenClaw LLM on the host
-   * so OpenClaw explicitly understands what the bot does before conversations start.
-   */
   suspend fun syncBotProfile(
     host: OpenClawHost,
     bot: CompanionBot,
@@ -211,12 +295,12 @@ class OpenClawClient {
       return@withContext Result.failure(IllegalArgumentException("OpenClaw host URL is not configured."))
     }
 
-    val llm = resolveEffectiveLlm(bot, host)
+    val llm = resolveEffectiveLlm(bot, host, providerKeys = providerKeys)
+    val wireModel = resolveWireModel("main", llm)
     val modelLabel = llm.modelId.ifBlank { llm.provider.displayName }
     val agentId = bot.openClawAgentId.ifBlank { bot.functionPresetEnum.suggestedAgentId }
     val systemPrompt = buildBotSystemPrompt(bot)
 
-    // 1. Try OpenClaw agent hook registration endpoint (/hooks/agent)
     val hookEndpoint = "$cleanBase/hooks/agent"
     try {
       val registerJson = JSONObject().apply {
@@ -228,6 +312,9 @@ class OpenClawClient {
         put("mission", bot.displayMission)
         put("roleTitle", bot.roleTitle)
         put("systemPrompt", systemPrompt)
+        put("provider", llm.provider.wireKey)
+        put("model", wireModel)
+        putLlmCredentials(llm, providerKeys)
         put(
           "llm",
           JSONObject().apply {
@@ -258,7 +345,6 @@ class OpenClawClient {
             )
           )
         }
-        // If /hooks/agent doesn't exist on this OpenClaw gateway (404/405), fall through to chat session priming.
         if (resp.code != 404 && resp.code != 405 && resp.code != 501) {
           return@withContext Result.failure(
             IllegalStateException("OpenClaw registration returned HTTP ${resp.code}: ${body.take(200)}")
@@ -271,7 +357,6 @@ class OpenClawClient {
       // Fall through to /v1/chat/completions briefing attempt
     }
 
-    // 2. Fallback: prime the OpenClaw agent session via /v1/chat/completions
     val chatEndpoint = "$cleanBase/v1/chat/completions"
     try {
       val messagesArray = JSONArray().apply {
@@ -286,7 +371,9 @@ class OpenClawClient {
         )
       }
       val payload = JSONObject().apply {
+        put("provider", llm.provider.wireKey)
         put("model", resolveWireModel(agentId, llm))
+        putLlmCredentials(llm, providerKeys)
         put("messages", messagesArray)
         put("user", bot.userId)
       }
@@ -303,7 +390,7 @@ class OpenClawClient {
             IllegalStateException("OpenClaw gateway returned HTTP ${resp.code}: ${bodyStr.take(200)}")
           )
         }
-        val parsed = extractReplyFromOpenAiCompatibleJson(bodyStr, null)
+        val parsed = extractReplyFromOpenAiCompatibleJson(bodyStr, null, host, modelLabel, bot.displayMission)
         Result.success(
           OpenClawSyncResult(
             synced = true,
@@ -367,6 +454,7 @@ class OpenClawClient {
     linkedPaths: List<String>,
     providerKeys: LocalProviderKeys = LocalProviderKeys(),
     wheelOverride: WheelLlmOption? = null,
+    attachmentPayloads: List<MediaAttachmentPayload> = emptyList(),
   ): Result<OpenClawDispatchResult> = withContext(Dispatchers.IO) {
     val cleanBase = host.baseUrl.trim().trimEnd('/')
     if (cleanBase.isBlank()) {
@@ -375,7 +463,9 @@ class OpenClawClient {
 
     val llm = resolveEffectiveLlm(bot, host, wheelOverride, providerKeys)
     val agentId = bot.openClawAgentId.ifBlank { bot.functionPresetEnum.suggestedAgentId }
+    val wireModel = resolveWireModel(agentId, llm)
     val endpoint = "$cleanBase/v1/chat/completions"
+
     try {
       val contentText = buildString {
         appendLine("[BOT FUNCTION: ${bot.functionPresetEnum.displayName} | MISSION: ${bot.displayMission}]")
@@ -394,6 +484,7 @@ class OpenClawClient {
         if (linkedPaths.isNotEmpty()) {
           appendLine("Linked Paths: ${linkedPaths.joinToString(", ")}")
         }
+        appendAttachmentContextBlocks(attachmentPayloads)
       }
 
       val systemPrompt = buildBotSystemPrompt(bot)
@@ -404,9 +495,15 @@ class OpenClawClient {
       }
 
       val payload = JSONObject().apply {
-        put("model", resolveWireModel(agentId, llm))
+        put("provider", llm.provider.wireKey)
+        put("model", wireModel)
+        putLlmCredentials(llm, providerKeys)
         put("messages", messagesArray)
         put("user", bot.userId)
+        val attachJson = buildAttachmentsJsonArray(attachmentPayloads)
+        if (attachJson.length() > 0) {
+          put("attachments", attachJson)
+        }
       }
 
       val req = Request.Builder()
@@ -422,7 +519,13 @@ class OpenClawClient {
             IllegalStateException("OpenClaw gateway returned HTTP ${resp.code}: ${bodyStr.take(240)}")
           )
         }
-        val parsed = extractReplyFromOpenAiCompatibleJson(bodyStr, refinedInstruction)
+        val parsed = extractReplyFromOpenAiCompatibleJson(
+          rawJson = bodyStr,
+          refinedInstruction = refinedInstruction,
+          host = host,
+          fallbackModel = wireModel,
+          fallbackPrompt = refinedInstruction ?: casualMessage,
+        )
         Result.success(parsed)
       }
     } catch (e: CancellationException) {
@@ -440,21 +543,28 @@ class OpenClawClient {
     userPrompt: String,
     wheelOption: WheelLlmOption,
     providerKeys: LocalProviderKeys = LocalProviderKeys(),
-  ): Result<String> = withContext(Dispatchers.IO) {
+    attachmentPayloads: List<MediaAttachmentPayload> = emptyList(),
+  ): Result<OpenClawDispatchResult> = withContext(Dispatchers.IO) {
     val cleanBase = host.baseUrl.trim().trimEnd('/')
     if (cleanBase.isBlank()) {
       return@withContext Result.failure(IllegalArgumentException("OpenClaw host URL is not configured."))
     }
     val llm = resolveWheelLlm(wheelOption, host, providerKeys)
+    val wireModel = resolveWireModel("main", llm)
     val endpoint = "$cleanBase/v1/chat/completions"
+
     try {
+      val enrichedPrompt = buildString {
+        append(userPrompt)
+        appendAttachmentContextBlocks(attachmentPayloads)
+      }
       val messagesArray = JSONArray().apply {
         put(
           JSONObject()
             .put("role", "system")
             .put(
               "content",
-              "You are a helpful, clear, general-purpose Q&A assistant running through the user's OpenClaw gateway. Answer everyday questions directly and conversationally without assuming specialized bot roles unless asked."
+              "You are a helpful, clear, general-purpose assistant running through the user's OpenClaw gateway. Answer everyday questions, analyze attached PDF/code files, or return generated image/video URLs cleanly."
             )
         )
         history.takeLast(12).forEach { msg ->
@@ -463,12 +573,18 @@ class OpenClawClient {
             put(JSONObject().put("role", role).put("content", msg.rawText))
           }
         }
-        put(JSONObject().put("role", "user").put("content", userPrompt))
+        put(JSONObject().put("role", "user").put("content", enrichedPrompt))
       }
       val payload = JSONObject().apply {
-        put("model", resolveWireModel("main", llm))
+        put("provider", llm.provider.wireKey)
+        put("model", wireModel)
+        putLlmCredentials(llm, providerKeys)
         put("messages", messagesArray)
         put("user", userId)
+        val attachJson = buildAttachmentsJsonArray(attachmentPayloads)
+        if (attachJson.length() > 0) {
+          put("attachments", attachJson)
+        }
       }
       val reqBuilder = Request.Builder()
         .url(endpoint)
@@ -482,8 +598,14 @@ class OpenClawClient {
             IllegalStateException("OpenClaw gateway returned HTTP ${resp.code}: ${bodyStr.take(220)}")
           )
         }
-        val parsed = extractReplyFromOpenAiCompatibleJson(bodyStr, null)
-        Result.success(parsed.replyText)
+        val parsed = extractReplyFromOpenAiCompatibleJson(
+          rawJson = bodyStr,
+          refinedInstruction = null,
+          host = host,
+          fallbackModel = wireModel,
+          fallbackPrompt = userPrompt,
+        )
+        Result.success(parsed)
       }
     } catch (e: CancellationException) {
       throw e
@@ -508,10 +630,11 @@ class OpenClawClient {
       return@withContext Result.failure(IllegalArgumentException("OpenClaw host URL is not configured."))
     }
     val llm = resolveWheelLlm(wheelOption, host, providerKeys)
+    val wireModel = resolveWireModel("main", llm)
     val endpoint = "$cleanBase/v1/chat/completions"
     try {
       val systemPrompt = buildString {
-        appendLine("You are orchestrating a lively Greek Forum multi-bot collaborative room titled '${room.title}'.")
+        appendLine("You are orchestrating a lively Cha Chaan Teng multi-bot collaborative lounge titled '${room.title}'.")
         if (room.topic.isNotBlank()) appendLine("Topic: ${room.topic}")
         appendLine("Participating bots:")
         participants.forEach { bot ->
@@ -529,7 +652,9 @@ class OpenClawClient {
         put(JSONObject().put("role", "user").put("content", userPrompt))
       }
       val payload = JSONObject().apply {
-        put("model", resolveWireModel("main", llm))
+        put("provider", llm.provider.wireKey)
+        put("model", wireModel)
+        putLlmCredentials(llm, providerKeys)
         put("messages", messagesArray)
         put("user", userId)
       }
@@ -546,7 +671,7 @@ class OpenClawClient {
             IllegalStateException("OpenClaw gateway returned HTTP ${resp.code}: ${bodyStr.take(220)}")
           )
         }
-        val contentText = extractReplyFromOpenAiCompatibleJson(bodyStr, null).replyText.trim()
+        val contentText = extractReplyFromOpenAiCompatibleJson(bodyStr, null, host, wireModel, userPrompt).replyText.trim()
         val turns = parseChatRoomTurnsFromText(contentText, participants)
         Result.success(ChatRoomRoundResult(turns))
       }
@@ -605,6 +730,55 @@ class OpenClawClient {
     } catch (e: Exception) {
       Log.w(TAG, "Host control action failed: ${e.message}", e)
       Result.failure(e)
+    }
+  }
+
+  private fun StringBuilder.appendAttachmentContextBlocks(payloads: List<MediaAttachmentPayload>) {
+    payloads.forEach { att ->
+      val hasContent = att.extractedContent.isNotBlank() || att.uploadedHostId.isNotBlank()
+      if (!hasContent) return@forEach
+      appendLine()
+      appendLine("[ATTACHED FILE: ${att.displayName} (${att.mimeType.ifBlank { "file" }})]")
+      if (att.uploadedHostId.isNotBlank()) {
+        appendLine("Host Upload Reference: ${att.uploadedHostId}")
+      }
+      if (att.extractedContent.isNotBlank()) {
+        val ext = att.displayName.substringAfterLast('.', "").lowercase(Locale.US)
+        appendLine("```$ext")
+        appendLine(att.extractedContent)
+        appendLine("```")
+      }
+    }
+  }
+
+  private fun buildAttachmentsJsonArray(payloads: List<MediaAttachmentPayload>): JSONArray {
+    return JSONArray().apply {
+      payloads.forEach { att ->
+        put(
+          JSONObject().apply {
+            put("name", att.displayName)
+            put("uriOrPath", att.uriOrPath)
+            put("mimeType", att.mimeType)
+            put("kind", if (att.isPdf) "pdf" else att.linkType.name.lowercase(Locale.US))
+            if (att.uploadedHostId.isNotBlank()) put("hostFileId", att.uploadedHostId)
+            if (att.extractedContent.isNotBlank()) put("content", att.extractedContent)
+          }
+        )
+      }
+    }
+  }
+
+  private fun JSONObject.putLlmCredentials(
+    llm: EffectiveLlmConfig,
+    providerKeys: LocalProviderKeys,
+  ) {
+    val providerKey = when (llm.provider) {
+      OpenClawLlmProvider.VENICE_AI -> providerKeys.veniceApiKey.trim()
+      OpenClawLlmProvider.GOOGLE -> providerKeys.googleApiKey.trim()
+      else -> ""
+    }
+    if (providerKey.isNotBlank()) {
+      put("apiKey", providerKey)
     }
   }
 
@@ -682,7 +856,7 @@ class OpenClawClient {
       ChatRoomTurn(
         botName = speaker.name,
         replyToBotName = null,
-        message = raw.take(4000).ifBlank { "Let's discuss this in the forum!" },
+        message = raw.take(4000).ifBlank { "Let's chat in the Cha Chaan Teng!" },
         expression = BotExpression.UH_HUH,
         parsedInstruction = null,
       )
@@ -704,16 +878,107 @@ class OpenClawClient {
   private fun extractReplyFromOpenAiCompatibleJson(
     rawJson: String,
     refinedInstruction: String?,
+    host: OpenClawHost? = null,
+    fallbackModel: String = "",
+    fallbackPrompt: String = "",
   ): OpenClawDispatchResult {
     return try {
       val json = JSONObject(rawJson)
       val choices = json.optJSONArray("choices")
-      val content = if (choices != null && choices.length() > 0) {
-        choices.getJSONObject(0).optJSONObject("message")?.optString("content").orEmpty()
-      } else {
-        json.optString("reply", json.optString("output", rawJson))
+      val msgObj = if (choices != null && choices.length() > 0) {
+        choices.getJSONObject(0).optJSONObject("message")
+      } else null
+      val content = msgObj?.optString("content").orEmpty()
+        .ifBlank { json.optString("reply", json.optString("output", "")) }
+
+      // Extract structured media URL from root, message object, media/attachments arrays, or data[]
+      val mediaObj = json.optJSONObject("media") ?: msgObj?.optJSONObject("media")
+      val firstAttach = (json.optJSONArray("attachments") ?: msgObj?.optJSONArray("attachments"))
+        ?.optJSONObject(0)
+      val firstData = json.optJSONArray("data")?.optJSONObject(0)
+
+      val rawVideoUrl = listOfNotNull(
+        json.optString("video_url").takeIf { it.isNotBlank() },
+        json.optString("videoUrl").takeIf { it.isNotBlank() },
+        msgObj?.optString("video_url")?.takeIf { it.isNotBlank() },
+        msgObj?.optString("videoUrl")?.takeIf { it.isNotBlank() },
+        mediaObj?.optString("video_url")?.takeIf { it.isNotBlank() },
+        mediaObj?.optString("videoUrl")?.takeIf { it.isNotBlank() },
+      ).firstOrNull()
+
+      val rawImageUrl = listOfNotNull(
+        json.optString("image_url").takeIf { it.isNotBlank() },
+        json.optString("imageUrl").takeIf { it.isNotBlank() },
+        msgObj?.optString("image_url")?.takeIf { it.isNotBlank() },
+        msgObj?.optString("imageUrl")?.takeIf { it.isNotBlank() },
+        mediaObj?.optString("image_url")?.takeIf { it.isNotBlank() },
+        mediaObj?.optString("imageUrl")?.takeIf { it.isNotBlank() },
+        firstData?.optString("url")?.takeIf { it.isNotBlank() },
+      ).firstOrNull()
+
+      val genericMediaUrl = listOfNotNull(
+        rawVideoUrl,
+        rawImageUrl,
+        json.optString("media_url").takeIf { it.isNotBlank() },
+        json.optString("mediaUrl").takeIf { it.isNotBlank() },
+        json.optString("output_url").takeIf { it.isNotBlank() },
+        msgObj?.optString("media_url")?.takeIf { it.isNotBlank() },
+        msgObj?.optString("mediaUrl")?.takeIf { it.isNotBlank() },
+        mediaObj?.optString("url")?.takeIf { it.isNotBlank() },
+        firstAttach?.optString("url")?.takeIf { it.isNotBlank() },
+        firstAttach?.optString("path")?.takeIf { it.isNotBlank() },
+      ).firstOrNull()
+
+      val textDetectedMedia = if (genericMediaUrl == null) {
+        detectMediaUrlInText(content)
+      } else null
+
+      val rawMediaUrl = genericMediaUrl ?: textDetectedMedia
+      val resolvedMediaUrl = resolveMediaUrl(rawMediaUrl, host)
+      val b64Fallback = firstData?.optString("b64_json")?.takeIf { it.isNotBlank() }
+        ?.let { "data:image/png;base64,$it" }
+
+      val finalMediaUrl = resolvedMediaUrl ?: b64Fallback
+      val explicitType = (json.optString("media_type")
+        .ifBlank { json.optString("mediaType") }
+        .ifBlank { mediaObj?.optString("type").orEmpty() }
+        .ifBlank { firstAttach?.optString("type").orEmpty() })
+        .lowercase(Locale.US)
+
+      val detectedType = when {
+        finalMediaUrl == null -> null
+        rawVideoUrl != null || explicitType.contains("video") || isVideoUrl(finalMediaUrl) ->
+          GeneratedMediaType.VIDEO
+        else -> GeneratedMediaType.IMAGE
       }
-      val lowered = content.lowercase()
+
+      val mediaPrompt = json.optString("prompt")
+        .ifBlank { mediaObj?.optString("prompt").orEmpty() }
+        .ifBlank { firstData?.optString("revised_prompt").orEmpty() }
+        .ifBlank { fallbackPrompt }
+        .take(1000)
+
+      val mediaModel = json.optString("model")
+        .ifBlank { mediaObj?.optString("model").orEmpty() }
+        .ifBlank { fallbackModel }
+        .take(120)
+
+      val durationSec = listOf(
+        json.optInt("duration_sec", -1),
+        json.optInt("duration", -1),
+        mediaObj?.optInt("duration_sec", -1) ?: -1,
+        mediaObj?.optInt("duration", -1) ?: -1,
+      ).firstOrNull { it > 0 } ?: if (detectedType == GeneratedMediaType.VIDEO) 5 else 0
+
+      val displayContent = content.ifBlank {
+        when (detectedType) {
+          GeneratedMediaType.VIDEO -> "Generated your video clip via OpenClaw!"
+          GeneratedMediaType.IMAGE -> "Generated your image via OpenClaw!"
+          null -> "OpenClaw acknowledged your task."
+        }
+      }
+
+      val lowered = displayContent.lowercase()
       val takeover = lowered.contains("take over") ||
         lowered.contains("captcha") ||
         lowered.contains("2fa") ||
@@ -724,18 +989,66 @@ class OpenClawClient {
         else -> BotExpression.UH_HUH
       }
       OpenClawDispatchResult(
-        replyText = content.ifBlank { "OpenClaw acknowledged your task." },
+        replyText = displayContent,
         parsedInstruction = refinedInstruction,
         expression = expr,
         takeoverSuggested = takeover,
+        mediaUrl = finalMediaUrl,
+        mediaType = detectedType,
+        mediaPrompt = mediaPrompt.takeIf { finalMediaUrl != null && it.isNotBlank() },
+        mediaModel = mediaModel.takeIf { finalMediaUrl != null && it.isNotBlank() },
+        mediaDurationSec = durationSec.takeIf { finalMediaUrl != null },
       )
     } catch (_: Exception) {
+      val fallbackUrl = resolveMediaUrl(detectMediaUrlInText(rawJson), host)
+      val detectedType = fallbackUrl?.let {
+        if (isVideoUrl(it)) GeneratedMediaType.VIDEO else GeneratedMediaType.IMAGE
+      }
       OpenClawDispatchResult(
         replyText = rawJson.ifBlank { "OpenClaw responded." },
         parsedInstruction = refinedInstruction,
         expression = BotExpression.UH_HUH,
         takeoverSuggested = false,
+        mediaUrl = fallbackUrl,
+        mediaType = detectedType,
+        mediaPrompt = fallbackPrompt.takeIf { fallbackUrl != null && it.isNotBlank() },
+        mediaModel = fallbackModel.takeIf { fallbackUrl != null && it.isNotBlank() },
+        mediaDurationSec = if (detectedType == GeneratedMediaType.VIDEO) 5 else null,
       )
+    }
+  }
+
+  private fun detectMediaUrlInText(text: String): String? {
+    val mdMatch = Regex("!\\[[^\\]]*\\]\\(([^)\\s]+)\\)").find(text)
+    if (mdMatch != null) return mdMatch.groupValues[1]
+
+    val urlRegex = Regex("(https?://[^\\s)\"'>]+\\.(?:png|jpg|jpeg|webp|gif|mp4|webm|mov)(?:\\?[^\\s)\"'>]*)?)", RegexOption.IGNORE_CASE)
+    urlRegex.find(text)?.let { return it.groupValues[1] }
+
+    val relRegex = Regex("((?:/media/|/files/|/outputs/|~/|C:\\\\)[^\\s)\"'>]+\\.(?:png|jpg|jpeg|webp|gif|mp4|webm|mov))", RegexOption.IGNORE_CASE)
+    return relRegex.find(text)?.groupValues[1]
+  }
+
+  private fun isVideoUrl(url: String): Boolean {
+    val clean = url.substringBefore('?').lowercase(Locale.US)
+    return clean.endsWith(".mp4") || clean.endsWith(".webm") || clean.endsWith(".mov")
+  }
+
+  private fun resolveMediaUrl(raw: String?, host: OpenClawHost?): String? {
+    val trimmed = raw?.trim().orEmpty()
+    if (trimmed.isBlank()) return null
+    if (trimmed.startsWith("http://", true) ||
+      trimmed.startsWith("https://", true) ||
+      trimmed.startsWith("data:", true)
+    ) {
+      return trimmed
+    }
+    val base = host?.baseUrl?.trim()?.trimEnd('/').orEmpty()
+    if (base.isBlank()) return trimmed
+    return if (trimmed.startsWith("/")) {
+      "$base$trimmed"
+    } else {
+      "$base/media/$trimmed"
     }
   }
 

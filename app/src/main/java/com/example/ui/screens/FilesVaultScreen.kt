@@ -6,12 +6,16 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,19 +23,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,36 +58,64 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.R
+import com.example.data.files.MediaSaveHelper
 import com.example.model.FileLinkType
+import com.example.model.GeneratedMediaItem
+import com.example.model.GeneratedMediaType
 import com.example.model.LinkedFile
+import com.example.model.OpenClawHost
+import com.example.ui.components.MediaLightboxDialog
 import com.example.ui.components.SectionSettingsIconButton
 import com.example.viewmodel.UiState
+import kotlinx.coroutines.launch
+
+private enum class FilesTabSection(val label: String) {
+  HOST_FILES("Host Files"),
+  GENERATED_MEDIA("Generated Media"),
+}
+
+private enum class MediaGalleryFilter(val label: String) {
+  ALL("All"),
+  IMAGES("Images"),
+  VIDEOS("Videos"),
+}
 
 @Composable
 fun FilesVaultScreen(
   linkedFilesState: UiState<List<LinkedFile>>,
+  generatedMediaState: UiState<List<GeneratedMediaItem>> = UiState.Success(emptyList()),
+  activeHost: OpenClawHost? = null,
   onAddFile: (displayName: String, uriOrPath: String, linkType: FileLinkType, mime: String, sizeBytes: Long, notes: String, attachToComposer: Boolean) -> Unit,
   onQueueForChat: (LinkedFile) -> Unit,
+  onSendMediaToChat: (GeneratedMediaItem) -> Unit = {},
   onDeleteFile: (String) -> Unit,
+  onDeleteMedia: (String) -> Unit = {},
+  onShowBanner: (String) -> Unit = {},
   onOpenHostSettings: () -> Unit,
 ) {
   val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  var selectedSection by remember { mutableStateOf(FilesTabSection.HOST_FILES) }
+  var mediaFilter by remember { mutableStateOf(MediaGalleryFilter.ALL) }
+  var lightboxMedia by remember { mutableStateOf<GeneratedMediaItem?>(null) }
   var showHostLinkDialog by remember { mutableStateOf(false) }
   var showSectionSettings by remember { mutableStateOf(false) }
 
@@ -117,7 +159,7 @@ fun FilesVaultScreen(
           modifier = Modifier.size(24.dp),
         )
         Text(
-          text = "Files & Links",
+          text = "Files & Media",
           style = MaterialTheme.typography.titleLarge.copy(
             shadow = Shadow(color = Color(0x881A0033), offset = Offset(0f, 2f), blurRadius = 4f)
           ),
@@ -133,172 +175,216 @@ fun FilesVaultScreen(
       )
     }
 
-    Row(
+    // Top Segmented Toggle: Host Files vs Generated Media
+    Surface(
+      shape = RoundedCornerShape(18.dp),
+      color = Color(0x5522004E),
+      border = BorderStroke(1.2.dp, Color(0x88FF9CE6)),
       modifier = Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      Button(
-        onClick = { docPicker.launch(arrayOf("*/*")) },
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.8.dp, Color(0xFF28004A)),
-        colors = ButtonDefaults.buttonColors(
-          containerColor = Color(0xFAFFF9F2),
-          contentColor = Color(0xFF42009E),
-        ),
+      Row(
         modifier = Modifier
-          .weight(1f)
-          .height(48.dp)
-          .testTag("vault_attach_doc_button"),
+          .fillMaxWidth()
+          .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
       ) {
-        Icon(Icons.Rounded.FolderOpen, contentDescription = null, Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text("File", fontWeight = FontWeight.Bold, maxLines = 1)
-      }
-      Button(
-        onClick = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.8.dp, Color(0xFF28004A)),
-        colors = ButtonDefaults.buttonColors(
-          containerColor = Color(0xFAFFF9F2),
-          contentColor = Color(0xFF42009E),
-        ),
-        modifier = Modifier
-          .weight(1f)
-          .height(48.dp)
-          .testTag("vault_attach_photo_button"),
-      ) {
-        Icon(Icons.Rounded.Image, contentDescription = null, Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text("Photo", fontWeight = FontWeight.Bold, maxLines = 1)
-      }
-      Button(
-        onClick = { showHostLinkDialog = true },
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.8.dp, Color(0xFF28004A)),
-        colors = ButtonDefaults.buttonColors(
-          containerColor = Color(0xFFFF6D00),
-          contentColor = Color.White,
-        ),
-        modifier = Modifier
-          .weight(1f)
-          .height(48.dp)
-          .testTag("vault_add_link_button"),
-      ) {
-        Icon(Icons.Rounded.Link, contentDescription = null, Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text("Link", fontWeight = FontWeight.ExtraBold, maxLines = 1)
+        FilesTabSection.entries.forEach { tab ->
+          val selected = selectedSection == tab
+          Surface(
+            onClick = { selectedSection = tab },
+            shape = RoundedCornerShape(14.dp),
+            color = if (selected) Color(0xFFFF2E93) else Color.Transparent,
+            modifier = Modifier
+              .weight(1f)
+              .testTag(
+                if (tab == FilesTabSection.HOST_FILES) "files_tab_host_files"
+                else "files_tab_generated_media"
+              ),
+          ) {
+            Text(
+              text = tab.label,
+              style = MaterialTheme.typography.labelLarge,
+              fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
+              color = if (selected) Color.White else Color(0xFFFFD1F3),
+              textAlign = TextAlign.Center,
+              maxLines = 1,
+              modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp, horizontal = 8.dp),
+            )
+          }
+        }
       }
     }
 
-    when (linkedFilesState) {
-      is UiState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator()
-      }
-      is UiState.Error -> Surface(
-        color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
-        shape = MaterialTheme.shapes.medium,
+    if (selectedSection == FilesTabSection.HOST_FILES) {
+      Row(
         modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
       ) {
-        Text(
-          text = linkedFilesState.message,
-          color = MaterialTheme.colorScheme.error,
-          modifier = Modifier.padding(14.dp),
-        )
+        Button(
+          onClick = { docPicker.launch(arrayOf("*/*")) },
+          shape = RoundedCornerShape(16.dp),
+          border = BorderStroke(1.8.dp, Color(0xFF28004A)),
+          colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFAFFF9F2),
+            contentColor = Color(0xFF42009E),
+          ),
+          modifier = Modifier
+            .weight(1f)
+            .height(48.dp)
+            .testTag("vault_attach_doc_button"),
+        ) {
+          Icon(Icons.Rounded.FolderOpen, contentDescription = null, Modifier.size(18.dp))
+          Spacer(Modifier.width(6.dp))
+          Text("File", fontWeight = FontWeight.Bold, maxLines = 1)
+        }
+        Button(
+          onClick = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+          shape = RoundedCornerShape(16.dp),
+          border = BorderStroke(1.8.dp, Color(0xFF28004A)),
+          colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFAFFF9F2),
+            contentColor = Color(0xFF42009E),
+          ),
+          modifier = Modifier
+            .weight(1f)
+            .height(48.dp)
+            .testTag("vault_attach_photo_button"),
+        ) {
+          Icon(Icons.Rounded.Image, contentDescription = null, Modifier.size(18.dp))
+          Spacer(Modifier.width(6.dp))
+          Text("Photo", fontWeight = FontWeight.Bold, maxLines = 1)
+        }
+        Button(
+          onClick = { showHostLinkDialog = true },
+          shape = RoundedCornerShape(16.dp),
+          border = BorderStroke(1.8.dp, Color(0xFF28004A)),
+          colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFFFF6D00),
+            contentColor = Color.White,
+          ),
+          modifier = Modifier
+            .weight(1f)
+            .height(48.dp)
+            .testTag("vault_add_link_button"),
+        ) {
+          Icon(Icons.Rounded.Link, contentDescription = null, Modifier.size(18.dp))
+          Spacer(Modifier.width(6.dp))
+          Text("Link", fontWeight = FontWeight.ExtraBold, maxLines = 1)
+        }
       }
-      is UiState.Success -> {
-        val files = linkedFilesState.data
-        if (files.isEmpty()) {
-          Card(
-            shape = MaterialTheme.shapes.large,
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth(),
-          ) {
-            Column(
-              modifier = Modifier
-                .padding(24.dp)
-                .fillMaxWidth(),
-              horizontalAlignment = Alignment.CenterHorizontally,
-              verticalArrangement = Arrangement.spacedBy(8.dp),
+
+      when (linkedFilesState) {
+        is UiState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+          CircularProgressIndicator()
+        }
+        is UiState.Error -> Surface(
+          color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
+          shape = MaterialTheme.shapes.medium,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Text(
+            text = linkedFilesState.message,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(14.dp),
+          )
+        }
+        is UiState.Success -> {
+          val files = linkedFilesState.data
+          if (files.isEmpty()) {
+            Card(
+              shape = MaterialTheme.shapes.large,
+              colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+              modifier = Modifier.fillMaxWidth(),
             ) {
-              Icon(
-                Icons.Rounded.AttachFile,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(36.dp),
-              )
-              Text("No files or links yet", style = MaterialTheme.typography.titleMedium)
-              Text(
-                text = "Tap File, Photo, or Link above to save resources your bots can hand directly to OpenClaw.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-              )
-            }
-          }
-        } else {
-          LazyColumn(
-            contentPadding = PaddingValues(vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxSize(),
-          ) {
-            items(files, key = { it.id }) { file ->
-              Card(
-                shape = MaterialTheme.shapes.medium,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-                modifier = Modifier.fillMaxWidth(),
+              Column(
+                modifier = Modifier
+                  .padding(24.dp)
+                  .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
               ) {
-                Row(
-                  modifier = Modifier.padding(12.dp),
-                  verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(10.dp),
+                Icon(
+                  Icons.Rounded.AttachFile,
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.primary,
+                  modifier = Modifier.size(36.dp),
+                )
+                Text("No files or links yet", style = MaterialTheme.typography.titleMedium)
+                Text(
+                  text = "Tap File, Photo, or Link above to save PDFs, code files, or host paths to hand directly to OpenClaw.",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+            }
+          } else {
+            LazyColumn(
+              contentPadding = PaddingValues(vertical = 4.dp),
+              verticalArrangement = Arrangement.spacedBy(10.dp),
+              modifier = Modifier.fillMaxSize(),
+            ) {
+              items(files, key = { it.id }) { file ->
+                Card(
+                  shape = MaterialTheme.shapes.medium,
+                  colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                  elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                  modifier = Modifier.fillMaxWidth(),
                 ) {
-                  Icon(
-                    imageVector = when (file.linkTypeEnum) {
-                      FileLinkType.ANDROID_ATTACHMENT -> Icons.Rounded.AttachFile
-                      else -> Icons.Rounded.Link
-                    },
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                  )
-                  Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(
-                      text = file.displayName,
-                      style = MaterialTheme.typography.titleSmall,
-                      maxLines = 1,
-                      overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                      text = file.uriOrPath,
-                      style = MaterialTheme.typography.labelSmall,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant,
-                      maxLines = 1,
-                      overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                      text = "${file.linkTypeEnum.label}${if (file.sizeBytes > 0) " • ${file.sizeBytes / 1024} KB" else ""}",
-                      style = MaterialTheme.typography.bodySmall,
-                      color = MaterialTheme.colorScheme.secondary,
-                    )
-                  }
-                  IconButton(
-                    onClick = { onQueueForChat(file) },
-                    modifier = Modifier.size(48.dp),
+                  Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                   ) {
                     Icon(
-                      Icons.AutoMirrored.Rounded.Send,
-                      contentDescription = "Attach to active bot chat",
+                      imageVector = when (file.linkTypeEnum) {
+                        FileLinkType.ANDROID_ATTACHMENT -> Icons.Rounded.AttachFile
+                        else -> Icons.Rounded.Link
+                      },
+                      contentDescription = null,
                       tint = MaterialTheme.colorScheme.primary,
                     )
-                  }
-                  IconButton(
-                    onClick = { onDeleteFile(file.id) },
-                    modifier = Modifier.size(48.dp),
-                  ) {
-                    Icon(
-                      Icons.Rounded.DeleteOutline,
-                      contentDescription = "Delete link",
-                      tint = MaterialTheme.colorScheme.error,
-                    )
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                      Text(
+                        text = file.displayName,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                      )
+                      Text(
+                        text = file.uriOrPath,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                      )
+                      Text(
+                        text = "${file.linkTypeEnum.label}${if (file.sizeBytes > 0) " • ${file.sizeBytes / 1024} KB" else ""}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                      )
+                    }
+                    IconButton(
+                      onClick = { onQueueForChat(file) },
+                      modifier = Modifier.size(48.dp),
+                    ) {
+                      Icon(
+                        Icons.AutoMirrored.Rounded.Send,
+                        contentDescription = "Attach to active bot chat",
+                        tint = MaterialTheme.colorScheme.primary,
+                      )
+                    }
+                    IconButton(
+                      onClick = { onDeleteFile(file.id) },
+                      modifier = Modifier.size(48.dp),
+                    ) {
+                      Icon(
+                        Icons.Rounded.DeleteOutline,
+                        contentDescription = "Delete link",
+                        tint = MaterialTheme.colorScheme.error,
+                      )
+                    }
                   }
                 }
               }
@@ -306,7 +392,138 @@ fun FilesVaultScreen(
           }
         }
       }
+    } else {
+      // Generated Media Gallery
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        MediaGalleryFilter.entries.forEach { f ->
+          val active = mediaFilter == f
+          Surface(
+            onClick = { mediaFilter = f },
+            shape = RoundedCornerShape(50),
+            color = if (active) Color(0xFFFF6D00) else Color(0x5522004E),
+            border = BorderStroke(1.2.dp, if (active) Color(0xFFFFD180) else Color(0x66FF9CE6)),
+            modifier = Modifier.testTag("media_filter_${f.name}"),
+          ) {
+            Text(
+              text = f.label,
+              style = MaterialTheme.typography.labelMedium,
+              fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+              color = Color.White,
+              modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            )
+          }
+        }
+      }
+
+      when (generatedMediaState) {
+        is UiState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+          CircularProgressIndicator()
+        }
+        is UiState.Error -> Surface(
+          color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
+          shape = MaterialTheme.shapes.medium,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Text(
+            text = generatedMediaState.message,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(14.dp),
+          )
+        }
+        is UiState.Success -> {
+          val filtered = remember(generatedMediaState.data, mediaFilter) {
+            generatedMediaState.data.filter { item ->
+              when (mediaFilter) {
+                MediaGalleryFilter.ALL -> true
+                MediaGalleryFilter.IMAGES -> item.mediaTypeEnum == GeneratedMediaType.IMAGE
+                MediaGalleryFilter.VIDEOS -> item.mediaTypeEnum == GeneratedMediaType.VIDEO
+              }
+            }
+          }
+
+          if (filtered.isEmpty()) {
+            Card(
+              shape = MaterialTheme.shapes.large,
+              colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Column(
+                modifier = Modifier
+                  .padding(24.dp)
+                  .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+              ) {
+                Icon(
+                  Icons.Rounded.AutoAwesome,
+                  contentDescription = null,
+                  tint = Color(0xFFFF2E93),
+                  modifier = Modifier.size(38.dp),
+                )
+                Text("No generated media yet", style = MaterialTheme.typography.titleMedium)
+                Text(
+                  text = "Ask a Bot Dude or General Chat to generate an image or animate a clip—your OpenClaw / Venice.ai creations will automatically appear here!",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+            }
+          } else {
+            LazyVerticalGrid(
+              columns = GridCells.Fixed(2),
+              horizontalArrangement = Arrangement.spacedBy(10.dp),
+              verticalArrangement = Arrangement.spacedBy(10.dp),
+              contentPadding = PaddingValues(bottom = 12.dp),
+              modifier = Modifier
+                .fillMaxSize()
+                .testTag("generated_media_grid"),
+            ) {
+              items(filtered, key = { it.id }) { item ->
+                GeneratedMediaGridCard(
+                  item = item,
+                  activeHost = activeHost,
+                  onClick = { lightboxMedia = item },
+                  onDelete = { onDeleteMedia(item.id) },
+                )
+              }
+            }
+          }
+        }
+      }
     }
+  }
+
+  lightboxMedia?.let { item ->
+    MediaLightboxDialog(
+      mediaUrl = item.mediaUrl,
+      mediaType = item.mediaTypeEnum,
+      prompt = item.prompt,
+      modelUsed = item.modelUsed,
+      durationSec = item.durationSec,
+      activeHost = activeHost,
+      onDismiss = { lightboxMedia = null },
+      onSaveToPhone = {
+        scope.launch {
+          val res = MediaSaveHelper.saveMediaToPhone(
+            context = context,
+            mediaUrl = item.mediaUrl,
+            mediaType = item.mediaTypeEnum,
+            host = activeHost,
+            suggestedPrefix = item.sourceBotName.ifBlank { "ClawDudebro" },
+          )
+          onShowBanner(
+            res.getOrElse { err -> "Save failed: ${err.localizedMessage ?: "Error"}" }
+          )
+        }
+      },
+      onSendToChat = {
+        lightboxMedia = null
+        onSendMediaToChat(item)
+      },
+    )
   }
 
   if (showHostLinkDialog) {
@@ -384,7 +601,7 @@ fun FilesVaultScreen(
       text = {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
           Text(
-            text = "Attach photos or documents without broad storage permissions, or save Host PC paths & URLs to pass into prompts.",
+            text = "Attach photos, PDFs, or source files without broad storage permissions, browse generated images & clips, or save Host PC paths.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
@@ -413,6 +630,129 @@ fun FilesVaultScreen(
         TextButton(onClick = { showSectionSettings = false }) { Text("Done") }
       },
     )
+  }
+}
+
+@Composable
+private fun GeneratedMediaGridCard(
+  item: GeneratedMediaItem,
+  activeHost: OpenClawHost?,
+  onClick: () -> Unit,
+  onDelete: () -> Unit,
+) {
+  val context = LocalContext.current
+  val resolvedUrl = remember(item.mediaUrl, activeHost?.baseUrl) {
+    MediaSaveHelper.resolveDownloadUrl(item.mediaUrl, activeHost) ?: item.mediaUrl
+  }
+  val isVideo = item.mediaTypeEnum == GeneratedMediaType.VIDEO
+
+  Card(
+    shape = RoundedCornerShape(18.dp),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    border = BorderStroke(1.dp, Color(0x44FF9CE6)),
+    modifier = Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(18.dp))
+      .clickable(onClick = onClick)
+      .testTag("gallery_media_card_${item.id}"),
+  ) {
+    Column {
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .aspectRatio(1f)
+          .background(Color(0xFF1A072E)),
+      ) {
+        if (isVideo) {
+          Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+          ) {
+            Icon(
+              Icons.Rounded.PlayCircle,
+              contentDescription = "Play video clip",
+              tint = Color(0xFFFF8CE0),
+              modifier = Modifier.size(54.dp),
+            )
+          }
+        } else {
+          AsyncImage(
+            model = ImageRequest.Builder(context)
+              .data(resolvedUrl)
+              .crossfade(true)
+              .build(),
+            contentDescription = item.prompt,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+          )
+        }
+
+        // Top-left type + duration badge
+        Surface(
+          shape = RoundedCornerShape(50),
+          color = Color(0xCC1E0634),
+          modifier = Modifier
+            .align(Alignment.TopStart)
+            .padding(8.dp),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Icon(
+              imageVector = if (isVideo) Icons.Rounded.Movie else Icons.Rounded.Image,
+              contentDescription = null,
+              tint = Color(0xFFFF8CE0),
+              modifier = Modifier.size(12.dp),
+            )
+            Text(
+              text = if (isVideo && item.durationSec > 0) "Video • ${item.durationSec}s" else item.mediaTypeEnum.label,
+              style = MaterialTheme.typography.labelSmall,
+              color = Color.White,
+              fontWeight = FontWeight.Bold,
+            )
+          }
+        }
+
+        IconButton(
+          onClick = onDelete,
+          modifier = Modifier
+            .align(Alignment.TopEnd)
+            .padding(4.dp)
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(Color(0x991E0634)),
+        ) {
+          Icon(
+            Icons.Rounded.DeleteOutline,
+            contentDescription = "Remove from gallery",
+            tint = Color.White,
+            modifier = Modifier.size(16.dp),
+          )
+        }
+      }
+
+      Column(
+        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+      ) {
+        Text(
+          text = item.prompt.ifBlank { "Generated ${item.mediaTypeEnum.label}" },
+          style = MaterialTheme.typography.labelMedium,
+          fontWeight = FontWeight.SemiBold,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+          text = listOf(item.modelUsed, item.sourceBotName).filter { it.isNotBlank() }.joinToString(" • ").ifBlank { "OpenClaw" },
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    }
   }
 }
 

@@ -4,12 +4,14 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.PromptRefinerService
+import com.example.data.files.DeviceAttachmentReader
 import com.example.data.firebase.ClawPalRepository
 import com.example.data.local.LocalPrefsStore
 import com.example.data.local.LocalUiPrefs
 import com.example.data.openclaw.HostControlAction
 import com.example.data.openclaw.LocalProviderKeys
 import com.example.data.openclaw.OpenClawClient
+import com.example.data.openclaw.OpenClawDispatchResult
 import com.example.data.openclaw.OpenClawPingResult
 import com.example.model.AiRoutingMode
 import com.example.model.BotExpression
@@ -20,12 +22,16 @@ import com.example.model.CompanionBot
 import com.example.model.FileLinkType
 import com.example.model.GeneralChatMessage
 import com.example.model.GeneralChatThread
+import com.example.model.GeneratedMediaItem
+import com.example.model.GeneratedMediaType
 import com.example.model.HostStatus
 import com.example.model.LinkedFile
 import com.example.model.MessageSender
 import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.RoomMessage
+import com.example.model.VeniceModelCatalog
+import com.example.model.VeniceModelInfo
 import com.example.model.WheelLlmOption
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
@@ -36,6 +42,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -54,6 +61,7 @@ class ClawPalViewModel(
   private val refinerService: PromptRefinerService,
   private val openClawClient: OpenClawClient,
   private val localPrefsStore: LocalPrefsStore,
+  private val attachmentReader: DeviceAttachmentReader,
   val currentUserId: String,
 ) : ViewModel() {
 
@@ -73,6 +81,11 @@ class ClawPalViewModel(
   val linkedFilesState: StateFlow<UiState<List<LinkedFile>>> = repository.observeLinkedFiles(currentUserId)
     .map<List<LinkedFile>, UiState<List<LinkedFile>>> { UiState.Success(it) }
     .catch { error -> emit(unwrapFirestoreError("linked files", error)) }
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+  val generatedMediaState: StateFlow<UiState<List<GeneratedMediaItem>>> = repository.observeGeneratedMedia(currentUserId)
+    .map<List<GeneratedMediaItem>, UiState<List<GeneratedMediaItem>>> { UiState.Success(it) }
+    .catch { error -> emit(unwrapFirestoreError("generated media", error)) }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
   val chatRoomsState: StateFlow<UiState<List<ChatRoom>>> = repository.observeChatRooms(currentUserId)
@@ -154,6 +167,24 @@ class ClawPalViewModel(
   private val _controlLog = MutableStateFlow<List<String>>(emptyList())
   val controlLog: StateFlow<List<String>> = _controlLog.asStateFlow()
 
+  private val _isFetchingVeniceModels = MutableStateFlow(false)
+  val isFetchingVeniceModels: StateFlow<Boolean> = _isFetchingVeniceModels.asStateFlow()
+
+  private val _fetchedVeniceModels = MutableStateFlow<List<VeniceModelInfo>>(emptyList())
+  val veniceLiveModels: StateFlow<List<VeniceModelInfo>> = combine(
+    _fetchedVeniceModels,
+    localPrefs,
+  ) { fetched, prefs ->
+    (VeniceModelCatalog.popularPresets + fetched + prefs.cachedVeniceModels).distinctBy { it.id }
+  }.stateIn(
+    viewModelScope,
+    SharingStarted.WhileSubscribed(5000L),
+    VeniceModelCatalog.popularPresets,
+  )
+
+  private val _pendingChatDraft = MutableStateFlow<String?>(null)
+  val pendingChatDraft: StateFlow<String?> = _pendingChatDraft.asStateFlow()
+
   init {
     viewModelScope.launch {
       repository.seedStarterWorkspaceIfEmpty(currentUserId)
@@ -165,6 +196,21 @@ class ClawPalViewModel(
           _selectedBotId.value = prefs.selectedBotId
         }
       }
+    }
+    viewModelScope.launch {
+      repository.observeUserVenicePreferences(currentUserId)
+        .catch { /* keep local defaults if offline */ }
+        .collect { remote ->
+          if (remote != null) {
+            val cur = localPrefs.value
+            val keyToSave = remote.veniceApiKeyOverride.ifBlank { cur.veniceApiKey }
+            localPrefsStore.setProviderApiKeys(
+              veniceKey = keyToSave,
+              googleKey = cur.googleApiKey,
+              globalVeniceModel = remote.globalVeniceModel,
+            )
+          }
+        }
     }
     viewModelScope.launch {
       botsState.collect { state ->
@@ -215,6 +261,49 @@ class ClawPalViewModel(
 
   fun clearBanner() {
     _statusBanner.value = null
+  }
+
+  fun showBanner(message: String) {
+    _statusBanner.value = message
+  }
+
+  fun queueMediaDraftToBotChat(item: GeneratedMediaItem) {
+    _pendingChatDraft.value = if (item.mediaTypeEnum == GeneratedMediaType.IMAGE) {
+      "Animate this image with lively cinematic motion: ${item.mediaUrl}"
+    } else {
+      "Check out this generated video clip: ${item.mediaUrl}"
+    }
+  }
+
+  fun consumePendingChatDraft(): String? {
+    val draft = _pendingChatDraft.value
+    _pendingChatDraft.value = null
+    return draft
+  }
+
+  fun fetchLiveVeniceModels(apiKeyOverride: String = localPrefs.value.veniceApiKey) {
+    if (_isFetchingVeniceModels.value) return
+    viewModelScope.launch {
+      _isFetchingVeniceModels.value = true
+      val key = apiKeyOverride.ifBlank { localPrefs.value.veniceApiKey }
+      openClawClient.fetchVeniceLiveModels(key)
+        .onSuccess { live ->
+          _fetchedVeniceModels.value = live
+          localPrefsStore.setCachedVeniceModels(live)
+          _statusBanner.value = "Loaded ${live.size} live Venice.ai models!"
+        }
+        .onFailure { err ->
+          _statusBanner.value = "Could not fetch Venice models: ${err.localizedMessage ?: "Network error"}"
+        }
+      _isFetchingVeniceModels.value = false
+    }
+  }
+
+  fun deleteGeneratedMedia(mediaId: String) {
+    viewModelScope.launch {
+      repository.deleteGeneratedMedia(currentUserId, mediaId)
+        .onFailure { err -> _statusBanner.value = err.localizedMessage ?: "Failed to remove media item." }
+    }
   }
 
   fun togglePendingAttachment(file: LinkedFile) {
@@ -293,6 +382,11 @@ class ClawPalViewModel(
 
       val mode = activeHost?.aiModeEnum ?: AiRoutingMode.HYBRID_GEMINI_OPENCLAW
       val providerKeys = currentProviderKeys()
+      val attachmentPayloads = if (attachmentsSnapshot.isNotEmpty()) {
+        attachmentReader.preparePayloads(attachmentsSnapshot, activeHost, trimmed)
+      } else {
+        emptyList()
+      }
 
       if (mode == AiRoutingMode.OPENCLAW_ONLY && activeHost != null) {
         _liveExpression.value = BotExpression.WORKING
@@ -305,6 +399,7 @@ class ClawPalViewModel(
           linkedPaths = linkedPathLabels,
           providerKeys = providerKeys,
           wheelOverride = wheelOverride,
+          attachmentPayloads = attachmentPayloads,
         )
         dispatchRes.onSuccess { res ->
           _liveExpression.value = res.expression
@@ -319,7 +414,13 @@ class ClawPalViewModel(
             expression = res.expression,
             status = MessageStatus.COMPLETED,
             takeoverSuggested = res.takeoverSuggested,
+            mediaUrl = res.mediaUrl,
+            mediaType = res.mediaType,
+            mediaPrompt = res.mediaPrompt,
+            mediaModel = res.mediaModel,
+            mediaDurationSec = res.mediaDurationSec,
           )
+          archiveGeneratedMediaIfPresent(res, bot.name, trimmed)
           repository.updateBotPreview(currentUserId, bot.id, res.replyText)
         }.onFailure { err ->
           _liveExpression.value = BotExpression.SORRY
@@ -412,6 +513,7 @@ class ClawPalViewModel(
         linkedPaths = linkedPathLabels,
         providerKeys = providerKeys,
         wheelOverride = wheelOverride,
+        attachmentPayloads = attachmentPayloads,
       )
 
       dispatchResult.onSuccess { res ->
@@ -428,7 +530,13 @@ class ClawPalViewModel(
           expression = finalExpr,
           status = MessageStatus.COMPLETED,
           takeoverSuggested = res.takeoverSuggested || parsed.needsHostTakeover,
+          mediaUrl = res.mediaUrl,
+          mediaType = res.mediaType,
+          mediaPrompt = res.mediaPrompt,
+          mediaModel = res.mediaModel,
+          mediaDurationSec = res.mediaDurationSec,
         )
+        archiveGeneratedMediaIfPresent(res, bot.name, parsed.clearInstruction)
         repository.updateBotPreview(currentUserId, bot.id, res.replyText)
       }.onFailure { err ->
         _liveExpression.value = BotExpression.WORRIED
@@ -564,7 +672,13 @@ class ClawPalViewModel(
             expression = finalExpr,
             status = MessageStatus.COMPLETED,
             takeoverSuggested = res.takeoverSuggested || parsed.needsHostTakeover,
+            mediaUrl = res.mediaUrl,
+            mediaType = res.mediaType,
+            mediaPrompt = res.mediaPrompt,
+            mediaModel = res.mediaModel,
+            mediaDurationSec = res.mediaDurationSec,
           )
+          archiveGeneratedMediaIfPresent(res, bot.name, parsed.clearInstruction)
           repository.updateBotPreview(currentUserId, bot.id, res.replyText)
         }.onFailure { err ->
           _liveExpression.value = BotExpression.WORRIED
@@ -616,7 +730,13 @@ class ClawPalViewModel(
           expression = reply.expression,
           status = MessageStatus.COMPLETED,
           takeoverSuggested = reply.takeoverSuggested,
+          mediaUrl = reply.mediaUrl,
+          mediaType = reply.mediaType,
+          mediaPrompt = reply.mediaPrompt,
+          mediaModel = reply.mediaModel,
+          mediaDurationSec = reply.mediaDurationSec,
         )
+        archiveGeneratedMediaIfPresent(reply, bot.name, message.parsedInstruction ?: message.rawText)
       }.onFailure { err ->
         _liveExpression.value = BotExpression.SORRY
         _statusBanner.value = "Retry failed: ${err.localizedMessage ?: "Unreachable"}"
@@ -1045,6 +1165,8 @@ class ClawPalViewModel(
     if (trimmed.isBlank()) return
 
     val history = (generalMessagesState.value as? UiState.Success)?.data.orEmpty()
+    val attachmentsSnapshot = _pendingAttachments.value
+    _pendingAttachments.value = emptyList()
 
     viewModelScope.launch {
       _isBusy.value = true
@@ -1076,6 +1198,11 @@ class ClawPalViewModel(
         isDefaultTitle = chat.title == "New General Chat"
       }
 
+      val attachSummary = if (attachmentsSnapshot.isNotEmpty()) {
+        "\n\n[Attached: ${attachmentsSnapshot.joinToString(", ") { it.displayName }}]"
+      } else ""
+      val userDisplayText = "$trimmed$attachSummary".take(4000)
+
       val autoTitle = if (isDefaultTitle) trimmed.replace('\n', ' ').trim().take(48) else null
       repository.addGeneralMessage(
         userId = currentUserId,
@@ -1084,7 +1211,7 @@ class ClawPalViewModel(
           userId = currentUserId,
           chatId = resolvedChatId,
           sender = MessageSender.USER.name,
-          rawText = trimmed,
+          rawText = userDisplayText,
           modelLabel = wheelOption.fullLabel,
           status = MessageStatus.IDLE.name,
         ),
@@ -1125,6 +1252,12 @@ class ClawPalViewModel(
         return@launch
       }
 
+      val attachmentPayloads = if (attachmentsSnapshot.isNotEmpty()) {
+        attachmentReader.preparePayloads(attachmentsSnapshot, activeHost, trimmed)
+      } else {
+        emptyList()
+      }
+
       val replyRes = openClawClient.sendGeneralChat(
         host = activeHost,
         userId = currentUserId,
@@ -1132,17 +1265,24 @@ class ClawPalViewModel(
         userPrompt = trimmed,
         wheelOption = wheelOption,
         providerKeys = currentProviderKeys(),
+        attachmentPayloads = attachmentPayloads,
       )
 
-      replyRes.onSuccess { answer ->
+      replyRes.onSuccess { res ->
         repository.updateGeneralMessage(
           userId = currentUserId,
           chatId = resolvedChatId,
           messageId = assistantMsgId,
-          rawText = answer,
-          modelLabel = wheelOption.fullLabel,
+          rawText = res.replyText,
+          modelLabel = res.mediaModel?.takeIf { it.isNotBlank() } ?: wheelOption.fullLabel,
           status = MessageStatus.COMPLETED,
+          mediaUrl = res.mediaUrl,
+          mediaType = res.mediaType,
+          mediaPrompt = res.mediaPrompt,
+          mediaModel = res.mediaModel,
+          mediaDurationSec = res.mediaDurationSec,
         )
+        archiveGeneratedMediaIfPresent(res, "General (${wheelOption.wheelLabel})", trimmed)
       }.onFailure { err ->
         repository.updateGeneralMessage(
           userId = currentUserId,
@@ -1155,6 +1295,24 @@ class ClawPalViewModel(
       }
       _isBusy.value = false
     }
+  }
+
+  private suspend fun archiveGeneratedMediaIfPresent(
+    res: OpenClawDispatchResult,
+    sourceBotName: String,
+    fallbackPrompt: String,
+  ) {
+    val url = res.mediaUrl?.takeIf { it.isNotBlank() } ?: return
+    val mediaItem = GeneratedMediaItem(
+      userId = currentUserId,
+      mediaUrl = url,
+      mediaType = (res.mediaType ?: GeneratedMediaType.IMAGE).name,
+      prompt = res.mediaPrompt?.takeIf { it.isNotBlank() } ?: fallbackPrompt,
+      modelUsed = res.mediaModel?.takeIf { it.isNotBlank() } ?: localPrefs.value.globalVeniceModel,
+      durationSec = res.mediaDurationSec ?: 0,
+      sourceBotName = sourceBotName,
+    )
+    repository.addGeneratedMedia(currentUserId, mediaItem)
   }
 
   fun addLinkedFile(
@@ -1200,14 +1358,24 @@ class ClawPalViewModel(
     host: OpenClawHost,
     veniceApiKey: String = localPrefs.value.veniceApiKey,
     googleApiKey: String = localPrefs.value.googleApiKey,
+    globalVeniceModel: String = if (host.defaultLlmProviderEnum == com.example.model.OpenClawLlmProvider.VENICE_AI && host.defaultLlmModel.isNotBlank()) {
+      host.defaultLlmModel
+    } else {
+      localPrefs.value.globalVeniceModel
+    },
     onSaved: () -> Unit = {},
   ) {
     viewModelScope.launch {
       _isBusy.value = true
-      localPrefsStore.setProviderApiKeys(veniceApiKey, googleApiKey)
+      val resolvedVeniceModel = globalVeniceModel.trim().ifBlank { VeniceModelCatalog.defaultModelId }
+      localPrefsStore.setProviderApiKeys(veniceApiKey, googleApiKey, resolvedVeniceModel)
+      repository.saveUserVenicePreferences(currentUserId, resolvedVeniceModel, veniceApiKey)
       repository.saveHost(currentUserId, host)
         .onSuccess {
-          _statusBanner.value = "${host.label} & default LLM (${host.defaultLlmProviderEnum.displayName}) saved!"
+          val extraModel = if (host.defaultLlmProviderEnum == com.example.model.OpenClawLlmProvider.VENICE_AI) {
+            " ($resolvedVeniceModel)"
+          } else ""
+          _statusBanner.value = "${host.label} & default LLM (${host.defaultLlmProviderEnum.displayName}$extraModel) saved!"
           onSaved()
         }
         .onFailure { err ->
@@ -1225,6 +1393,7 @@ class ClawPalViewModel(
     return LocalProviderKeys(
       veniceApiKey = prefs.veniceApiKey,
       googleApiKey = prefs.googleApiKey,
+      globalVeniceModel = prefs.globalVeniceModel,
     )
   }
 

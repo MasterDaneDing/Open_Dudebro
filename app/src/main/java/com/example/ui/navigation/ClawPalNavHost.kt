@@ -91,6 +91,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.R
 import com.example.data.ai.PromptRefinerService
+import com.example.data.files.DeviceAttachmentReader
 import com.example.data.firebase.ClawPalRepository
 import com.example.data.local.LocalPrefsStore
 import com.example.data.openclaw.OpenClawClient
@@ -201,7 +202,7 @@ private fun SplashLoadingScreen() {
       .testTag("clawpal_splash_screen"),
   ) {
     Image(
-      painter = painterResource(id = R.drawable.img_splash_bots),
+      painter = painterResource(id = R.drawable.img_splash_bots_clothed),
       contentDescription = "Claw Dudebro companion bots giving a thumbs up",
       contentScale = ContentScale.Crop,
       modifier = Modifier.fillMaxSize(),
@@ -290,6 +291,7 @@ private fun AuthenticatedWorkspace(
           refinerService = PromptRefinerService(),
           openClawClient = OpenClawClient(),
           localPrefsStore = LocalPrefsStore(app),
+          attachmentReader = DeviceAttachmentReader(app),
           currentUserId = currentUserId,
         )
       }
@@ -312,6 +314,7 @@ private fun AuthenticatedWorkspace(
   val roomActiveExpressions by viewModel.roomActiveExpressions.collectAsStateWithLifecycle()
   val hostsState by viewModel.hostsState.collectAsStateWithLifecycle()
   val linkedFilesState by viewModel.linkedFilesState.collectAsStateWithLifecycle()
+  val generatedMediaState by viewModel.generatedMediaState.collectAsStateWithLifecycle()
   val liveExpression by viewModel.liveExpression.collectAsStateWithLifecycle()
   val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
   val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
@@ -319,6 +322,9 @@ private fun AuthenticatedWorkspace(
   val localPrefs by viewModel.localPrefs.collectAsStateWithLifecycle()
   val pingResult by viewModel.pingResult.collectAsStateWithLifecycle()
   val controlLog by viewModel.controlLog.collectAsStateWithLifecycle()
+  val veniceLiveModels by viewModel.veniceLiveModels.collectAsStateWithLifecycle()
+  val isFetchingVeniceModels by viewModel.isFetchingVeniceModels.collectAsStateWithLifecycle()
+  val pendingChatDraft by viewModel.pendingChatDraft.collectAsStateWithLifecycle()
 
   val snackbarHostState = remember { SnackbarHostState() }
   LaunchedEffect(statusBanner) {
@@ -559,6 +565,8 @@ private fun AuthenticatedWorkspace(
                 selectedChatId = selectedGeneralChatId,
                 messagesState = generalMessagesState,
                 hostsState = hostsState,
+                linkedFilesState = linkedFilesState,
+                pendingAttachments = pendingAttachments,
                 selectedWheelModel = selectedWheelModel,
                 isBusy = isBusy,
                 onSelectChat = viewModel::selectGeneralChat,
@@ -569,6 +577,19 @@ private fun AuthenticatedWorkspace(
                 onSendMessage = { thread, text, wheel, host ->
                   viewModel.sendGeneralMessage(thread, text, wheel, host)
                 },
+                onAttachDeviceFile = { name, uri, mime, size ->
+                  viewModel.addLinkedFile(
+                    displayName = name,
+                    uriOrPath = uri,
+                    linkType = FileLinkType.ANDROID_ATTACHMENT,
+                    mimeOrExt = mime,
+                    sizeBytes = size,
+                    notes = "Attached in general chat",
+                    attachToComposer = true,
+                  )
+                },
+                onToggleAttachment = viewModel::togglePendingAttachment,
+                onShowBanner = viewModel::showBanner,
                 onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
               )
             }
@@ -584,6 +605,9 @@ private fun AuthenticatedWorkspace(
                 pendingAttachments = pendingAttachments,
                 selectedWheelModel = selectedWheelModel,
                 isBusy = isBusy,
+                pendingChatDraft = pendingChatDraft,
+                onConsumePendingChatDraft = viewModel::consumePendingChatDraft,
+                onShowBanner = viewModel::showBanner,
                 onSelectBot = viewModel::selectBot,
                 onSelectWheelModel = { option -> viewModel.selectWheelModel(option, null) },
                 onBack = { navController.popBackStack() },
@@ -643,6 +667,7 @@ private fun AuthenticatedWorkspace(
                 activeExpressions = roomActiveExpressions,
                 selectedWheelModel = selectedWheelModel,
                 isBusy = isBusy,
+                onShowBanner = viewModel::showBanner,
                 onBack = { navController.popBackStack() },
                 onSelectWheelModel = { option -> viewModel.selectWheelModel(option, null) },
                 onSendRoomMessage = { r, p, h, prompt, postBubble, wheel ->
@@ -664,6 +689,10 @@ private fun AuthenticatedWorkspace(
                 existingBot = existing,
                 currentUserId = currentUserId,
                 activeHost = primaryHost,
+                globalVeniceModel = localPrefs.globalVeniceModel,
+                veniceLiveModels = veniceLiveModels,
+                isFetchingVeniceModels = isFetchingVeniceModels,
+                onFetchVeniceModels = { viewModel.fetchLiveVeniceModels() },
                 onSaveBot = { bot ->
                   viewModel.saveBot(bot) {
                     navController.popBackStack()
@@ -694,12 +723,20 @@ private fun AuthenticatedWorkspace(
             composable(ROUTE_FILES) {
               FilesVaultScreen(
                 linkedFilesState = linkedFilesState,
+                generatedMediaState = generatedMediaState,
+                activeHost = primaryHost,
                 onAddFile = viewModel::addLinkedFile,
                 onQueueForChat = { file ->
                   viewModel.togglePendingAttachment(file)
                   navController.navigate(ROUTE_CHAT)
                 },
+                onSendMediaToChat = { item ->
+                  viewModel.queueMediaDraftToBotChat(item)
+                  navController.navigate(ROUTE_CHAT)
+                },
                 onDeleteFile = viewModel::deleteLinkedFile,
+                onDeleteMedia = viewModel::deleteGeneratedMedia,
+                onShowBanner = viewModel::showBanner,
                 onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
               )
             }
@@ -712,9 +749,13 @@ private fun AuthenticatedWorkspace(
                 pingResult = pingResult,
                 savedVeniceApiKey = localPrefs.veniceApiKey,
                 savedGoogleApiKey = localPrefs.googleApiKey,
+                savedGlobalVeniceModel = localPrefs.globalVeniceModel,
+                veniceLiveModels = veniceLiveModels,
+                isFetchingVeniceModels = isFetchingVeniceModels,
+                onFetchVeniceModels = viewModel::fetchLiveVeniceModels,
                 onBack = { navigateToTopTab(ROUTE_HOME) },
-                onSaveHost = { host, veniceKey, googleKey ->
-                  viewModel.saveHost(host, veniceKey, googleKey)
+                onSaveHost = { host, veniceKey, googleKey, globalModel ->
+                  viewModel.saveHost(host, veniceKey, googleKey, globalModel)
                 },
                 onDeleteHost = viewModel::deleteHost,
                 onPingHost = viewModel::pingHost,

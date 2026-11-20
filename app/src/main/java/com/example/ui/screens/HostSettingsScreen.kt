@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -28,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,21 +46,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.openclaw.OpenClawPingResult
 import com.example.model.AiRoutingMode
 import com.example.model.HostStatus
 import com.example.model.OpenClawHost
 import com.example.model.OpenClawLlmProvider
+import com.example.model.VeniceModelCatalog
+import com.example.model.VeniceModelInfo
+import com.example.ui.components.VeniceModelPickerPanel
 import com.example.viewmodel.UiState
 
 @Composable
@@ -69,8 +74,12 @@ fun HostSettingsScreen(
   pingResult: OpenClawPingResult?,
   savedVeniceApiKey: String = "",
   savedGoogleApiKey: String = "",
+  savedGlobalVeniceModel: String = VeniceModelCatalog.defaultModelId,
+  veniceLiveModels: List<VeniceModelInfo> = VeniceModelCatalog.popularPresets,
+  isFetchingVeniceModels: Boolean = false,
+  onFetchVeniceModels: (String) -> Unit = {},
   onBack: () -> Unit = {},
-  onSaveHost: (OpenClawHost, String, String) -> Unit,
+  onSaveHost: (OpenClawHost, String, String, String) -> Unit,
   onDeleteHost: (String) -> Unit,
   onPingHost: (OpenClawHost) -> Unit,
   onSignOut: () -> Unit,
@@ -89,6 +98,17 @@ fun HostSettingsScreen(
   }
   var defaultLlmModel by remember(primaryHost?.id) {
     mutableStateOf(primaryHost?.defaultLlmModel.orEmpty())
+  }
+  var globalVeniceModel by remember(savedGlobalVeniceModel, primaryHost?.id) {
+    mutableStateOf(
+      if (primaryHost?.defaultLlmProviderEnum == OpenClawLlmProvider.VENICE_AI &&
+        primaryHost.defaultLlmModel.isNotBlank()
+      ) {
+        primaryHost.defaultLlmModel
+      } else {
+        savedGlobalVeniceModel.ifBlank { VeniceModelCatalog.defaultModelId }
+      }
+    )
   }
   var localLlmEndpoint by remember(primaryHost?.id) {
     mutableStateOf(primaryHost?.localLlmEndpoint?.ifBlank { "http://127.0.0.1:11434/v1" } ?: "http://127.0.0.1:11434/v1")
@@ -315,42 +335,76 @@ fun HostSettingsScreen(
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         val defaultModels = remember { OpenClawLlmProvider.hostOptions.map { it.defaultModel }.toSet() }
+        val selectHostProvider: (OpenClawLlmProvider) -> Unit = { provider ->
+          defaultLlmProvider = provider
+          if (provider == OpenClawLlmProvider.VENICE_AI) {
+            defaultLlmModel = globalVeniceModel.ifBlank { VeniceModelCatalog.defaultModelId }
+          } else if (defaultLlmModel.isBlank() || defaultLlmModel in defaultModels) {
+            defaultLlmModel = provider.defaultModel
+          }
+        }
         OpenClawLlmProvider.hostOptions.forEach { provider ->
+          val isVenice = provider == OpenClawLlmProvider.VENICE_AI
+          val isSelected = defaultLlmProvider == provider
           Surface(
-            onClick = {
-              defaultLlmProvider = provider
-              if (defaultLlmModel.isBlank() || defaultLlmModel in defaultModels) {
-                defaultLlmModel = provider.defaultModel
-              }
-            },
+            onClick = { selectHostProvider(provider) },
             shape = MaterialTheme.shapes.small,
-            color = if (defaultLlmProvider == provider) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            color = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            border = if (isSelected) BorderStroke(1.2.dp, MaterialTheme.colorScheme.primary) else null,
             modifier = Modifier
               .fillMaxWidth()
               .testTag("host_llm_provider_${provider.name}"),
           ) {
-            Row(
-              modifier = Modifier.padding(10.dp),
-              verticalAlignment = Alignment.CenterVertically,
-            ) {
-              RadioButton(
-                selected = defaultLlmProvider == provider,
-                onClick = {
-                  defaultLlmProvider = provider
-                  if (defaultLlmModel.isBlank() || defaultLlmModel in defaultModels) {
-                    defaultLlmModel = provider.defaultModel
+            Column(modifier = Modifier.fillMaxWidth()) {
+              Row(
+                modifier = Modifier.padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+              ) {
+                RadioButton(
+                  selected = isSelected,
+                  onClick = { selectHostProvider(provider) },
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                  Text(provider.displayName, style = MaterialTheme.typography.labelLarge)
+                  Text(provider.description, style = MaterialTheme.typography.bodySmall)
+                }
+              }
+
+              if (isVenice) {
+                AnimatedVisibility(visible = isSelected) {
+                  Column(
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                  ) {
+                    HorizontalDivider()
+                    VeniceModelPickerPanel(
+                      selectedModelId = globalVeniceModel,
+                      onSelectModelId = { chosen ->
+                        globalVeniceModel = chosen
+                        if (defaultLlmProvider == OpenClawLlmProvider.VENICE_AI) {
+                          defaultLlmModel = chosen
+                        }
+                      },
+                      availableModels = veniceLiveModels,
+                      isFetchingModels = isFetchingVeniceModels,
+                      onFetchLiveModels = { onFetchVeniceModels(veniceApiKey) },
+                      showApiKeyOverride = true,
+                      apiKeyValue = veniceApiKey,
+                      onApiKeyChange = { veniceApiKey = it },
+                      testTagPrefix = "host_venice",
+                    )
                   }
-                },
-              )
-              Column(modifier = Modifier.weight(1f)) {
-                Text(provider.displayName, style = MaterialTheme.typography.labelLarge)
-                Text(provider.description, style = MaterialTheme.typography.bodySmall)
+                }
               }
             }
           }
         }
 
-        if (defaultLlmProvider != OpenClawLlmProvider.OPENCLAW_AUTO) {
+        if (defaultLlmProvider != OpenClawLlmProvider.OPENCLAW_AUTO &&
+          defaultLlmProvider != OpenClawLlmProvider.VENICE_AI
+        ) {
           OutlinedTextField(
             value = defaultLlmModel,
             onValueChange = { defaultLlmModel = it.take(120) },
@@ -360,20 +414,6 @@ fun HostSettingsScreen(
             modifier = Modifier
               .fillMaxWidth()
               .testTag("host_default_model_input"),
-          )
-        }
-
-        if (defaultLlmProvider == OpenClawLlmProvider.VENICE_AI) {
-          OutlinedTextField(
-            value = veniceApiKey,
-            onValueChange = { veniceApiKey = it.take(256) },
-            label = { Text("Venice.ai API Key (optional, device-only)") },
-            placeholder = { Text("Leave blank if already set in OpenClaw host config") },
-            visualTransformation = PasswordVisualTransformation(),
-            singleLine = true,
-            modifier = Modifier
-              .fillMaxWidth()
-              .testTag("host_venice_key_input"),
           )
         }
 
@@ -412,6 +452,12 @@ fun HostSettingsScreen(
           )
         }
 
+        val resolvedDefaultModel = if (defaultLlmProvider == OpenClawLlmProvider.VENICE_AI) {
+          globalVeniceModel.trim().ifBlank { VeniceModelCatalog.defaultModelId }
+        } else {
+          defaultLlmModel
+        }
+
         val draftHost = OpenClawHost(
           id = editingId,
           userId = currentUserId,
@@ -421,7 +467,7 @@ fun HostSettingsScreen(
           gatewayToken = gatewayToken,
           aiMode = aiMode.name,
           defaultLlmProvider = defaultLlmProvider.name,
-          defaultLlmModel = defaultLlmModel,
+          defaultLlmModel = resolvedDefaultModel,
           localLlmEndpoint = localLlmEndpoint,
           autoParseCasual = autoParseCasual,
           lastStatus = primaryHost?.lastStatus ?: HostStatus.UNVERIFIED.name,
@@ -439,7 +485,7 @@ fun HostSettingsScreen(
             Text("Test Ping")
           }
           Button(
-            onClick = { onSaveHost(draftHost, veniceApiKey, googleApiKey) },
+            onClick = { onSaveHost(draftHost, veniceApiKey, googleApiKey, globalVeniceModel) },
             modifier = Modifier
               .weight(1f)
               .height(48.dp)

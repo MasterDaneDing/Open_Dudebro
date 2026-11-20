@@ -494,3 +494,114 @@ test("GeneralChats: owner CRUD, pin toggle, wheelModel validation, parent requir
 
   await assertSucceeds(chatsRef.doc("chat_1").delete());
 });
+
+test("GeneratedMedia & UserVeniceSettings: CRUD, mediaType bounds, message media fields, and cross-user isolation", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const now = new Date(Date.now() - 1000);
+
+  // Unauthenticated denied
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/generatedMedia`).get());
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/settings`).get());
+
+  // Valid image & video items in generatedMedia
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/generatedMedia`).doc("media_img_1").set({
+      userId: ALICE_UID,
+      mediaUrl: "https://cdn.example.com/render_cha_chaan_teng.png",
+      mediaType: "IMAGE",
+      prompt: "Cozy neon cafe interior with cartoon cups",
+      modelUsed: "claude-sonnet-4-6",
+      durationSec: 0,
+      sourceBotName: "Bimbo",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/generatedMedia`).doc("media_vid_1").set({
+      userId: ALICE_UID,
+      mediaUrl: "http://192.168.1.50:18789/media/clip_01.mp4",
+      mediaType: "VIDEO",
+      prompt: "Animate waving mascot with warm glow",
+      modelUsed: "venice-video-i2v",
+      durationSec: 6,
+      sourceBotName: "Volt-50",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Reject invalid mediaType & negative duration
+  await assertFails(
+    aliceDb.collection(`users/${ALICE_UID}/generatedMedia`).doc("media_bad").set({
+      userId: ALICE_UID,
+      mediaUrl: "https://cdn.example.com/bad.bin",
+      mediaType: "AUDIO_ONLY",
+      prompt: "Bad",
+      modelUsed: "unknown",
+      durationSec: 0,
+      sourceBotName: "Bimbo",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // UserVenicePreferences create & partial update
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/settings`).doc("venice").set({
+      userId: ALICE_UID,
+      globalVeniceModel: "claude-sonnet-4-6",
+      veniceApiKeyOverride: "venice-test-override-key",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/settings`).doc("venice").update({
+      globalVeniceModel: "qwen-2.5-coder-32b",
+      updatedAt: new Date(Date.now() - 400),
+    })
+  );
+
+  // BotMessage update with inline media fields
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/bots`).doc("bot_media").set(sampleBotPayload(ALICE_UID))
+  );
+  await assertSucceeds(
+    aliceDb
+      .collection(`users/${ALICE_UID}/bots/bot_media/messages`)
+      .doc("msg_media")
+      .set(sampleMessagePayload(ALICE_UID, "bot_media"))
+  );
+  await assertSucceeds(
+    aliceDb
+      .collection(`users/${ALICE_UID}/bots/bot_media/messages`)
+      .doc("msg_media")
+      .update({
+        rawText: "Here is your generated image!",
+        status: "COMPLETED",
+        expression: "UH_HUH",
+        mediaUrl: "https://cdn.example.com/out.png",
+        mediaType: "IMAGE",
+        mediaPrompt: "Cyberpunk teacup",
+        mediaModel: "claude-sonnet-4-6",
+        updatedAt: new Date(Date.now() - 200),
+      })
+  );
+
+  // Cross-user isolation
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/generatedMedia`).get());
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/settings`).get());
+  await assertFails(
+    bobDb.collection(`users/${ALICE_UID}/settings`).doc("venice").set({
+      userId: ALICE_UID,
+      globalVeniceModel: "hijack",
+      veniceApiKeyOverride: "",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+});
+

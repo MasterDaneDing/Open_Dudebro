@@ -1,10 +1,19 @@
 package com.example.ui.screens
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -32,9 +41,13 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FilterList
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AlertDialog
@@ -58,6 +71,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,23 +82,33 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.files.MediaSaveHelper
+import com.example.model.FileLinkType
 import com.example.model.GeneralChatMessage
 import com.example.model.GeneralChatThread
+import com.example.model.GeneratedMediaType
+import com.example.model.LinkedFile
 import com.example.model.MessageSender
 import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.WheelLlmOption
+import com.example.ui.components.InlineMediaCard
 import com.example.ui.components.LlmRotaryWheelSelector
+import com.example.ui.components.MediaLightboxDialog
 import com.example.ui.components.SectionSettingsIconButton
 import com.example.viewmodel.UiState
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 private enum class GeneralFilter(val label: String) {
   ALL("All"),
@@ -97,6 +121,8 @@ fun GeneralChatScreen(
   selectedChatId: String,
   messagesState: UiState<List<GeneralChatMessage>>,
   hostsState: UiState<List<OpenClawHost>>,
+  linkedFilesState: UiState<List<LinkedFile>> = UiState.Success(emptyList()),
+  pendingAttachments: List<LinkedFile> = emptyList(),
   selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
   onSelectChat: (String) -> Unit,
@@ -105,10 +131,17 @@ fun GeneralChatScreen(
   onDeleteChat: (String) -> Unit,
   onSelectWheelModel: (WheelLlmOption, String?) -> Unit,
   onSendMessage: (GeneralChatThread?, String, WheelLlmOption, OpenClawHost?) -> Unit,
+  onAttachDeviceFile: (String, String, String, Long) -> Unit = { _, _, _, _ -> },
+  onToggleAttachment: (LinkedFile) -> Unit = {},
+  onShowBanner: (String) -> Unit = {},
   onOpenHostSettings: () -> Unit,
 ) {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val clipboard = LocalClipboardManager.current
   val threads = (generalChatsState as? UiState.Success)?.data.orEmpty()
   val messages = (messagesState as? UiState.Success)?.data.orEmpty()
+  val linkedFiles = (linkedFilesState as? UiState.Success)?.data.orEmpty()
   val activeHost = (hostsState as? UiState.Success)?.data?.firstOrNull()
   val activeThread = threads.firstOrNull { it.id == selectedChatId }
 
@@ -117,6 +150,29 @@ fun GeneralChatScreen(
   var searchQuery by remember { mutableStateOf("") }
   var composerText by remember { mutableStateOf("") }
   var showSettingsDialog by remember { mutableStateOf(false) }
+  var showAttachSheet by remember { mutableStateOf(false) }
+  var lightboxMessage by remember { mutableStateOf<GeneralChatMessage?>(null) }
+
+  val documentLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.OpenMultipleDocuments(),
+  ) { uris ->
+    uris.forEach { uri ->
+      runCatching {
+        context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+      val meta = resolveGeneralUriMeta(context, uri)
+      onAttachDeviceFile(meta.name, uri.toString(), meta.mime, meta.size)
+    }
+  }
+
+  val photoLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.PickVisualMedia(),
+  ) { uri ->
+    if (uri != null) {
+      val meta = resolveGeneralUriMeta(context, uri)
+      onAttachDeviceFile(meta.name, uri.toString(), meta.mime.ifBlank { "image/*" }, meta.size)
+    }
+  }
 
   LaunchedEffect(selectedChatId) {
     if (selectedChatId.isNotBlank()) {
@@ -175,6 +231,8 @@ fun GeneralChatScreen(
             activeThread = activeThread,
             messagesState = messagesState,
             messages = messages,
+            activeHost = activeHost,
+            pendingAttachments = pendingAttachments,
             selectedWheelModel = selectedWheelModel,
             composerText = composerText,
             isBusy = isBusy,
@@ -184,6 +242,8 @@ fun GeneralChatScreen(
               if (activeThread != null) onTogglePinChat(activeThread.id, !activeThread.pinned)
             },
             onOpenSettings = { showSettingsDialog = true },
+            onOpenAttach = { showAttachSheet = true },
+            onToggleAttachment = onToggleAttachment,
             onSelectWheelModel = { option -> onSelectWheelModel(option, activeThread?.id) },
             onComposerChange = { composerText = it },
             onSend = {
@@ -191,6 +251,21 @@ fun GeneralChatScreen(
               composerText = ""
               onSendMessage(activeThread, prompt, selectedWheelModel, activeHost)
             },
+            onAnimateImage = { url ->
+              composerText = "Animate this image with lively cinematic motion: $url"
+            },
+            onSaveMedia = { url, type ->
+              scope.launch {
+                MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                  .onSuccess { onShowBanner(it) }
+                  .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
+              }
+            },
+            onCopyPrompt = { promptText ->
+              clipboard.setText(AnnotatedString(promptText))
+              onShowBanner("Prompt copied to clipboard!")
+            },
+            onOpenLightbox = { msg -> lightboxMessage = msg },
             modifier = Modifier
               .weight(1f)
               .fillMaxHeight(),
@@ -225,6 +300,8 @@ fun GeneralChatScreen(
           activeThread = activeThread,
           messagesState = messagesState,
           messages = messages,
+          activeHost = activeHost,
+          pendingAttachments = pendingAttachments,
           selectedWheelModel = selectedWheelModel,
           composerText = composerText,
           isBusy = isBusy,
@@ -234,6 +311,8 @@ fun GeneralChatScreen(
             if (activeThread != null) onTogglePinChat(activeThread.id, !activeThread.pinned)
           },
           onOpenSettings = { showSettingsDialog = true },
+          onOpenAttach = { showAttachSheet = true },
+          onToggleAttachment = onToggleAttachment,
           onSelectWheelModel = { option -> onSelectWheelModel(option, activeThread?.id) },
           onComposerChange = { composerText = it },
           onSend = {
@@ -241,6 +320,21 @@ fun GeneralChatScreen(
             composerText = ""
             onSendMessage(activeThread, prompt, selectedWheelModel, activeHost)
           },
+          onAnimateImage = { url ->
+            composerText = "Animate this image with lively cinematic motion: $url"
+          },
+          onSaveMedia = { url, type ->
+            scope.launch {
+              MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                .onSuccess { onShowBanner(it) }
+                .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
+            }
+          },
+          onCopyPrompt = { promptText ->
+            clipboard.setText(AnnotatedString(promptText))
+            onShowBanner("Prompt copied to clipboard!")
+          },
+          onOpenLightbox = { msg -> lightboxMessage = msg },
           modifier = Modifier.fillMaxSize(),
         )
       }
@@ -318,6 +412,107 @@ fun GeneralChatScreen(
         TextButton(onClick = { showSettingsDialog = false }) { Text("Done") }
       },
     )
+  }
+
+  if (showAttachSheet) {
+    AlertDialog(
+      onDismissRequest = { showAttachSheet = false },
+      title = { Text("Attach File to General Chat") },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          val attachPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+          OutlinedButton(
+            onClick = {
+              showAttachSheet = false
+              documentLauncher.launch(arrayOf("*/*"))
+            },
+            contentPadding = attachPadding,
+            modifier = Modifier
+              .fillMaxWidth()
+              .defaultMinSize(minHeight = 48.dp)
+              .testTag("general_pick_device_file_button"),
+          ) {
+            Icon(Icons.Rounded.FolderOpen, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Attach PDF, Code, or Document")
+          }
+          OutlinedButton(
+            onClick = {
+              showAttachSheet = false
+              photoLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            contentPadding = attachPadding,
+            modifier = Modifier
+              .fillMaxWidth()
+              .defaultMinSize(minHeight = 48.dp)
+              .testTag("general_pick_photo_button"),
+          ) {
+            Icon(Icons.Rounded.Image, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Attach Screenshot / Photo")
+          }
+          if (linkedFiles.isNotEmpty()) {
+            Text(
+              text = "Recent Vault Files (tap to attach):",
+              style = MaterialTheme.typography.labelMedium,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            linkedFiles.take(4).forEach { file ->
+              val selected = pendingAttachments.any { it.uriOrPath == file.uriOrPath }
+              Surface(
+                onClick = { onToggleAttachment(file) },
+                shape = MaterialTheme.shapes.small,
+                color = if (selected) {
+                  MaterialTheme.colorScheme.secondaryContainer
+                } else {
+                  MaterialTheme.colorScheme.surfaceVariant
+                },
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                Text(
+                  text = "${if (selected) "✓ " else ""}${file.displayName}",
+                  style = MaterialTheme.typography.bodySmall,
+                  modifier = Modifier.padding(10.dp),
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+            }
+          }
+        }
+      },
+      confirmButton = {
+        TextButton(onClick = { showAttachSheet = false }) { Text("Done") }
+      },
+    )
+  }
+
+  lightboxMessage?.let { targetMsg ->
+    val url = targetMsg.mediaUrl
+    if (!url.isNullOrBlank()) {
+      MediaLightboxDialog(
+        mediaUrl = url,
+        mediaType = targetMsg.mediaTypeEnum,
+        prompt = targetMsg.mediaPrompt ?: targetMsg.rawText,
+        modelUsed = targetMsg.mediaModel ?: targetMsg.modelLabel,
+        durationSec = targetMsg.mediaDurationSec,
+        activeHost = activeHost,
+        onDismiss = { lightboxMessage = null },
+        onSaveToPhone = {
+          scope.launch {
+            MediaSaveHelper.saveMediaToPhone(context, url, targetMsg.mediaTypeEnum, activeHost)
+              .onSuccess { onShowBanner(it) }
+              .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
+          }
+        },
+        onSendToChat = if (targetMsg.mediaTypeEnum == GeneratedMediaType.IMAGE) {
+          {
+            composerText = "Animate this image with lively cinematic motion: $url"
+            lightboxMessage = null
+          }
+        } else null,
+      )
+    }
   }
 }
 
@@ -590,6 +785,8 @@ private fun GeneralChatConversationPane(
   activeThread: GeneralChatThread?,
   messagesState: UiState<List<GeneralChatMessage>>,
   messages: List<GeneralChatMessage>,
+  activeHost: OpenClawHost?,
+  pendingAttachments: List<LinkedFile>,
   selectedWheelModel: WheelLlmOption,
   composerText: String,
   isBusy: Boolean,
@@ -597,9 +794,15 @@ private fun GeneralChatConversationPane(
   onBackToList: () -> Unit,
   onTogglePin: () -> Unit,
   onOpenSettings: () -> Unit,
+  onOpenAttach: () -> Unit,
+  onToggleAttachment: (LinkedFile) -> Unit,
   onSelectWheelModel: (WheelLlmOption) -> Unit,
   onComposerChange: (String) -> Unit,
   onSend: () -> Unit,
+  onAnimateImage: (String) -> Unit,
+  onSaveMedia: (String, GeneratedMediaType) -> Unit,
+  onCopyPrompt: (String) -> Unit,
+  onOpenLightbox: (GeneralChatMessage) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val listState = rememberLazyListState()
@@ -609,7 +812,7 @@ private fun GeneralChatConversationPane(
     }
   }
 
-  // Vibrant Neon Orange backdrop with toga cartoon glowing gently underneath
+  // Vibrant Neon Orange backdrop with Cha Chaan Teng atmosphere gently underneath
   Box(
     modifier = modifier
       .fillMaxSize()
@@ -624,7 +827,7 @@ private fun GeneralChatConversationPane(
       ),
   ) {
     Image(
-      painter = painterResource(id = R.drawable.img_greek_forum_togas),
+      painter = painterResource(id = R.drawable.img_cha_chaan_teng),
       contentDescription = null,
       contentScale = ContentScale.Crop,
       modifier = Modifier
@@ -810,9 +1013,82 @@ private fun GeneralChatConversationPane(
                           style = MaterialTheme.typography.bodyMedium,
                           color = if (isUser) Color.White else Color(0xFF2D0F00),
                         )
+
+                        val mediaUrl = msg.mediaUrl
+                        if (!mediaUrl.isNullOrBlank()) {
+                          InlineMediaCard(
+                            mediaUrl = mediaUrl,
+                            mediaType = msg.mediaTypeEnum,
+                            prompt = msg.mediaPrompt ?: msg.rawText,
+                            modelUsed = msg.mediaModel ?: msg.modelLabel,
+                            durationSec = msg.mediaDurationSec,
+                            activeHost = activeHost,
+                            onAnimateThis = if (msg.mediaTypeEnum == GeneratedMediaType.IMAGE) onAnimateImage else null,
+                            onSaveToPhone = { onSaveMedia(mediaUrl, msg.mediaTypeEnum) },
+                            onCopyPrompt = {
+                              onCopyPrompt(msg.mediaPrompt?.takeIf { it.isNotBlank() } ?: msg.rawText)
+                            },
+                            onOpenLightbox = { onOpenLightbox(msg) },
+                          )
+                        }
                       }
                     }
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Pending Document / Image Attachments
+      AnimatedVisibility(visible = pendingAttachments.isNotEmpty()) {
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(vertical = 4.dp),
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          pendingAttachments.forEach { file ->
+            Surface(
+              shape = RoundedCornerShape(50),
+              color = Color(0xFF6A00F4),
+              border = BorderStroke(1.dp, Color(0xFFFFB2EB)),
+            ) {
+              Row(
+                modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+              ) {
+                Icon(
+                  imageVector = if (file.linkTypeEnum == FileLinkType.ANDROID_ATTACHMENT) {
+                    Icons.Rounded.AttachFile
+                  } else {
+                    Icons.Rounded.Link
+                  },
+                  contentDescription = null,
+                  modifier = Modifier.size(14.dp),
+                  tint = Color.White,
+                )
+                Text(
+                  text = file.displayName,
+                  style = MaterialTheme.typography.labelMedium,
+                  color = Color.White,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                  modifier = Modifier.widthIn(max = 140.dp),
+                )
+                IconButton(
+                  onClick = { onToggleAttachment(file) },
+                  modifier = Modifier.size(24.dp),
+                ) {
+                  Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = "Remove attachment",
+                    tint = Color.White,
+                    modifier = Modifier.size(14.dp),
+                  )
                 }
               }
             }
@@ -831,9 +1107,22 @@ private fun GeneralChatConversationPane(
           .padding(bottom = 10.dp),
       ) {
         Row(
-          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+          modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
           verticalAlignment = Alignment.Bottom,
         ) {
+          IconButton(
+            onClick = onOpenAttach,
+            modifier = Modifier
+              .size(48.dp)
+              .testTag("general_attach_button"),
+          ) {
+            Icon(
+              Icons.Rounded.AttachFile,
+              contentDescription = "Attach PDF, document, or image",
+              tint = Color(0xFFFF5500),
+            )
+          }
+
           OutlinedTextField(
             value = composerText,
             onValueChange = onComposerChange,
@@ -884,4 +1173,29 @@ private fun GeneralChatConversationPane(
       }
     }
   }
+}
+
+private data class GeneralResolvedMeta(
+  val name: String,
+  val mime: String,
+  val size: Long,
+)
+
+private fun resolveGeneralUriMeta(context: Context, uri: Uri): GeneralResolvedMeta {
+  var name = uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
+  var size = 0L
+  val mime = context.contentResolver.getType(uri).orEmpty()
+  try {
+    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (nameIdx >= 0) name = cursor.getString(nameIdx) ?: name
+        if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
+      }
+    }
+  } catch (_: Exception) {
+    // Fallback
+  }
+  return GeneralResolvedMeta(name = name, mime = mime, size = size.coerceAtLeast(0L))
 }
