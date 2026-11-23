@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
@@ -79,6 +81,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -121,9 +125,12 @@ import com.example.ui.components.LlmRotaryWheelSelector
 import com.example.ui.components.MediaLightboxDialog
 import com.example.ui.components.SectionSettingsIconButton
 import com.example.ui.util.ReplyHaptics
+import com.google.firebase.Timestamp
 import com.example.viewmodel.ConnectionFailureBanner
 import com.example.viewmodel.UiState
+import java.util.Calendar
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.launch
 
 @Composable
@@ -239,10 +246,34 @@ fun ChatWorkspaceScreen(
   }
 
   val listState = rememberLazyListState()
-  LaunchedEffect(messages.size) {
-    if (messages.isNotEmpty()) {
-      listState.animateScrollToItem(messages.lastIndex)
+  // Only follow new messages when the user is already at the bottom; otherwise they get
+  // yanked away from the history they are reading. A pill offers the jump back.
+  var pinnedToBottom by remember { mutableStateOf(true) }
+  var unreadBelow by remember { mutableIntStateOf(0) }
+  LaunchedEffect(listState) {
+    snapshotFlow {
+      val info = listState.layoutInfo
+      val last = info.visibleItemsInfo.lastOrNull()
+      last != null && last.index >= info.totalItemsCount - 1
+    }.collect { atBottom ->
+      pinnedToBottom = atBottom
+      if (atBottom) {
+        unreadBelow = 0
+      } else {
+        val info = listState.layoutInfo
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+        unreadBelow = (info.totalItemsCount - 1 - lastVisible).coerceIn(0, 99)
+      }
     }
+  }
+  LaunchedEffect(messages.size) {
+    if (messages.isEmpty()) return@LaunchedEffect
+    if (pinnedToBottom) {
+      listState.animateScrollToItem(messages.lastIndex)
+      unreadBelow = 0
+    }
+    // When unpinned the counter is recomputed on scroll below, so it reflects how many
+    // messages actually sit under the viewport rather than how many arrived.
   }
 
   val documentLauncher = rememberLauncherForActivityResult(
@@ -396,7 +427,13 @@ fun ChatWorkspaceScreen(
                   verticalArrangement = Arrangement.spacedBy(12.dp),
                   modifier = Modifier.fillMaxSize(),
                 ) {
-                  items(messages, key = { it.id }) { msg ->
+                  itemsIndexed(messages, key = { _, msg -> msg.id }) { index, msg ->
+                    val dayLabel = remember(messages.getOrNull(index - 1)?.createdAt, msg.createdAt) {
+                      daySeparatorLabel(messages.getOrNull(index - 1)?.createdAt, msg.createdAt)
+                    }
+                    if (dayLabel != null) {
+                      DaySeparator(dayLabel)
+                    }
                     val isLiveStreaming = isBusy && msg.id == latestPendingBotId
                     MessageBubbleItem(
                       message = msg,
@@ -432,6 +469,30 @@ fun ChatWorkspaceScreen(
                       },
                       onOpenLightbox = { lightboxMessage = msg },
                     )
+                  }
+                }
+                if (unreadBelow > 0) {
+                  FilledIconButton(
+                    onClick = {
+                      scope.launch { listState.animateScrollToItem(messages.lastIndex) }
+                      unreadBelow = 0
+                    },
+                    modifier = Modifier
+                      .align(Alignment.BottomCenter)
+                      .padding(bottom = 12.dp)
+                      .testTag("jump_to_latest_button"),
+                  ) {
+                    Row(
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(4.dp),
+                      modifier = Modifier.padding(horizontal = 8.dp),
+                    ) {
+                      Icon(Icons.Rounded.ArrowDownward, contentDescription = "Jump to latest", Modifier.size(16.dp))
+                      Text(
+                        text = if (unreadBelow >= 99) "99+" else unreadBelow.toString(),
+                        style = MaterialTheme.typography.labelSmall,
+                      )
+                    }
                   }
                 }
               }
@@ -808,6 +869,14 @@ fun ChatWorkspaceScreen(
         )
 
         Spacer(Modifier.width(6.dp))
+
+        com.example.ui.components.VoiceInputButton(
+          onPartial = { composerText = it },
+          onResult = { composerText = it },
+          onError = { /* soft-fail; user can still type */ },
+        )
+
+        Spacer(Modifier.width(2.dp))
 
         val canSend = activeBot != null && (composerText.isNotBlank() || pendingAttachments.isNotEmpty())
         FilledIconButton(
@@ -1985,6 +2054,48 @@ private fun resolveUriMetadata(context: Context, uri: Uri): ResolvedFileMeta {
 private val BOT_INLINE_DATA_IMAGE_REGEX = Regex(
   """!?\[[^\]]*\]\(data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+\)|data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+"""
 )
+
+/** Returns a day label when [current] starts a new calendar day vs [previous], else null. */
+private fun daySeparatorLabel(previous: Timestamp?, current: Timestamp?): String? {
+  val curDate = current?.toDate() ?: return null
+  val curCal = Calendar.getInstance().apply { time = curDate }
+  if (previous != null) {
+    val prevCal = Calendar.getInstance().apply { time = previous.toDate() }
+    val sameDay = curCal.get(Calendar.YEAR) == prevCal.get(Calendar.YEAR) &&
+      curCal.get(Calendar.DAY_OF_YEAR) == prevCal.get(Calendar.DAY_OF_YEAR)
+    if (sameDay) return null
+  }
+  val now = Calendar.getInstance()
+  val sameYear = now.get(Calendar.YEAR) == curCal.get(Calendar.YEAR)
+  val dayDelta = if (sameYear) now.get(Calendar.DAY_OF_YEAR) - curCal.get(Calendar.DAY_OF_YEAR) else -1
+  return when {
+    dayDelta == 0 -> "Today"
+    dayDelta == 1 -> "Yesterday"
+    dayDelta in 2..6 -> java.text.SimpleDateFormat("EEEE", Locale.getDefault()).format(curDate)
+    else -> java.text.SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(curDate)
+  }
+}
+
+@Composable
+private fun DaySeparator(label: String) {
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.Center,
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Surface(
+      color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+      shape = RoundedCornerShape(50),
+    ) {
+      Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+      )
+    }
+  }
+}
 
 private fun sanitizeBotDisplayText(raw: String): String {
   if (!raw.contains("data:image/", ignoreCase = true)) return raw
