@@ -10,6 +10,10 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Base64
 import android.util.Log
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import com.example.model.FileLinkType
 import com.example.model.LinkedFile
 import com.example.model.MediaAttachmentPayload
@@ -62,7 +66,7 @@ class DeviceAttachmentReader(private val context: Context) {
     }
   }
 
-  private fun readDeviceUri(
+  private suspend fun readDeviceUri(
     file: LinkedFile,
     host: OpenClawHost?,
     @Suppress("UNUSED_PARAMETER") promptHint: String,
@@ -83,13 +87,25 @@ class DeviceAttachmentReader(private val context: Context) {
       val rawImgBytes = readBytesBounded(uri, maxBytes = 10 * 1024 * 1024)
       if (rawImgBytes != null) {
         val (dataUrl, infoLabel) = encodeImageDataUrl(rawImgBytes, mime, ext)
+        // Mirror the PDF/DOCX paths: park the original on the host too, so the model can
+        // fetch full resolution if it needs detail the downscaled inline copy loses.
+        val uploadedHostRef = tryUploadFileToOpenClaw(
+          host,
+          file.displayName,
+          mime.ifBlank { "image/jpeg" },
+          rawImgBytes,
+        )
+        val extracted = buildString {
+          append("Attached image/screenshot ($infoLabel) sent inline as base64 image_url.")
+          if (!uploadedHostRef.isNullOrBlank()) append(" Original also uploaded to host as $uploadedHostRef.")
+        }
         return MediaAttachmentPayload(
           displayName = file.displayName,
           uriOrPath = file.uriOrPath,
           mimeType = mime.ifBlank { "image/jpeg" },
           linkType = file.linkTypeEnum,
-          extractedContent = "Attached image/screenshot ($infoLabel) sent inline as base64 image_url.",
-          uploadedHostId = "",
+          extractedContent = extracted,
+          uploadedHostId = uploadedHostRef.orEmpty(),
           isImage = true,
           imageDataUrl = dataUrl,
         )
@@ -133,6 +149,16 @@ class DeviceAttachmentReader(private val context: Context) {
       val docxBytes = readBytesBounded(uri, maxBytes = 12 * 1024 * 1024)
       if (docxBytes != null) {
         val extracted = extractDocxText(docxBytes)
+        // Render the document to page images so the model sees layout, tables and chops
+        // that plain text extraction flattens away.
+        val renderedPages = try {
+          renderDocxPagesAsDataUrls(docxBytes)
+        } catch (e: CancellationException) {
+          throw e
+        } catch (e: Exception) {
+          Log.w(TAG, "DOCX render failed: ${e.message}")
+          emptyList()
+        }
         val uploadedHostRef = tryUploadFileToOpenClaw(host, file.displayName, DOCX_MIME, docxBytes)
         val b64 = if (docxBytes.size <= 3 * 1024 * 1024) Base64.encodeToString(docxBytes, Base64.NO_WRAP) else ""
         return MediaAttachmentPayload(
@@ -144,6 +170,7 @@ class DeviceAttachmentReader(private val context: Context) {
           uploadedHostId = uploadedHostRef.orEmpty(),
           isDocx = true,
           fileBase64 = b64,
+          pageImageDataUrls = renderedPages,
         )
       }
     }
@@ -196,19 +223,27 @@ class DeviceAttachmentReader(private val context: Context) {
     return try {
       val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
       BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, opts)
-      val maxDim = maxOf(opts.outWidth, opts.outHeight)
+      val srcW = opts.outWidth
+      val srcH = opts.outHeight
+      val maxDim = maxOf(srcW, srcH)
+
+      // inSampleSize must be a power of two to be honoured, and only halves the decode.
+      // Once decoding is cheap enough, scale exactly to MAX_IMAGE_DIM so we never ship a
+      // 1600px+ JPEG in the request body (the old path could post 800KB of base64 per image).
       var sampleSize = 1
-      while (maxDim > 0 && (maxDim / sampleSize) > 1600) {
+      while (maxDim / sampleSize > MAX_IMAGE_DIM * 2) {
         sampleSize *= 2
       }
       val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-      val bmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
-      if (bmp != null) {
+      val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
+      if (decoded != null) {
+        val scaled = scaleToMaxDim(decoded, MAX_IMAGE_DIM)
+        if (scaled !== decoded) decoded.recycle()
         val out = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 86, out)
+        scaled.compress(Bitmap.CompressFormat.JPEG, IMAGE_JPEG_QUALITY, out)
         val jpegBytes = out.toByteArray()
-        val info = "${bmp.width}x${bmp.height}"
-        bmp.recycle()
+        val info = "${scaled.width}x${scaled.height}"
+        scaled.recycle()
         val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
         "data:image/jpeg;base64,$b64" to info
       } else {
@@ -221,6 +256,16 @@ class DeviceAttachmentReader(private val context: Context) {
       val b64 = Base64.encodeToString(rawBytes, Base64.NO_WRAP)
       "data:$fallbackMime;base64,$b64" to "${rawBytes.size / 1024}KB"
     }
+  }
+
+  /** Scales down so neither side exceeds [maxDim]; returns the input if already small enough. */
+  private fun scaleToMaxDim(src: Bitmap, maxDim: Int): Bitmap {
+    val longest = maxOf(src.width, src.height)
+    if (longest <= maxDim) return src
+    val ratio = maxDim.toFloat() / longest.toFloat()
+    val w = (src.width * ratio).toInt().coerceAtLeast(1)
+    val h = (src.height * ratio).toInt().coerceAtLeast(1)
+    return Bitmap.createScaledBitmap(src, w, h, true)
   }
 
   private fun readBytesBounded(uri: Uri, maxBytes: Int): ByteArray? {
@@ -336,12 +381,25 @@ class DeviceAttachmentReader(private val context: Context) {
     for (match in streamRegex.findAll(rawLatin)) {
       val headerStart = maxOf(0, match.range.first - 260)
       val dictHeader = rawLatin.substring(headerStart, match.range.first)
-      val startOffset = match.groups[1]?.range?.first ?: continue
-      val endExclusive = (match.groups[1]?.range?.last ?: continue) + 1
+      var startOffset = match.groups[1]?.range?.first ?: continue
+      var endExclusive = (match.groups[1]?.range?.last ?: continue) + 1
+      // The regex can swallow the leading EOL and the EOL before `endstream`; trim both
+      // so binary decoders see the exact payload bytes.
+      while (startOffset < endExclusive && pdfBytes[startOffset].toInt().toChar() in "\r\n") startOffset++
+      while (endExclusive > startOffset && pdfBytes[endExclusive - 1].toInt().toChar() in "\r\n") endExclusive--
       if (endExclusive <= startOffset || endExclusive > pdfBytes.size) continue
 
-      val streamSlice = pdfBytes.copyOfRange(startOffset, endExclusive)
-      val decodedStream = if (dictHeader.contains("FlateDecode", ignoreCase = true)) {
+      var streamSlice = pdfBytes.copyOfRange(startOffset, endExclusive)
+      // /Filter chains run left-to-right; decode ASCII85/ASCIIHex before inflating.
+      val filters = Regex("/Filter\\s*(\\[[^\\]]*\\]|/[A-Za-z0-9]+)")
+        .find(dictHeader)?.groupValues?.get(1).orEmpty()
+      if (filters.contains("ASCII85Decode", ignoreCase = true)) {
+        streamSlice = decodeAscii85(streamSlice) ?: continue
+      }
+      if (filters.contains("ASCIIHexDecode", ignoreCase = true)) {
+        streamSlice = decodeAsciiHex(streamSlice) ?: continue
+      }
+      val decodedStream = if (filters.contains("FlateDecode", ignoreCase = true)) {
         inflateFlateStream(streamSlice) ?: continue
       } else {
         String(streamSlice, StandardCharsets.ISO_8859_1)
@@ -401,6 +459,66 @@ class DeviceAttachmentReader(private val context: Context) {
       runCatching { pfd?.close() }
       runCatching { tempFile?.delete() }
     }
+  }
+
+  /** Decodes a PDF /ASCII85Decode stream (Adobe variant, terminated by `~>`). */
+  private fun decodeAscii85(input: ByteArray): ByteArray? {
+    val out = java.io.ByteArrayOutputStream()
+    var tuple = 0
+    var count = 0
+    for (raw in input) {
+      val c = raw.toInt() and 0xFF
+      if (c == ' '.code || c == '\n'.code || c == '\r'.code || c == '\t'.code) continue
+      if (c == '~'.code) break
+      if (c == 'z'.code && count == 0) {
+        out.write(byteArrayOf(0, 0, 0, 0))
+        continue
+      }
+      val v = c - 33
+      if (v < 0 || v > 84) return null
+      tuple = tuple * 85 + v
+      if (++count == 5) {
+        out.write(byteArrayOf(
+          (tuple ushr 24).toByte(), (tuple ushr 16).toByte(),
+          (tuple ushr 8).toByte(), tuple.toByte(),
+        ))
+        tuple = 0
+        count = 0
+      }
+    }
+    if (count > 0) {
+      for (i in count until 5) tuple = tuple * 85 + 84
+      val bytes = byteArrayOf(
+        (tuple ushr 24).toByte(), (tuple ushr 16).toByte(),
+        (tuple ushr 8).toByte(), tuple.toByte(),
+      )
+      out.write(bytes, 0, count - 1)
+    }
+    return out.toByteArray()
+  }
+
+  /** Decodes a PDF /ASCIIHexDecode stream (terminated by `>`). */
+  private fun decodeAsciiHex(input: ByteArray): ByteArray? {
+    val out = java.io.ByteArrayOutputStream()
+    var hi = -1
+    for (raw in input) {
+      val c = raw.toInt() and 0xFF
+      if (c == '>'.code) break
+      val v = when (c.toChar()) {
+        in '0'..'9' -> c - '0'.code
+        in 'a'..'f' -> c - 'a'.code + 10
+        in 'A'..'F' -> c - 'A'.code + 10
+        else -> continue
+      }
+      if (hi < 0) {
+        hi = v
+      } else {
+        out.write((hi shl 4) or v)
+        hi = -1
+      }
+    }
+    if (hi >= 0) out.write(hi shl 4)
+    return out.toByteArray()
   }
 
   private fun inflateFlateStream(compressed: ByteArray): String? {
@@ -499,6 +617,124 @@ class DeviceAttachmentReader(private val context: Context) {
    * Pure-Kotlin DOCX text extractor that unzips `word/document.xml` (and headers/footers),
    * preserves paragraph and table-row breaks, and strips OOXML tags cleanly.
    */
+  /** Converts DOCX body XML to simple HTML that keeps paragraphs and table structure. */
+  private fun docxToHtml(docxBytes: ByteArray): String? {
+    var bodyXml: String? = null
+    try {
+      ZipInputStream(ByteArrayInputStream(docxBytes)).use { zis ->
+        var entry = zis.nextEntry
+        while (entry != null) {
+          if (!entry.isDirectory && entry.name.lowercase(Locale.US) == "word/document.xml") {
+            bodyXml = readZipEntryText(zis)
+            break
+          }
+          zis.closeEntry()
+          entry = zis.nextEntry
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "DOCX html build failed: ${e.message}")
+      return null
+    }
+    val xml = bodyXml ?: return null
+    val body = xml.substringAfter("<w:body>", xml).substringBefore("</w:body>")
+    val html = StringBuilder()
+    html.append("<div style=\"font-family:sans-serif;font-size:14px;line-height:1.4\">")
+    // Paragraphs -> <p>, table cells -> <td>, keep bold runs visible.
+    var rest = body
+    val blockRegex = Regex("<w:(p|tr|tc)\\b[^>]*>(.*?)</w:\\1>", RegexOption.DOT_MATCHES_ALL)
+    val builder = StringBuilder()
+    var idx = 0
+    while (idx < rest.length) {
+      val open = rest.indexOf("<w:p", idx)
+      val openTr = rest.indexOf("<w:tr", idx)
+      val next = listOf(open, openTr).filter { it >= 0 }.minOrNull() ?: break
+      idx = next
+      val tag = if (rest.startsWith("<w:tr", next)) "tr" else "p"
+      val closeTag = "</w:$tag>"
+      val end = rest.indexOf(closeTag, next)
+      if (end < 0) break
+      val chunk = rest.substring(next, end + closeTag.length)
+      if (tag == "tr") {
+        builder.append("<table style=\"border-collapse:collapse;width:100%\">")
+        for (cell in Regex("<w:tc\b[^>]*>(.*?)</w:tc>", RegexOption.DOT_MATCHES_ALL).findAll(chunk)) {
+          builder.append("<td style=\"border:1px solid #999;padding:4px\">")
+          builder.append(runsToHtml(cell.groupValues[1]))
+          builder.append("</td>")
+        }
+        builder.append("</table>")
+      } else {
+        builder.append("<p>")
+        builder.append(runsToHtml(chunk))
+        builder.append("</p>")
+      }
+      idx = end + closeTag.length
+    }
+    if (builder.isBlank()) builder.append(runsToHtml(body))
+    html.append(builder)
+    html.append("</div>")
+    return html.toString()
+  }
+
+  private fun runsToHtml(fragment: String): String {
+    val sb = StringBuilder()
+    for (run in Regex("<w:t\b[^>]*>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL).findAll(fragment)) {
+      var t = run.groupValues[1]
+      t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&apos;", "'").replace("&#160;", " ")
+      sb.append(t.replace("<", "&lt;").replace(">", "&gt;"))
+    }
+    for (br in Regex("<w:(?:br|cr)\b[^>]*/?>").findAll(fragment)) sb.append("<br>")
+    return sb.toString()
+  }
+
+  /** Renders a DOCX to JPEG data-URL pages via an offscreen WebView (must run on Main). */
+  private suspend fun renderDocxPagesAsDataUrls(docxBytes: ByteArray): List<String> =
+    withContext(Dispatchers.Main) {
+      val html = docxToHtml(docxBytes) ?: return@withContext emptyList()
+      val webView = WebView(context)
+      try {
+        suspendCancellableCoroutine<Unit> { cont ->
+          webView.settings.javaScriptEnabled = false
+          webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String) {
+              if (cont.isActive) cont.resume(Unit)
+            }
+          }
+          val doc = "<html><body style=\"margin:16px;background:white\">$html</body></html>"
+          webView.loadDataWithBaseURL(null, doc, "text/html", "UTF-8", null)
+        }
+        // Lay out at phone width, then slice the tall capture into page-sized bitmaps.
+        val width = 1080
+        webView.measure(
+          android.view.View.MeasureSpec.makeMeasureSpec(width, android.view.View.MeasureSpec.EXACTLY),
+          android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
+        )
+        val fullHeight = webView.measuredHeight.coerceIn(1, 20000)
+        webView.layout(0, 0, width, fullHeight)
+        val full = Bitmap.createBitmap(width, fullHeight, Bitmap.Config.ARGB_8888)
+        Canvas(full).drawColor(Color.WHITE)
+        webView.draw(Canvas(full))
+        val pageHeight = 1500
+        val pages = buildList {
+          var y = 0
+          while (y < fullHeight) {
+            val h = minOf(pageHeight, fullHeight - y)
+            val slice = Bitmap.createBitmap(full, 0, y, width, h)
+            val out = ByteArrayOutputStream()
+            slice.compress(Bitmap.CompressFormat.JPEG, 82, out)
+            slice.recycle()
+            add("data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP))
+            y += pageHeight
+          }
+        }
+        full.recycle()
+        pages
+      } finally {
+        webView.destroy()
+      }
+    }
+
   private fun extractDocxText(docxBytes: ByteArray): String {
     val parts = mutableListOf<String>()
     try {
@@ -571,6 +807,9 @@ class DeviceAttachmentReader(private val context: Context) {
   companion object {
     private const val TAG = "DeviceAttachmentReader"
     private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    private const val MAX_IMAGE_DIM = 1280
+    private const val IMAGE_JPEG_QUALITY = 70
+
     private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "gif", "heic", "bmp")
     private val CODE_AND_TEXT_EXTENSIONS = setOf(
       "txt", "md", "markdown", "kt", "kts", "java", "py", "ts", "tsx", "js", "jsx",
