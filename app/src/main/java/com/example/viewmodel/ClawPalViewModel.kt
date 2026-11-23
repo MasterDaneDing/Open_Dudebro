@@ -22,9 +22,11 @@ import com.example.model.BackgroundAgentTask
 import com.example.model.BackgroundTaskStatus
 import com.example.model.BotExpression
 import com.example.model.BotFunctionPreset
+import com.example.model.StarterBots
 import com.example.model.BotMessage
 import com.example.model.CafeSession
 import com.example.model.CafeSessionStatus
+import com.example.model.CafeEntryKind
 import com.example.model.CafeSpeakerRole
 import com.example.model.CafeTranscriptEntry
 import com.example.model.ChatRoom
@@ -407,6 +409,14 @@ class ClawPalViewModel(
     }
     viewModelScope.launch {
       localPrefsStore.setSelectedBotId(botId)
+    }
+  }
+
+  /** Persists the in-progress composer text for a bot so it survives navigation. */
+  fun saveChatDraft(botId: String, text: String) {
+    if (botId.isBlank()) return
+    viewModelScope.launch {
+      localPrefsStore.setChatDraft(botId, text)
     }
   }
 
@@ -1514,6 +1524,88 @@ class ClawPalViewModel(
     }
   }
 
+  /** Creates the one-tap translation room using the user's translator + critic bots. */
+  fun createTranslationRoom(onCreated: (String) -> Unit = {}) {
+    viewModelScope.launch {
+      val bots = (botsState.value as? UiState.Success)?.data.orEmpty()
+      if (bots.isEmpty()) {
+        _statusBanner.value = "Register a translator and a critic bot first."
+        return@launch
+      }
+      val translator = bots.firstOrNull { it.functionPresetEnum == BotFunctionPreset.TRANSLATION }
+        ?: bots.firstOrNull { it.openClawAgentId.equals("translator", ignoreCase = true) }
+      val critic = bots.firstOrNull { it.functionPresetEnum == BotFunctionPreset.CRITIQUING }
+        ?: bots.firstOrNull { it.openClawAgentId.equals("critic", ignoreCase = true) }
+        ?: bots.firstOrNull { it.id != translator?.id }
+      if (translator == null || critic == null) {
+        _statusBanner.value = "Need one Translation bot and one Critiquing bot for this room."
+        return@launch
+      }
+      val room = StarterBots.translationRoom(currentUserId, translator.id, critic.id)
+      _nonChatBusy.value = true
+      repository.createChatRoom(currentUserId, room)
+        .onSuccess { newId ->
+          selectRoom(newId)
+          _statusBanner.value = "${room.title} opened — drop a text to translate."
+          onCreated(newId)
+        }
+        .onFailure { _statusBanner.value = "Could not open room: ${it.message}" }
+      _nonChatBusy.value = false
+    }
+  }
+
+  fun createProofreadingRoom(onCreated: (String) -> Unit = {}) {
+    createReviewPairRoom(
+      missingMsg = "Register a proofreader and a critic bot first.",
+      needMsg = "Need one Proofreading bot and one Critiquing bot for this room.",
+      primary = { it.functionPresetEnum == BotFunctionPreset.PROOFREADING },
+      build = { p, c -> StarterBots.proofreadingRoom(currentUserId, p.id, c.id) },
+      onCreated = onCreated,
+    )
+  }
+
+  fun createCodingReviewRoom(onCreated: (String) -> Unit = {}) {
+    createReviewPairRoom(
+      missingMsg = "Register a coder and a critic bot first.",
+      needMsg = "Need one Coding bot and one Critiquing bot for this room.",
+      primary = { it.functionPresetEnum == BotFunctionPreset.CODING },
+      build = { p, c -> StarterBots.codingReviewRoom(currentUserId, p.id, c.id) },
+      onCreated = onCreated,
+    )
+  }
+
+  private fun createReviewPairRoom(
+    missingMsg: String,
+    needMsg: String,
+    primary: (CompanionBot) -> Boolean,
+    build: (CompanionBot, CompanionBot) -> ChatRoom,
+    onCreated: (String) -> Unit,
+  ) {
+    viewModelScope.launch {
+      val bots = (botsState.value as? UiState.Success)?.data.orEmpty()
+      if (bots.isEmpty()) {
+        _statusBanner.value = missingMsg
+        return@launch
+      }
+      val lead = bots.firstOrNull(primary)
+      val critic = bots.firstOrNull { it.functionPresetEnum == BotFunctionPreset.CRITIQUING }
+      if (lead == null || critic == null || lead.id == critic.id) {
+        _statusBanner.value = needMsg
+        return@launch
+      }
+      val room = build(lead, critic)
+      _nonChatBusy.value = true
+      repository.createChatRoom(currentUserId, room)
+        .onSuccess { newId ->
+          selectRoom(newId)
+          _statusBanner.value = "${room.title} opened."
+          onCreated(newId)
+        }
+        .onFailure { _statusBanner.value = "Could not open room: ${it.message}" }
+      _nonChatBusy.value = false
+    }
+  }
+
   fun createChatRoom(
     title: String,
     topic: String,
@@ -1577,6 +1669,51 @@ class ClawPalViewModel(
     }
   }
 
+  fun exportRoomTranscript(
+    room: ChatRoom,
+    messages: List<RoomMessage>,
+    participants: List<CompanionBot>,
+    host: OpenClawHost?,
+  ) {
+    if (host == null) {
+      _statusBanner.value = "Add an OpenClaw host before saving a transcript."
+      return
+    }
+    if (messages.isEmpty()) {
+      _statusBanner.value = "Nothing to save yet."
+      return
+    }
+    val safeTitle = room.title.ifBlank { "room" }
+      .replace(Regex("[^A-Za-z0-9_-]+"), "_")
+      .trim('_')
+      .take(40)
+      .ifBlank { "room" }
+    val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+      .format(java.util.Date())
+    val path = "~/clawpal_exports/${safeTitle}_$stamp.md"
+    val body = buildString {
+      appendLine("# ${room.title.ifBlank { "Room" }}")
+      appendLine()
+      if (room.topic.isNotBlank()) {
+        appendLine("> ${room.topic}")
+        appendLine()
+      }
+      appendLine("Participants: ${participants.joinToString { it.name }.ifBlank { "(none)" }}")
+      appendLine()
+      messages.forEach { m ->
+        val who = if (m.senderTypeEnum == com.example.model.MessageSender.USER) "You" else m.senderBotName
+        appendLine("**$who:**")
+        appendLine(m.rawText)
+        appendLine()
+      }
+    }
+    val prompt = "Write the following Markdown to the file $path , creating the directory if needed. " +
+      "Use a heredoc so quoting survives. Then reply with one short line giving the saved path.\n\n" +
+      body
+    sendHostControlAction(host, HostControlAction.RUN_COMMAND, prompt)
+  }
+
+
   fun pauseCafeDiscussion(roomId: String) {
     cafeOrchestrator.pause(roomId) { sessionKey ->
       openClawClient.abortSession(sessionKey)
@@ -1617,6 +1754,10 @@ class ClawPalViewModel(
   ) {
     val trimmed = promptText.trim()
     if (trimmed.isBlank() || room.id.isBlank() || participants.isEmpty()) return
+    if (localPrefs.value.takeoverActive) {
+      _statusBanner.value = "You have host control — release Take Over PC before sending to the room."
+      return
+    }
 
     // Immediately interrupt any in-flight Cafe turn so user interjections take priority cleanly.
     cafeOrchestrator.stop(room.id) { sessionKey -> openClawClient.abortSession(sessionKey) }
@@ -1680,6 +1821,10 @@ class ClawPalViewModel(
     targetBotId: String?,
     isResume: Boolean,
   ) {
+    if (localPrefs.value.takeoverActive && !isResume) {
+      _statusBanner.value = "You have host control — release Take Over PC before starting a room round."
+      return
+    }
     val activeHost = currentPrimaryHost()
     val providerKeys = currentProviderKeys()
     val botById = participants.associateBy { it.id }
@@ -1738,6 +1883,7 @@ class ClawPalViewModel(
               senderBotName = entry.speakerName,
               replyToBotName = entry.replyToBotName,
               rawText = entry.content,
+              entryKind = entry.kind.name,
             )
           }
           val fallbackPrompt = currentTranscript.lastOrNull()?.content ?: room.topic
@@ -1778,6 +1924,7 @@ class ClawPalViewModel(
             mediaPrompt = result.mediaPrompt,
             mediaModel = result.mediaModel,
             mediaDurationSec = result.mediaDurationSec,
+            entryKind = CafeEntryKind.forPreset(speaker.functionPreset).name,
           ),
           previewText = "$mentionPrefix${speaker.name}: ${result.replyText}",
         )
@@ -1807,6 +1954,7 @@ class ClawPalViewModel(
       parsedInstruction = parsedInstruction,
       mediaUrl = mediaUrl,
       mediaType = if (hasMedia) mediaTypeEnum else null,
+      kind = CafeEntryKind.safeValueOf(entryKind),
     )
   }
 
@@ -2083,6 +2231,17 @@ class ClawPalViewModel(
     repository.addGeneratedMedia(currentUserId, mediaItem)
   }
 
+  fun addUrlBookmark(name: String, url: String) {
+    viewModelScope.launch {
+      localPrefsStore.addUrlBookmark(name, url)
+      _statusBanner.value = "Bookmarked ${name.ifBlank { url }}."
+    }
+  }
+
+  fun removeUrlBookmark(url: String) {
+    viewModelScope.launch { localPrefsStore.removeUrlBookmark(url) }
+  }
+
   fun addLinkedFile(
     displayName: String,
     uriOrPath: String,
@@ -2251,6 +2410,13 @@ class ClawPalViewModel(
         HostControlAction.RESUME_AGENT -> {
           localPrefsStore.setHostPaused(false)
           setLiveExpression(BotExpression.HAPPY)
+        }
+        HostControlAction.OPEN_URL -> {
+          if (input.isBlank() || !input.startsWith("http", ignoreCase = true)) {
+            _statusBanner.value = "Enter a full http(s) URL to open."
+            _nonChatBusy.value = false
+            return@launch
+          }
         }
         else -> Unit
       }

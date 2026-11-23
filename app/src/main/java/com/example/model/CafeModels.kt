@@ -28,6 +28,35 @@ enum class AgentToolPermission(
 
     fun normalizeKeys(rawKeys: List<String>): List<String> =
       rawKeys.mapNotNull { fromWireKey(it)?.wireKey }.distinct().take(12)
+
+    /**
+     * Hard ceiling of tools a bot's function preset is allowed to use. A translator should not be
+     * running shell commands even if its stored permission list is broad. The effective set is
+     * the intersection of this ceiling and the bot's own permissions, so users can narrow further
+     * but never widen past the preset.
+     */
+    fun ceilingForPreset(preset: BotFunctionPreset): List<String> = when (preset) {
+      BotFunctionPreset.TRANSLATION,
+      BotFunctionPreset.PROOFREADING,
+      BotFunctionPreset.CRITIQUING,
+      -> listOf(WORKSPACE_READ.wireKey, WEB_SEARCH.wireKey, MEDIA_GEN.wireKey)
+      BotFunctionPreset.RESEARCH -> listOf(WORKSPACE_READ.wireKey, WEB_SEARCH.wireKey)
+      BotFunctionPreset.CODING -> listOf(
+        WORKSPACE_READ.wireKey,
+        WORKSPACE_WRITE.wireKey,
+        SHELL_EXEC.wireKey,
+        WEB_SEARCH.wireKey,
+      )
+      BotFunctionPreset.GENERAL -> allKeys()
+    }
+
+    /** Resolves the enforced allowlist: preset ceiling ∩ requested, never empty. */
+    fun resolveEnforced(preset: BotFunctionPreset, requested: List<String>): List<String> {
+      val ceiling = ceilingForPreset(preset).toSet()
+      val wanted = normalizeKeys(requested)
+      val enforced = wanted.filter { it in ceiling }
+      return enforced.ifEmpty { ceilingForPreset(preset).take(3) }
+    }
   }
 }
 
@@ -56,6 +85,25 @@ enum class CafeSpeakerRole {
   SYSTEM,
 }
 
+/** What kind of contribution an entry is, used to pin real artefacts into context. */
+enum class CafeEntryKind {
+  CHAT,
+  DELIVERABLE,
+  REVIEW,
+  ;
+
+  companion object {
+    fun safeValueOf(raw: String?): CafeEntryKind =
+      entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) } ?: CHAT
+
+    fun forPreset(preset: BotFunctionPreset): CafeEntryKind = when (preset) {
+      BotFunctionPreset.TRANSLATION, BotFunctionPreset.CODING -> DELIVERABLE
+      BotFunctionPreset.CRITIQUING, BotFunctionPreset.PROOFREADING -> REVIEW
+      BotFunctionPreset.GENERAL, BotFunctionPreset.RESEARCH -> CHAT
+    }
+  }
+}
+
 data class CafeTranscriptEntry(
   val id: String,
   val speakerId: String,
@@ -69,6 +117,7 @@ data class CafeTranscriptEntry(
   val mediaUrl: String? = null,
   val mediaType: GeneratedMediaType? = null,
   val createdAtMs: Long = System.currentTimeMillis(),
+  val kind: CafeEntryKind = CafeEntryKind.CHAT,
 )
 
 enum class CafeSessionStatus(val label: String) {

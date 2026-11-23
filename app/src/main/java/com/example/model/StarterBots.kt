@@ -146,6 +146,37 @@ object StarterBots {
     ),
   )
 
+  /** One-tap translator/critic room. The translator guards spirit-of-the-original + natural idiom. */
+  fun translationRoom(userId: String, translatorId: String, criticId: String): ChatRoom = ChatRoom(
+    userId = userId,
+    title = "Spirit & Idiom Translation",
+    topic = "Translate faithfully to the spirit of the original while reading naturally and idiomatically in English. " +
+      "Critique must check both fidelity to source intent and natural English — flag anything stiff, literal, or meaning-shifted.",
+    botIds = listOf(translatorId, criticId),
+    maxPingPongTurns = 4,
+    lastMessagePreview = "Drop a text to translate — fidelity and idiom both get checked.",
+  )
+
+  fun proofreadingRoom(userId: String, proofreaderId: String, criticId: String): ChatRoom = ChatRoom(
+    userId = userId,
+    title = "Proofread & Critic",
+    topic = "Tighten the supplied text for grammar, spelling, punctuation, consistency and crisp phrasing. " +
+      "Critique must check that meaning survives every edit and flag anything over-reworded or misread.",
+    botIds = listOf(proofreaderId, criticId),
+    maxPingPongTurns = 4,
+    lastMessagePreview = "Drop a draft to proofread — every edit gets checked.",
+  )
+
+  fun codingReviewRoom(userId: String, coderId: String, criticId: String): ChatRoom = ChatRoom(
+    userId = userId,
+    title = "Code & Review",
+    topic = "Implement or fix the code requested, explaining decisions briefly. " +
+      "Critique must review correctness, edge cases and risks, and name concrete fixes.",
+    botIds = listOf(coderId, criticId),
+    maxPingPongTurns = 5,
+    lastMessagePreview = "Paste a task or snippet — the review gets real.",
+  )
+
   fun defaultHost(userId: String): OpenClawHost = OpenClawHost(
     userId = userId,
     label = "Home OpenClaw PC",

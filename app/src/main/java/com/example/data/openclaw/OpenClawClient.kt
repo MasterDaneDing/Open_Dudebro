@@ -7,6 +7,7 @@ import com.example.data.files.MediaSaveHelper
 import com.example.model.BotDude
 import com.example.model.BotExpression
 import com.example.model.BotMessage
+import com.example.model.CafeEntryKind
 import com.example.model.CafeSpeakerRole
 import com.example.model.CafeTranscriptEntry
 import com.example.model.ChatRoom
@@ -64,6 +65,7 @@ data class OpenClawDispatchResult(
   val mediaPrompt: String? = null,
   val mediaModel: String? = null,
   val mediaDurationSec: Int? = null,
+  val roomGoalSatisfied: Boolean = false,
 )
 
 data class OpenClawSyncResult(
@@ -98,6 +100,7 @@ enum class HostControlAction(val command: String, val label: String) {
   ABORT_TASK("task.abort", "Stop Current Run"),
   SEND_KEYS("input.keys", "Send Keystrokes"),
   RUN_COMMAND("shell.run", "Send Host Action"),
+  OPEN_URL("browser.open", "Open URL in Browser"),
 }
 
 data class HostControlResponse(
@@ -151,6 +154,12 @@ class OpenClawClient(
     .connectTimeout(12, TimeUnit.SECONDS)
     .readTimeout(15, TimeUnit.SECONDS)
     .build()
+
+  /** Shuts down the OkHttp dispatcher so test processes can exit cleanly. */
+  fun shutdown() {
+    runCatching { httpDispatcher.executorService.shutdown() }
+    runCatching { client.connectionPool.evictAll() }
+  }
 
   internal val sseConnectTimeoutMillis: Long
     get() = client.connectTimeoutMillis.toLong()
@@ -328,6 +337,47 @@ class OpenClawClient(
     }
   }
 
+  /**
+   * Builds the context window for a cafe turn under a bounded budget instead of a flat "last N".
+   *
+   * Always pins the original user task (the first USER entry) and the most recent bot deliverable
+   * (the last BOT entry that is not the speaker's own), so a critic never loses the translation it
+   * is reviewing and the translator never loses the brief. The remaining budget is filled with the
+   * newest turns, keeping chronological order.
+   */
+  fun selectTranscriptWindow(
+    transcript: List<CafeTranscriptEntry>,
+    selfId: String,
+    selfName: String,
+    maxEntries: Int = 14,
+    maxChars: Int = 14000,
+  ): List<CafeTranscriptEntry> {
+    if (transcript.isEmpty()) return emptyList()
+    val isSelf: (CafeTranscriptEntry) -> Boolean = { e ->
+      e.role == CafeSpeakerRole.BOT &&
+        (e.speakerId == selfId || e.speakerName.equals(selfName, ignoreCase = true))
+    }
+    val pinned = LinkedHashSet<CafeTranscriptEntry>()
+    transcript.firstOrNull { it.role == CafeSpeakerRole.USER }?.let(pinned::add)
+    val peerBot = { e: CafeTranscriptEntry -> e.role == CafeSpeakerRole.BOT && !isSelf(e) }
+    // Prefer the newest real artefact, then the newest review, then any newest bot turn.
+    transcript.lastOrNull { peerBot(it) && it.kind == CafeEntryKind.DELIVERABLE }?.let(pinned::add)
+      ?: transcript.lastOrNull { peerBot(it) && it.kind == CafeEntryKind.REVIEW }?.let(pinned::add)
+      ?: transcript.lastOrNull { peerBot(it) }?.let(pinned::add)
+
+    var chars = pinned.sumOf { it.content.length }
+    val filled = ArrayList<CafeTranscriptEntry>()
+    for (entry in transcript.asReversed()) {
+      if (pinned.size + filled.size >= maxEntries) break
+      if (entry in pinned) continue
+      if (chars + entry.content.length > maxChars && filled.isNotEmpty()) break
+      chars += entry.content.length
+      filled.add(entry)
+    }
+    val keep = (pinned + filled).toSet()
+    return transcript.filter { it in keep }.takeLast(maxEntries)
+  }
+
   fun buildBotSystemPrompt(bot: CompanionBot): String {
     val fn = bot.functionPresetEnum
     val perms = bot.effectiveToolPermissions.joinToString(", ")
@@ -337,14 +387,14 @@ class OpenClawClient(
       appendLine("Primary Function: ${fn.displayName} — ${fn.openClawDirective}")
       appendLine("User-Assigned Mission: ${bot.displayMission}")
       appendLine("Specialty Role: ${bot.roleTitle}")
-      appendLine("Allowed Tools / Capabilities: $perms")
+      appendLine("Allowed Tools / Capabilities (HARD allowlist — do not use anything outside this): $perms")
       if (bot.workspacePath.isNotBlank()) {
         appendLine("Isolated Workspace Path: ${bot.workspacePath.trim()}")
       }
       if (bot.systemPersona.isNotBlank()) {
         appendLine("Persona & Style: ${bot.systemPersona}")
       }
-      appendLine("Always perform your assigned function (${fn.displayName}) faithfully.")
+      appendLine("Always perform your assigned function (${fn.displayName}) faithfully. If a needed tool is not on the allowlist, say so instead of improvising.")
       append(MEDIA_SYSTEM_INSTRUCTION)
     }
   }
@@ -1237,11 +1287,12 @@ class OpenClawClient(
         if (!replyToBotName.isNullOrBlank()) {
           appendLine("3. Address @$replyToBotName's latest point where relevant.")
         }
+        appendLine("4. When you judge the room goal is fully satisfied (nothing left to fix or translate), end your reply with the exact token [[DONE]] on its own final line. Otherwise omit it.")
       }
 
       val messagesArray = JSONArray().apply {
         put(JSONObject().put("role", "system").put("content", systemPrompt))
-        val window = transcript.takeLast(14)
+        val window = selectTranscriptWindow(transcript, speakerBot.id, speakerBot.name)
         if (window.isEmpty()) {
           put(
             JSONObject()
@@ -1336,10 +1387,13 @@ class OpenClawClient(
       ).map { parsed ->
         // Strip leading "[BotName]: " if an LLM echoes the attribution prefix
         val prefixPattern = Regex("^\\[${Regex.escape(speakerBot.name)}(?:\\s*->[^\\]]+)?\\]\\s*:?\\s*", RegexOption.IGNORE_CASE)
-        val cleaned = parsed.replyText.replaceFirst(prefixPattern, "").trim().ifBlank { parsed.replyText }
+        val hadDone = Regex("\\[\\[DONE\\]\\]", RegexOption.IGNORE_CASE).containsMatchIn(parsed.replyText)
+        val stripped = parsed.replyText.replace(Regex("\\s*\\[\\[DONE\\]\\]\\s*", RegexOption.IGNORE_CASE), " ")
+        val cleaned = stripped.replaceFirst(prefixPattern, "").trim().ifBlank { parsed.replyText }
         parsed.copy(
           replyText = cleaned,
           mediaModel = backendModelLabel,
+          roomGoalSatisfied = hadDone,
         )
       }
     } catch (e: CancellationException) {
@@ -1395,26 +1449,76 @@ class OpenClawClient(
           )
         )
       }
-      HostControlAction.TAKEOVER_START -> {
-        return@withContext Result.success(
-          HostControlResponse(
-            accepted = true,
-            summary = "Host Takeover active. Live Control Console ready at root dashboard.",
-            endpointTried = dashboardUrl,
-          )
-        )
-      }
+      HostControlAction.TAKEOVER_START,
       HostControlAction.TAKEOVER_RELEASE -> {
-        return@withContext Result.success(
-          HostControlResponse(
-            accepted = true,
-            summary = "Handed control back to OpenClaw.",
-            endpointTried = dashboardUrl,
-          )
-        )
+        if (cleanBase.isBlank()) {
+          return@withContext Result.failure(OpenClawFormattedException("Host URL is empty."))
+        }
+        val isStart = action == HostControlAction.TAKEOVER_START
+        val prompt = if (isStart) {
+          "Enter host takeover mode: stop starting any new automated work, finish nothing new, and wait for direct input. " +
+            "Reply with one short line confirming you have paused and are awaiting manual control."
+        } else {
+          "Leave host takeover mode: resume normal automated operation from the current screen state. " +
+            "Reply with one short line confirming you have resumed."
+        }
+        val endpoint = "$cleanBase/v1/chat/completions"
+        val wireModel = resolveWireModel(APK_AGENT_ID, cleanBase)
+        val userSessionId = sanitizeUserSessionId("conv:takeover_${host.id.ifBlank { "main" }}")
+        val llm = resolveWheelLlm(WheelLlmOption.OPENCLAW_DEFAULT, host)
+        val startMs = System.currentTimeMillis()
+        try {
+          val messagesArray = JSONArray().apply {
+            put(
+              JSONObject()
+                .put("role", "system")
+                .put("content", "You are OpenClaw host control assistant. Execute or report cleanly.")
+            )
+            put(JSONObject().put("role", "user").put("content", prompt))
+          }
+          val bodyJson = JSONObject().apply {
+            put("model", wireModel)
+            put("stream", true)
+            put("user", userSessionId)
+            put("messages", messagesArray)
+          }
+          val req = Request.Builder()
+            .url(endpoint)
+            .post(bodyJson.toString().toRequestBody(jsonMediaType))
+            .addHeader("Accept", "text/event-stream, application/json")
+            .applyWheelHeaders(host, llm, LocalProviderKeys())
+            .build()
+          executeChatCompletionsWithSseFallback(
+            req = req,
+            cleanBase = cleanBase,
+            refinedInstruction = null,
+            host = host,
+            fallbackModel = resolveXOpenClawModelHeader(llm) ?: wireModel,
+            fallbackPrompt = prompt,
+            sessionKey = userSessionId,
+            agentId = MEDIA_ROUTE_AGENT_ID,
+            callTrackingKey = userSessionId,
+            onPartialText = {},
+          ).map { parsed ->
+            HostControlResponse(
+              accepted = true,
+              summary = parsed.replyText.take(240).ifBlank {
+                if (isStart) "Host takeover engaged." else "Control handed back."
+              },
+              endpointTried = endpoint,
+            )
+          }
+        } catch (e: CancellationException) {
+          throw e
+        } catch (e: Exception) {
+          val elapsed = System.currentTimeMillis() - startMs
+          Log.w(TAG, "Host takeover toggle failed: ${e.message}", e)
+          Result.failure(formatNetworkThrowable(e, cleanBase, elapsed))
+        }
       }
       HostControlAction.SEND_KEYS,
       HostControlAction.SCREEN_SNAPSHOT,
+      HostControlAction.OPEN_URL,
       HostControlAction.RUN_COMMAND -> {
         if (cleanBase.isBlank()) {
           return@withContext Result.failure(OpenClawFormattedException("Host URL is empty."))
@@ -1426,6 +1530,9 @@ class OpenClawClient(
             "Capture a fresh screenshot of the current host screen and output it as ![screenshot](data:image/png;base64,...) or MEDIA:/absolute/path/to/file.png on its own line."
           HostControlAction.RUN_COMMAND ->
             payloadValue.ifBlank { "Report current host screen and active process status." }
+          HostControlAction.OPEN_URL ->
+            "Open this URL in the active Chrome window: $payloadValue . Leave the existing tab, " +
+              "open it in a new tab, and reply with one short line confirming the page loaded."
         }
         val endpoint = "$cleanBase/v1/chat/completions"
         val wireModel = resolveWireModel(APK_AGENT_ID, cleanBase)
@@ -1686,6 +1793,7 @@ class OpenClawClient(
     if (perms.isNotEmpty()) {
       addHeader("x-openclaw-tool-permissions", perms.joinToString(","))
     }
+    addHeader("x-openclaw-tool-scope", "enforced")
     val wsPath = bot.workspacePath.trim()
     if (wsPath.isNotBlank()) {
       addHeader("x-openclaw-workspace", wsPath)

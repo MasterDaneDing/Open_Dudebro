@@ -1367,7 +1367,12 @@ private fun GeneralChatConversationPane(
               .weight(1f)
               .testTag("general_chat_input"),
           )
-          Spacer(Modifier.width(8.dp))
+          Spacer(Modifier.width(4.dp))
+          com.example.ui.components.VoiceInputButton(
+            onPartial = onComposerChange,
+            onResult = onComposerChange,
+          )
+          Spacer(Modifier.width(4.dp))
           FilledIconButton(
             onClick = onSend,
             enabled = (composerText.isNotBlank() || pendingAttachments.isNotEmpty()) && !isBusy,

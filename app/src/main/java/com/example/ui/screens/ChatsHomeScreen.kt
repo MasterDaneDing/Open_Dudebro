@@ -29,7 +29,10 @@ import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Spellcheck
+import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.SmartToy
+import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -107,6 +110,9 @@ fun ChatsHomeScreen(
   onOpenChatRoom: (ChatRoom) -> Unit,
   onAddNewBot: () -> Unit,
   onCreateChatRoom: (title: String, topic: String, botIds: List<String>, maxPingPongTurns: Int) -> Unit,
+  onCreateTranslationRoom: () -> Unit = {},
+  onCreateProofreadingRoom: () -> Unit = {},
+  onCreateCodingReviewRoom: () -> Unit = {},
   onUpdateBotMission: (CompanionBot, String) -> Unit,
   onDeleteBot: (String) -> Unit,
   onDeleteRoom: (String) -> Unit,
@@ -520,6 +526,48 @@ fun ChatsHomeScreen(
             Icon(Icons.Rounded.Groups, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text("New Multi-Bot Chat Room")
+          }
+          OutlinedButton(
+            onClick = {
+              showCreateMenu = false
+              onCreateTranslationRoom()
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(50.dp)
+              .testTag("create_translation_room_option"),
+          ) {
+            Icon(Icons.Rounded.Translate, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Spirit & Idiom Translation Room")
+          }
+          OutlinedButton(
+            onClick = {
+              showCreateMenu = false
+              onCreateProofreadingRoom()
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(50.dp)
+              .testTag("create_proofreading_room_option"),
+          ) {
+            Icon(Icons.Rounded.Spellcheck, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Proofread & Critic Room")
+          }
+          OutlinedButton(
+            onClick = {
+              showCreateMenu = false
+              onCreateCodingReviewRoom()
+            },
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(50.dp)
+              .testTag("create_coding_review_room_option"),
+          ) {
+            Icon(Icons.Rounded.Code, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Code & Review Room")
           }
           OutlinedButton(
             onClick = {

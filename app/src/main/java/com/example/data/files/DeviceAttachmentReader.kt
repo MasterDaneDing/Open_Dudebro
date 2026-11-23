@@ -2,6 +2,7 @@ package com.example.data.files
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
@@ -12,6 +13,7 @@ import android.util.Base64
 import android.util.Log
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import com.example.model.FileLinkType
@@ -237,8 +239,10 @@ class DeviceAttachmentReader(private val context: Context) {
       val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
       val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
       if (decoded != null) {
-        val scaled = scaleToMaxDim(decoded, MAX_IMAGE_DIM)
-        if (scaled !== decoded) decoded.recycle()
+        val oriented = applyExifOrientation(decoded, rawBytes)
+        if (oriented !== decoded) decoded.recycle()
+        val scaled = scaleToMaxDim(oriented, MAX_IMAGE_DIM)
+        if (scaled !== oriented) oriented.recycle()
         val out = ByteArrayOutputStream()
         scaled.compress(Bitmap.CompressFormat.JPEG, IMAGE_JPEG_QUALITY, out)
         val jpegBytes = out.toByteArray()
@@ -255,6 +259,40 @@ class DeviceAttachmentReader(private val context: Context) {
       val fallbackMime = mime.ifBlank { if (ext == "png") "image/png" else "image/jpeg" }
       val b64 = Base64.encodeToString(rawBytes, Base64.NO_WRAP)
       "data:$fallbackMime;base64,$b64" to "${rawBytes.size / 1024}KB"
+    }
+  }
+
+  /**
+   * Rotates/mirrors [src] to match its EXIF orientation. Re-encoding to JPEG drops the tag,
+   * so without this a portrait phone photo reaches the model sideways.
+   */
+  private fun applyExifOrientation(src: Bitmap, rawBytes: ByteArray): Bitmap {
+    return try {
+      val exif = ExifInterface(ByteArrayInputStream(rawBytes))
+      val orientation = exif.getAttributeInt(
+        ExifInterface.TAG_ORIENTATION,
+        ExifInterface.ORIENTATION_NORMAL,
+      )
+      val matrix = Matrix()
+      when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE -> {
+          matrix.postRotate(90f)
+          matrix.postScale(-1f, 1f)
+        }
+        ExifInterface.ORIENTATION_TRANSVERSE -> {
+          matrix.postRotate(270f)
+          matrix.postScale(-1f, 1f)
+        }
+        else -> return src
+      }
+      Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+    } catch (_: Exception) {
+      src
     }
   }
 

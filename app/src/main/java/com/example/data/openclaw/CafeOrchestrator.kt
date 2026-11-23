@@ -2,6 +2,7 @@ package com.example.data.openclaw
 
 import com.example.model.BotDude
 import com.example.model.BotExpression
+import com.example.model.CafeEntryKind
 import com.example.model.CafeSession
 import com.example.model.CafeSessionStatus
 import com.example.model.CafeSpeakerRole
@@ -249,6 +250,7 @@ class CafeOrchestrator(
             return@launch
           }
 
+          val goalSatisfied = result.roomGoalSatisfied
           val cleanText = result.replyText.trim().ifBlank { "I've added my review." }
           val botEntry = CafeTranscriptEntry(
             id = "cafe_${room.id}_${completedTurns}_${System.nanoTime()}",
@@ -262,6 +264,7 @@ class CafeOrchestrator(
             parsedInstruction = result.parsedInstruction,
             mediaUrl = result.mediaUrl,
             mediaType = result.mediaType,
+            kind = CafeEntryKind.forPreset(speaker.functionPreset),
           )
           workingTranscript = workingTranscript + botEntry
           completedTurns += 1
@@ -278,6 +281,19 @@ class CafeOrchestrator(
           }
 
           onCommitBotTurn(room.id, speaker, replyToName, result)
+
+          if (goalSatisfied) {
+            _sessions.update { map ->
+              val cur = map[room.id] ?: return@update map
+              map + (
+                room.id to cur.copy(
+                  status = CafeSessionStatus.COMPLETED,
+                  statusNote = "${speaker.name} marked the room goal satisfied after $completedTurns turn(s).",
+                )
+              )
+            }
+            break
+          }
 
           if (completedTurns < maxTurns && turnDelayMs > 0L) {
             delay(turnDelayMs)

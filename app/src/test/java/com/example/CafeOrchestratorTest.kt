@@ -2,6 +2,9 @@ package com.example
 
 import com.example.data.openclaw.CafeOrchestrator
 import com.example.data.openclaw.OpenClawDispatchResult
+import com.example.data.openclaw.OpenClawClient
+import com.example.model.AgentToolPermission
+import com.example.model.CafeEntryKind
 import com.example.model.BotDude
 import com.example.model.BotExpression
 import com.example.model.BotFunctionPreset
@@ -15,6 +18,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -37,6 +41,136 @@ class CafeOrchestratorTest {
       botA.toBotDude(resolvedModelId = "ollama/translategemma"),
       botB.toBotDude(resolvedModelId = "venice/claude-sonnet-4-6"),
     )
+  }
+
+  @Test
+  fun selectTranscriptWindow_pinsUserTaskAndLatestDeliverable_underBudget() {
+    val client = OpenClawClient()
+    val entries = buildList {
+      add(CafeTranscriptEntry("u0", "user", "You", CafeSpeakerRole.USER, content = "Translate this 2000-word notice"))
+      for (i in 1..40) {
+        val isCritic = i % 2 == 0
+        add(
+          CafeTranscriptEntry(
+            id = "e$i",
+            speakerId = if (isCritic) "critic" else "translator",
+            speakerName = if (isCritic) "Critic" else "Translator",
+            role = CafeSpeakerRole.BOT,
+            content = "turn $i content",
+          )
+        )
+      }
+    }
+    // Translator speaking: must retain the user brief and the latest critic deliverable
+    val forTranslator = client.selectTranscriptWindow(entries, "translator", "Translator", maxEntries = 14)
+    assertEquals("u0", forTranslator.first().id)
+    assertTrue("latest critic reply must be pinned", forTranslator.any { it.id == "e40" })
+    assertTrue(forTranslator.size <= 14)
+    // Newest turn is always last and order is chronological
+    assertEquals("e40", forTranslator.last().id)
+    assertEquals(forTranslator.sortedBy { it.id.removePrefix("e").removePrefix("u").toIntOrNull() ?: 0 }.map { it.id }, forTranslator.map { it.id })
+
+    // Character budget is respected once something is filled
+    val big = entries.map { it.copy(content = "x".repeat(2000)) }
+    val budgeted = client.selectTranscriptWindow(big, "translator", "Translator", maxEntries = 14, maxChars = 5000)
+    assertTrue(budgeted.sumOf { it.content.length } <= 6000)
+  }
+
+  @Test
+  fun selectTranscriptWindow_pinsDeliverableOverLaterChat_andFallsBackToReview() {
+    val client = OpenClawClient()
+    val entries = listOf(
+      CafeTranscriptEntry("u0", "user", "You", CafeSpeakerRole.USER, content = "Translate the notice"),
+      CafeTranscriptEntry("d1", "translator", "Translator", CafeSpeakerRole.BOT, content = "THE TRANSLATION", kind = CafeEntryKind.DELIVERABLE),
+      CafeTranscriptEntry("c1", "critic", "Critic", CafeSpeakerRole.BOT, content = "minor notes", kind = CafeEntryKind.REVIEW),
+      CafeTranscriptEntry("p1", "proof", "Proofreader", CafeSpeakerRole.BOT, content = "chatter", kind = CafeEntryKind.CHAT),
+    )
+    val forCritic = client.selectTranscriptWindow(entries, "critic", "Critic", maxEntries = 14)
+    assertTrue("deliverable must outrank later chat", forCritic.any { it.id == "d1" })
+
+    // With no deliverable, the newest review is pinned
+    val noDeliverable = entries.filter { it.kind != CafeEntryKind.DELIVERABLE }
+    val forTrans = client.selectTranscriptWindow(noDeliverable, "translator", "Translator", maxEntries = 14)
+    assertTrue("review must be pinned as fallback", forTrans.any { it.id == "c1" })
+  }
+
+  @Test
+  fun transcriptExport_filenamesAreSafe() {
+    val title = "Spirit & Idiom: 中文 / test"
+    val safe = title.replace(Regex("[^A-Za-z0-9_-]+"), "_").trim('_').take(40).ifBlank { "room" }
+    assertEquals("Spirit_Idiom_test", safe)
+    assertEquals("room", "   ".replace(Regex("[^A-Za-z0-9_-]+"), "_").trim('_').ifBlank { "room" })
+  }
+
+  @Test
+  fun presetReviewRooms_pairLeadWithCritic() {
+    val proof = com.example.model.StarterBots.proofreadingRoom("u", "p1", "c1")
+    assertEquals(listOf("p1", "c1"), proof.botIds)
+    assertEquals(4, proof.maxPingPongTurns)
+    assertTrue(proof.topic.contains("grammar"))
+
+    val code = com.example.model.StarterBots.codingReviewRoom("u", "d1", "c1")
+    assertEquals(listOf("d1", "c1"), code.botIds)
+    assertTrue(code.topic.contains("edge cases"))
+  }
+
+  @Test
+  fun bookmark_httpCheckKeepsOnlyWebUrls() {
+    val urls = listOf("https://x.dev", "ftp://y", "http://z.io", "mailto:a@b.c")
+    val kept = urls.filter { it.startsWith("http", ignoreCase = true) }
+    assertEquals(listOf("https://x.dev", "http://z.io"), kept)
+  }
+
+  @Test
+  fun openUrl_isARoutedBrowserCommand() {
+    assertEquals("browser.open", com.example.data.openclaw.HostControlAction.OPEN_URL.command)
+  }
+
+  @Test
+  fun takeoverActions_areDispatchable_controlCommands() {
+    // Takeover must no longer short-circuit locally: both map to real control commands.
+    assertEquals("takeover.start", com.example.data.openclaw.HostControlAction.TAKEOVER_START.command)
+    assertEquals("takeover.release", com.example.data.openclaw.HostControlAction.TAKEOVER_RELEASE.command)
+  }
+
+  @Test
+  fun translationRoom_pairsTranslatorWithCritic_underTurnBudget() {
+    val room = com.example.model.StarterBots.translationRoom("u1", "bot_trans", "bot_crit")
+    assertEquals(listOf("bot_trans", "bot_crit"), room.botIds)
+    assertTrue(room.maxPingPongTurns in 3..6)
+    assertTrue(room.topic.contains("idiomatic", ignoreCase = true))
+    assertTrue(room.topic.contains("spirit", ignoreCase = true))
+  }
+
+  @Test
+  fun toolScope_clampsTranslatorOutOfShell_andKeepsCodingShell() {
+    val translatorCeiling = AgentToolPermission.resolveEnforced(
+      BotFunctionPreset.TRANSLATION,
+      AgentToolPermission.allKeys(),
+    )
+    assertFalse(AgentToolPermission.SHELL_EXEC.wireKey in translatorCeiling)
+    assertTrue(AgentToolPermission.WORKSPACE_READ.wireKey in translatorCeiling)
+
+    val coderCeiling = AgentToolPermission.resolveEnforced(
+      BotFunctionPreset.CODING,
+      AgentToolPermission.allKeys(),
+    )
+    assertTrue(AgentToolPermission.SHELL_EXEC.wireKey in coderCeiling)
+
+    // User narrowing is respected
+    val narrowed = AgentToolPermission.resolveEnforced(
+      BotFunctionPreset.GENERAL,
+      listOf(AgentToolPermission.WORKSPACE_READ.wireKey),
+    )
+    assertEquals(listOf(AgentToolPermission.WORKSPACE_READ.wireKey), narrowed)
+
+    // Requesting only tools outside the ceiling still yields a usable set
+    val outside = AgentToolPermission.resolveEnforced(
+      BotFunctionPreset.TRANSLATION,
+      listOf(AgentToolPermission.SHELL_EXEC.wireKey),
+    )
+    assertTrue(outside.isNotEmpty())
+    assertFalse(AgentToolPermission.SHELL_EXEC.wireKey in outside)
   }
 
   @Test
@@ -122,6 +256,50 @@ class CafeOrchestratorTest {
     val session = orchestrator.sessions.value[room.id]!!
     assertEquals(CafeSessionStatus.COMPLETED, session.status)
     assertEquals(3, session.completedBotTurnsInRound)
+  }
+
+  @Test
+  fun goalSatisfiedSentinel_stopsRoundEarlyWithCompletedStatus() = runTest {
+    val orchestrator = CafeOrchestrator(turnDelayMs = 0L)
+    val participants = makeParticipants()
+    val room = ChatRoom(
+      id = "room_done",
+      title = "Tea Lounge",
+      topic = "Translate and critique",
+      botIds = listOf("bot_a", "bot_b"),
+      maxPingPongTurns = 6,
+    )
+    val speakersOrder = CopyOnWriteArrayList<String>()
+    val completedSignal = CompletableDeferred<Unit>()
+
+    orchestrator.startOrInterjectDiscussion(
+      scope = backgroundScope,
+      room = room,
+      participants = participants,
+      existingTranscript = emptyList(),
+      userEntry = CafeTranscriptEntry("u1", "user", "You", CafeSpeakerRole.USER, content = "Translate 'Hello'"),
+      dispatchBotTurn = { speaker, _, _, _ ->
+        speakersOrder.add(speaker.name)
+        Result.success(
+          OpenClawDispatchResult(
+            replyText = "${speaker.name} final",
+            parsedInstruction = null,
+            expression = BotExpression.UH_HUH,
+            takeoverSuggested = false,
+            roomGoalSatisfied = speakersOrder.size == 2,
+          )
+        )
+      },
+      onCommitBotTurn = { _, _, _, _ -> completedSignal.complete(Unit) },
+    )
+
+    completedSignal.await()
+    delay(30L)
+
+    assertEquals(listOf("Translator", "Critic"), speakersOrder.toList())
+    val session = orchestrator.sessions.value[room.id]!!
+    assertEquals(CafeSessionStatus.COMPLETED, session.status)
+    assertTrue(session.statusNote.contains("satisfied", ignoreCase = true))
   }
 
   @Test

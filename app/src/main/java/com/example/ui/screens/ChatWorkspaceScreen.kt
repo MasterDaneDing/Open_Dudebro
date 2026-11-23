@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -131,6 +132,7 @@ import com.example.viewmodel.UiState
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -150,6 +152,8 @@ fun ChatWorkspaceScreen(
   streamingPreviewText: String? = null,
   connectionFailureBanner: ConnectionFailureBanner? = null,
   pendingChatDraft: String? = null,
+  savedChatDraft: String? = null,
+  onChatDraftChanged: (String, String) -> Unit = { _, _ -> },
   onConsumePendingChatDraft: () -> Unit = {},
   onShowBanner: (String) -> Unit = {},
   onSelectBot: (String) -> Unit,
@@ -195,6 +199,19 @@ fun ChatWorkspaceScreen(
   var botPendingRename by remember { mutableStateOf<CompanionBot?>(null) }
   var botPendingMissionEdit by remember { mutableStateOf<CompanionBot?>(null) }
   var lightboxMessage by remember { mutableStateOf<BotMessage?>(null) }
+
+  // Restore any draft typed for this bot in an earlier visit.
+  LaunchedEffect(selectedBotId) {
+    val draft = savedChatDraft.orEmpty()
+    if (draft.isNotBlank() && composerText.isBlank()) composerText = draft
+  }
+
+  // Persist as the user types, debounced so we are not writing on every keystroke.
+  LaunchedEffect(composerText, selectedBotId) {
+    if (selectedBotId.isBlank()) return@LaunchedEffect
+    delay(400)
+    onChatDraftChanged(selectedBotId, composerText)
+  }
 
   LaunchedEffect(pendingChatDraft) {
     if (!pendingChatDraft.isNullOrBlank()) {
@@ -884,6 +901,7 @@ fun ChatWorkspaceScreen(
             if (activeBot != null && (composerText.isNotBlank() || pendingAttachments.isNotEmpty())) {
               val textToSend = composerText
               composerText = ""
+              onChatDraftChanged(activeBot.id, "")
               if (spawnInBackground || isBusy) {
                 onSpawnBackgroundTask(textToSend, activeBot, activeHost, selectedWheelModel)
                 spawnInBackground = false
@@ -1695,17 +1713,18 @@ private fun MessageBubbleItem(
   val isFailedOrWarning = message.statusEnum == MessageStatus.WARNING || message.statusEnum == MessageStatus.FAILED
   val haloColor = expressionHaloColor(message.expressionEnum)
 
-  Row(
+  Column(
     modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
-    verticalAlignment = Alignment.Top,
+    horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
   ) {
+    // Head sits above the bubble, large and left-aligned with it, so the bot reads as the
+    // author of the text rather than a small badge beside it.
     if (!isUser && bot != null) {
       Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
-          .padding(top = 2.dp, end = 8.dp)
-          .size(86.dp)
+          .padding(bottom = 4.dp)
+          .size(124.dp)
           .clip(CircleShape)
           .background(
             Brush.radialGradient(
@@ -1721,7 +1740,7 @@ private fun MessageBubbleItem(
         BotVectorAvatar(
           bot = bot,
           expression = message.expressionEnum,
-          size = 82.dp,
+          size = 116.dp,
           animate = true,
         )
       }
@@ -1741,13 +1760,7 @@ private fun MessageBubbleItem(
       },
       tonalElevation = if (isUser) 0.dp else 2.dp,
       border = if (isUser) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-      modifier = if (isUser) {
-        Modifier.widthIn(max = 520.dp)
-      } else {
-        Modifier
-          .weight(1f, fill = false)
-          .widthIn(max = 520.dp)
-      },
+      modifier = Modifier.widthIn(max = 520.dp),
     ) {
       Column(
         modifier = Modifier.padding(14.dp),
@@ -1839,6 +1852,19 @@ private fun MessageBubbleItem(
               onCopyMediaPrompt(message.mediaPrompt?.takeIf { it.isNotBlank() } ?: message.rawText)
             },
             onOpenLightbox = onOpenLightbox,
+          )
+        }
+
+        message.createdAt?.toDate()?.let { sentAt ->
+          Text(
+            text = remember(sentAt) {
+              java.text.SimpleDateFormat("h:mm a", Locale.getDefault()).format(sentAt)
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            modifier = Modifier
+              .fillMaxWidth()
+              .wrapContentWidth(if (isUser) Alignment.End else Alignment.Start),
           )
         }
 

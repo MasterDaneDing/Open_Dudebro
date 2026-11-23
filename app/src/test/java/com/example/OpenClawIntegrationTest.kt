@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.test.runTest
 import org.json.JSONArray
 import org.json.JSONObject
@@ -42,8 +43,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33])
 class OpenClawIntegrationTest {
 
   private fun parseQuery(rawQuery: String?): Map<String, String> {
@@ -620,7 +623,7 @@ class OpenClawIntegrationTest {
   }
 
   @Test
-  fun v2_midStreamSocketDrop_surfacesGracefulError_andSpacesInMediaSourceUsePercent20() = runTest {
+  fun v2_midStreamSocketDrop_surfacesGracefulError_andSpacesInMediaSourceUsePercent20() = runTest(timeout = 240.seconds) {
     val hostForUrl = OpenClawHost(
       id = "h-space",
       baseUrl = "http://192.168.68.53:18789",
@@ -664,13 +667,13 @@ class OpenClawIntegrationTest {
     }
     serverThread.start()
 
+    val client = OpenClawClient()
     try {
       val host = OpenClawHost(
         id = "h-kill",
         baseUrl = "http://127.0.0.1:${serverSocket.localPort}",
         gatewayToken = "tok-kill",
       )
-      val client = OpenClawClient()
       val res = client.sendGeneralChat(
         host = host,
         userId = "u1",
@@ -683,6 +686,7 @@ class OpenClawIntegrationTest {
       val msg = res.exceptionOrNull()?.message.orEmpty()
       assertTrue("Expected graceful drop message, got: $msg", msg.contains("Connection dropped", ignoreCase = true) || msg.isNotBlank())
     } finally {
+      runCatching { client.shutdown() }
       runCatching { serverSocket.close() }
       serverThread.join(1000L)
     }

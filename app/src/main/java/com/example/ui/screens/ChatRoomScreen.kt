@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.SaveAlt
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.AlertDialog
@@ -119,6 +120,7 @@ fun ChatRoomScreen(
   onUpdateRoom: (ChatRoom) -> Unit,
   onUpdateBotMission: (CompanionBot, String) -> Unit,
   onDispatchToOpenClaw: (CompanionBot, OpenClawHost?, String) -> Unit,
+  onExportTranscript: (ChatRoom, List<RoomMessage>, List<CompanionBot>, OpenClawHost?) -> Unit = { _, _, _, _ -> },
 ) {
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
@@ -251,6 +253,25 @@ fun ChatRoomScreen(
             .testTag("room_settings_button"),
         ) {
           Icon(Icons.Rounded.Settings, contentDescription = "Edit room crew & topic")
+        }
+        FilledIconButton(
+          onClick = {
+            val r = room
+            if (r != null) {
+              val host = (hostsState as? UiState.Success)?.data?.firstOrNull()
+              onExportTranscript(r, messages, participants, host)
+            }
+          },
+          enabled = room != null && messages.isNotEmpty(),
+          colors = IconButtonDefaults.filledIconButtonColors(
+            containerColor = Color(0xFAFFF8FC),
+            contentColor = Color(0xFF280842),
+          ),
+          modifier = Modifier
+            .size(48.dp)
+            .testTag("room_export_button"),
+        ) {
+          Icon(Icons.Rounded.SaveAlt, contentDescription = "Save transcript to host")
         }
       }
 

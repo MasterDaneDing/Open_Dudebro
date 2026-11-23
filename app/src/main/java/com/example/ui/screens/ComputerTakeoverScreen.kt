@@ -28,12 +28,19 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.BookmarkAdd
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.PanTool
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.WifiTethering
+import com.example.data.local.UrlBookmark
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -76,6 +83,7 @@ import com.example.model.OpenClawHost
 import com.example.ui.components.SectionSettingsIconButton
 import com.example.viewmodel.UiState
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ComputerTakeoverScreen(
   hostsState: UiState<List<OpenClawHost>>,
@@ -86,6 +94,9 @@ fun ComputerTakeoverScreen(
   controlLog: List<String>,
   onPingHost: (OpenClawHost) -> Unit,
   onSendControl: (OpenClawHost?, HostControlAction, String) -> Unit,
+  bookmarks: List<UrlBookmark> = emptyList(),
+  onAddBookmark: (String, String) -> Unit = { _, _ -> },
+  onRemoveBookmark: (String) -> Unit = {},
   onOpenHostSettings: () -> Unit,
 ) {
   val context = LocalContext.current
@@ -94,6 +105,10 @@ fun ComputerTakeoverScreen(
 
   var showLiveWebConsole by remember { mutableStateOf(takeoverActive) }
   var remoteCommandInput by remember { mutableStateOf("") }
+  var urlInput by remember { mutableStateOf("") }
+  var showBookmarkDialog by remember { mutableStateOf(false) }
+  var bookmarkUrlDraft by remember { mutableStateOf("") }
+  var bookmarkNameDraft by remember { mutableStateOf("") }
   var showSectionSettings by remember { mutableStateOf(false) }
 
   LaunchedEffect(takeoverActive) {
@@ -482,6 +497,107 @@ fun ComputerTakeoverScreen(
             Spacer(Modifier.width(4.dp))
             Text("Snapshot", maxLines = 1, softWrap = false)
           }
+        }
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          OutlinedTextField(
+            value = urlInput,
+            onValueChange = { urlInput = it },
+            label = { Text("Open a website on the host") },
+            placeholder = { Text("https://…") },
+            singleLine = true,
+            modifier = Modifier
+              .weight(1f)
+              .testTag("open_url_field"),
+          )
+          OutlinedButton(
+            onClick = {
+              val u = urlInput.trim()
+              if (u.startsWith("http", ignoreCase = true)) {
+                onSendControl(activeHost, HostControlAction.OPEN_URL, u)
+                urlInput = ""
+              }
+            },
+            enabled = urlInput.trim().startsWith("http", ignoreCase = true),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+          ) {
+            Icon(Icons.Rounded.Language, contentDescription = null, Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("Open URL", maxLines = 1, softWrap = false)
+          }
+          OutlinedButton(
+            onClick = {
+              val u = urlInput.trim()
+              if (u.startsWith("http", ignoreCase = true)) {
+                bookmarkUrlDraft = u
+                bookmarkNameDraft = ""
+                showBookmarkDialog = true
+              }
+            },
+            enabled = urlInput.trim().startsWith("http", ignoreCase = true),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+            modifier = Modifier.defaultMinSize(minHeight = 48.dp).testTag("bookmark_url_button"),
+          ) {
+            Icon(Icons.Rounded.BookmarkAdd, contentDescription = "Bookmark this URL", Modifier.size(16.dp))
+          }
+        }
+        if (bookmarks.isNotEmpty()) {
+          FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            bookmarks.forEach { bm ->
+              InputChip(
+                selected = false,
+                onClick = { onSendControl(activeHost, HostControlAction.OPEN_URL, bm.url) },
+                label = { Text(bm.name, maxLines = 1) },
+                trailingIcon = {
+                  Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = "Remove bookmark",
+                    modifier = Modifier.size(16.dp).clickable { onRemoveBookmark(bm.url) },
+                  )
+                },
+                modifier = Modifier.testTag("bookmark_chip_${bm.url}"),
+              )
+            }
+          }
+        }
+
+        if (showBookmarkDialog) {
+          AlertDialog(
+            onDismissRequest = { showBookmarkDialog = false },
+            title = { Text("Name this bookmark") },
+            text = {
+              Column {
+                Text(bookmarkUrlDraft, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                  value = bookmarkNameDraft,
+                  onValueChange = { bookmarkNameDraft = it },
+                  label = { Text("Label") },
+                  singleLine = true,
+                  placeholder = { Text("Leave blank to use the URL") },
+                  modifier = Modifier.fillMaxWidth().testTag("bookmark_name_field"),
+                )
+              }
+            },
+            confirmButton = {
+              TextButton(
+                onClick = {
+                  onAddBookmark(bookmarkNameDraft.trim().ifBlank { bookmarkUrlDraft }, bookmarkUrlDraft)
+                  showBookmarkDialog = false
+                },
+                modifier = Modifier.testTag("bookmark_save_confirm"),
+              ) { Text("Save") }
+            },
+            dismissButton = {
+              TextButton(onClick = { showBookmarkDialog = false }) { Text("Cancel") }
+            },
+          )
         }
       }
     }

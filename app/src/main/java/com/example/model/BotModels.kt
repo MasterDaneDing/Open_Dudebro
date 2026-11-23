@@ -356,10 +356,15 @@ data class CompanionBot(
   val llmProviderEnum: OpenClawLlmProvider get() = OpenClawLlmProvider.safeForBot(llmProvider)
   val displayMission: String get() = mission.ifBlank { roleTitle }
 
-  val effectiveToolPermissions: List<String>
+  /** Permissions the user requested, before preset scoping. */
+  val requestedToolPermissions: List<String>
     get() = AgentToolPermission.normalizeKeys(toolPermissions).ifEmpty {
       AgentToolPermission.defaultKeys()
     }
+
+  /** Hard-enforced allowlist: preset ceiling intersected with requested permissions. */
+  val effectiveToolPermissions: List<String>
+    get() = AgentToolPermission.resolveEnforced(functionPresetEnum, toolPermissions)
 
   /**
    * Produces a persistent, sanitized unique agent slug so each Bot Dude runs on an isolated
@@ -815,6 +820,7 @@ data class RoomMessage(
   val mediaPrompt: String? = null,
   val mediaModel: String? = null,
   val mediaDurationSec: Int? = null,
+  val entryKind: String? = null,
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
@@ -839,6 +845,7 @@ data class RoomMessage(
       "mediaPrompt" to mediaPrompt?.trim()?.take(1000)?.takeIf { it.isNotEmpty() },
       "mediaModel" to mediaModel?.trim()?.take(120)?.takeIf { it.isNotEmpty() },
       "mediaDurationSec" to mediaDurationSec?.coerceIn(0, 600),
+      "entryKind" to entryKind?.let { CafeEntryKind.safeValueOf(it).name },
       "createdAt" to FieldValue.serverTimestamp(),
       "updatedAt" to FieldValue.serverTimestamp(),
     )

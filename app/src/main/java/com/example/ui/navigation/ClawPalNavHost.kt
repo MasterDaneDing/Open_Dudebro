@@ -574,7 +574,10 @@ private fun AuthenticatedWorkspace(
                     navController.navigate("room/$newRoomId")
                   }
                 },
-                onUpdateBotMission = viewModel::updateBotMission,
+                onCreateTranslationRoom = { viewModel.createTranslationRoom() },
+                onCreateProofreadingRoom = { viewModel.createProofreadingRoom() },
+                onCreateCodingReviewRoom = { viewModel.createCodingReviewRoom() },
+                  onUpdateBotMission = viewModel::updateBotMission,
                 onDeleteBot = viewModel::deleteBot,
                 onDeleteRoom = { roomId -> viewModel.deleteChatRoom(roomId) },
                 onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
@@ -644,6 +647,8 @@ private fun AuthenticatedWorkspace(
                 streamingPreviewText = selectedBotStreamingPreview,
                 connectionFailureBanner = connectionFailureBanner,
                 pendingChatDraft = pendingChatDraft,
+                savedChatDraft = localPrefs.chatDrafts[selectedBotId],
+                onChatDraftChanged = viewModel::saveChatDraft,
                 onConsumePendingChatDraft = viewModel::consumePendingChatDraft,
                 onShowBanner = viewModel::showBanner,
                 onSelectBot = viewModel::selectBot,
@@ -724,6 +729,9 @@ private fun AuthenticatedWorkspace(
                 onSendRoomMessage = { r, p, h, prompt, postBubble, wheel, targetId ->
                   viewModel.sendRoomMessage(r, p, h, prompt, postBubble, wheel, targetId)
                 },
+                onExportTranscript = { room, msgs, parts, host ->
+                  viewModel.exportRoomTranscript(room, msgs, parts, host)
+                },
                 onUpdateRoom = viewModel::updateChatRoom,
                 onUpdateBotMission = viewModel::updateBotMission,
                 onDispatchToOpenClaw = viewModel::dispatchRoomInstructionToHost,
@@ -768,6 +776,9 @@ private fun AuthenticatedWorkspace(
                 controlLog = controlLog,
                 onPingHost = viewModel::pingHost,
                 onSendControl = viewModel::sendHostControlAction,
+                bookmarks = localPrefs.urlBookmarks,
+                onAddBookmark = viewModel::addUrlBookmark,
+                onRemoveBookmark = viewModel::removeUrlBookmark,
                 onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
               )
             }
