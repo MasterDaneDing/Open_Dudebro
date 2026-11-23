@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -31,7 +32,10 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -39,6 +43,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -76,6 +82,8 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.files.MediaSaveHelper
 import com.example.model.BotExpression
+import com.example.model.CafeSession
+import com.example.model.CafeSessionStatus
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
 import com.example.model.GeneratedMediaType
@@ -100,10 +108,14 @@ fun ChatRoomScreen(
   activeExpressions: Map<String, BotExpression>,
   selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
+  cafeSession: CafeSession? = null,
   onShowBanner: (String) -> Unit = {},
   onBack: () -> Unit,
   onSelectWheelModel: (WheelLlmOption) -> Unit,
-  onSendRoomMessage: (ChatRoom, List<CompanionBot>, List<RoomMessage>, String, Boolean, WheelLlmOption) -> Unit,
+  onPauseCafe: (String) -> Unit = {},
+  onResumeCafe: (ChatRoom, List<CompanionBot>, List<RoomMessage>, WheelLlmOption) -> Unit = { _, _, _, _ -> },
+  onStopCafe: (String) -> Unit = {},
+  onSendRoomMessage: (ChatRoom, List<CompanionBot>, List<RoomMessage>, String, Boolean, WheelLlmOption, String?) -> Unit,
   onUpdateRoom: (ChatRoom) -> Unit,
   onUpdateBotMission: (CompanionBot, String) -> Unit,
   onDispatchToOpenClaw: (CompanionBot, OpenClawHost?, String) -> Unit,
@@ -128,6 +140,7 @@ fun ChatRoomScreen(
   var lightboxMessage by remember { mutableStateOf<RoomMessage?>(null) }
 
   val roomKey = room?.id.orEmpty()
+  var selectedTargetBotId by remember(roomKey) { mutableStateOf<String?>(null) }
   var roomHapticsReady by remember(roomKey) { mutableStateOf(false) }
   var seenBotMsgIds by remember(roomKey) { mutableStateOf<Set<String>>(emptySet()) }
   LaunchedEffect(roomKey, roomMessagesState) {
@@ -151,9 +164,11 @@ fun ChatRoomScreen(
   }
 
   val listState = rememberLazyListState()
-  LaunchedEffect(messages.size) {
-    if (messages.isNotEmpty()) {
-      listState.animateScrollToItem(messages.lastIndex)
+  val hasStreamingBubble = cafeSession?.status == CafeSessionStatus.RUNNING && cafeSession.activeSpeakerBotId != null
+  LaunchedEffect(messages.size, hasStreamingBubble) {
+    val totalItems = messages.size + if (hasStreamingBubble) 1 else 0
+    if (totalItems > 0) {
+      listState.animateScrollToItem(totalItems - 1)
     }
   }
 
@@ -319,6 +334,119 @@ fun ChatRoomScreen(
         }
       }
 
+      // 2b. Cafe A2A Orchestrator Status & Pause/Stop/Resume Strip
+      if (cafeSession != null && (cafeSession.status != CafeSessionStatus.IDLE || cafeSession.statusNote.isNotBlank())) {
+        Spacer(Modifier.height(6.dp))
+        Surface(
+          shape = RoundedCornerShape(16.dp),
+          color = Color(0xEE2B0B42),
+          border = BorderStroke(1.2.dp, Color(0xFFFF79CE)),
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("cafe_status_strip"),
+        ) {
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Column(
+              modifier = Modifier.weight(1f),
+              verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+              ) {
+                Surface(
+                  shape = RoundedCornerShape(50),
+                  color = when (cafeSession.status) {
+                    CafeSessionStatus.RUNNING -> Color(0xFFFF2E93)
+                    CafeSessionStatus.PAUSED -> Color(0xFFFFB300)
+                    CafeSessionStatus.COMPLETED -> Color(0xFF2E9D5B)
+                    else -> Color(0xFF6A1B9A)
+                  },
+                ) {
+                  Text(
+                    text = "${cafeSession.status.label} • Turn ${cafeSession.activeTurnIndex}/${cafeSession.maxPingPongTurns}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                  )
+                }
+              }
+              val detailText = if (!cafeSession.activeSpeakerName.isNullOrBlank()) {
+                val modelTag = cafeSession.activeSpeakerModel?.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: ""
+                "${cafeSession.activeSpeakerName}$modelTag"
+              } else {
+                cafeSession.statusNote
+              }
+              if (detailText.isNotBlank()) {
+                Text(
+                  text = detailText,
+                  style = MaterialTheme.typography.labelSmall,
+                  color = Color(0xFFFFD8F2),
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+            }
+
+            if (cafeSession.status == CafeSessionStatus.RUNNING) {
+              FilledIconButton(
+                onClick = { onPauseCafe(roomKey) },
+                colors = IconButtonDefaults.filledIconButtonColors(
+                  containerColor = Color(0xFFFFB300),
+                  contentColor = Color(0xFF280842),
+                ),
+                modifier = Modifier
+                  .size(48.dp)
+                  .testTag("cafe_pause_button"),
+              ) {
+                Icon(Icons.Rounded.Pause, contentDescription = "Pause Cafe discussion")
+              }
+              FilledIconButton(
+                onClick = { onStopCafe(roomKey) },
+                colors = IconButtonDefaults.filledIconButtonColors(
+                  containerColor = Color(0xFFE53935),
+                  contentColor = Color.White,
+                ),
+                modifier = Modifier
+                  .size(48.dp)
+                  .testTag("cafe_stop_button"),
+              ) {
+                Icon(Icons.Rounded.Stop, contentDescription = "Stop Cafe discussion")
+              }
+            } else if (
+              cafeSession.status == CafeSessionStatus.PAUSED ||
+              cafeSession.status == CafeSessionStatus.COMPLETED ||
+              cafeSession.status == CafeSessionStatus.STOPPED
+            ) {
+              FilledIconButton(
+                onClick = {
+                  if (room != null) {
+                    onResumeCafe(room, participants, messages, selectedWheelModel)
+                  }
+                },
+                enabled = room != null && participants.isNotEmpty(),
+                colors = IconButtonDefaults.filledIconButtonColors(
+                  containerColor = Color(0xFF2E9D5B),
+                  contentColor = Color.White,
+                ),
+                modifier = Modifier
+                  .size(48.dp)
+                  .testTag("cafe_resume_button"),
+              ) {
+                Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume Cafe discussion")
+              }
+            }
+          }
+        }
+      }
+
     Spacer(Modifier.height(8.dp))
 
     // 3. Multi-Bot Dialogue Feed
@@ -347,7 +475,7 @@ fun ChatRoomScreen(
           }
         }
         is UiState.Success -> {
-          if (messages.isEmpty()) {
+          if (messages.isEmpty() && !hasStreamingBubble) {
             Column(
               modifier = Modifier
                 .fillMaxSize()
@@ -424,20 +552,64 @@ fun ChatRoomScreen(
                   onOpenLightbox = { lightboxMessage = msg },
                 )
               }
+
+              if (hasStreamingBubble && cafeSession != null) {
+                item(key = "cafe_live_streaming") {
+                  val activeBot = cafeSession.activeSpeakerBotId?.let { botsById[it] }
+                    ?: cafeSession.activeSpeakerName?.let { botsByName[it.lowercase()] }
+                  LiveCafeStreamingBubble(
+                    speakerBot = activeBot,
+                    speakerName = cafeSession.activeSpeakerName ?: activeBot?.name ?: "Bot Dude",
+                    modelLabel = cafeSession.activeSpeakerModel.orEmpty(),
+                    previewText = cafeSession.streamingPreview.orEmpty(),
+                  )
+                }
+              }
             }
           }
         }
       }
     }
 
-    // 4. Rotating LLM Wheel + Quick Continue Discussion & Composer
-    LlmRotaryWheelSelector(
-      selectedOption = selectedWheelModel,
-      onSelectOption = onSelectWheelModel,
-      darkSurface = false,
-      accentColor = Color(0xFF7B00FF),
-      modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
-    )
+    // 4. Target @BotName Selector, Continue Discussion & Composer
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .horizontalScroll(rememberScrollState())
+        .padding(top = 4.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      FilterChip(
+        selected = selectedTargetBotId == null,
+        onClick = { selectedTargetBotId = null },
+        label = { Text("All (Auto)", style = MaterialTheme.typography.labelSmall) },
+        colors = FilterChipDefaults.filterChipColors(
+          selectedContainerColor = Color(0xFFFF2E93),
+          selectedLabelColor = Color.White,
+          containerColor = Color(0xCC2B0B42),
+          labelColor = Color(0xFFFFD8F2),
+        ),
+        modifier = Modifier.testTag("cafe_target_chip_all"),
+      )
+      participants.forEach { bot ->
+        val selected = selectedTargetBotId == bot.id
+        FilterChip(
+          selected = selected,
+          onClick = {
+            selectedTargetBotId = if (selected) null else bot.id
+          },
+          label = { Text("@${bot.name}", style = MaterialTheme.typography.labelSmall) },
+          colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = Color(0xFFFF2E93),
+            selectedLabelColor = Color.White,
+            containerColor = Color(0xCC2B0B42),
+            labelColor = Color(0xFFFFD8F2),
+          ),
+          modifier = Modifier.testTag("cafe_target_chip_${bot.name}"),
+        )
+      }
+    }
 
     Row(
       modifier = Modifier
@@ -447,9 +619,11 @@ fun ChatRoomScreen(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Button(
-        enabled = room != null && participants.isNotEmpty() && !isBusy,
+        enabled = room != null && participants.isNotEmpty(),
         onClick = {
           if (room != null) {
+            val targetId = selectedTargetBotId
+            selectedTargetBotId = null
             onSendRoomMessage(
               room,
               participants,
@@ -457,6 +631,7 @@ fun ChatRoomScreen(
               "Continue the discussion: respond to the previous bot's points and refine the final result.",
               false,
               selectedWheelModel,
+              targetId,
             )
           }
         },
@@ -466,7 +641,7 @@ fun ChatRoomScreen(
           contentColor = Color(0xFF280842),
         ),
         modifier = Modifier
-          .height(42.dp)
+          .height(48.dp)
           .testTag("room_continue_discussion_button"),
       ) {
         Icon(Icons.Rounded.Forum, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -488,12 +663,17 @@ fun ChatRoomScreen(
         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.Bottom,
       ) {
+        val targetBotName = participants.firstOrNull { it.id == selectedTargetBotId }?.name
         OutlinedTextField(
           value = composerText,
           onValueChange = { composerText = it },
           placeholder = {
             Text(
-              "Ask the Cha Chaan Teng lounge (${selectedWheelModel.wheelLabel})...",
+              text = when {
+                isBusy -> "Type to interject & steer the bots..."
+                targetBotName != null -> "Message @$targetBotName (${selectedWheelModel.wheelLabel})..."
+                else -> "Ask the Cha Chaan Teng lounge (${selectedWheelModel.wheelLabel})..."
+              },
               style = MaterialTheme.typography.bodyMedium,
               color = Color(0xFFE6C8FF),
               maxLines = 1,
@@ -518,13 +698,15 @@ fun ChatRoomScreen(
         Spacer(Modifier.width(8.dp))
         FilledIconButton(
           onClick = {
-            if (room != null && composerText.isNotBlank() && !isBusy) {
+            if (room != null && composerText.isNotBlank()) {
               val prompt = composerText
+              val targetId = selectedTargetBotId
               composerText = ""
-              onSendRoomMessage(room, participants, messages, prompt, true, selectedWheelModel)
+              selectedTargetBotId = null
+              onSendRoomMessage(room, participants, messages, prompt, true, selectedWheelModel, targetId)
             }
           },
-          enabled = room != null && composerText.isNotBlank() && !isBusy,
+          enabled = room != null && composerText.isNotBlank(),
           colors = IconButtonDefaults.filledIconButtonColors(
             containerColor = Color(0xFFFF2E93),
             contentColor = Color.White,
@@ -535,15 +717,10 @@ fun ChatRoomScreen(
             .size(48.dp)
             .testTag("room_send_button"),
         ) {
-          if (isBusy) {
-            CircularProgressIndicator(
-              modifier = Modifier.size(20.dp),
-              color = Color.White,
-              strokeWidth = 2.dp,
-            )
-          } else {
-            Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Send to room")
-          }
+          Icon(
+            Icons.AutoMirrored.Rounded.Send,
+            contentDescription = if (isBusy) "Interject and redirect room" else "Send to room",
+          )
         }
       }
     }
@@ -554,11 +731,22 @@ fun ChatRoomScreen(
     var draftTitle by remember(room.id) { mutableStateOf(room.title) }
     var draftTopic by remember(room.id) { mutableStateOf(room.topic) }
     var chosenIds by remember(room.id) { mutableStateOf(room.botIds.toSet()) }
+    var draftMaxTurns by remember(room.id) { mutableStateOf(room.effectiveMaxPingPongTurns) }
     AlertDialog(
       onDismissRequest = { showRoomSettingsDialog = false },
       title = { Text("Lounge Room Settings") },
       text = {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(
+          modifier = Modifier.verticalScroll(rememberScrollState()),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Text("Spin Model Wheel", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+          LlmRotaryWheelSelector(
+            selectedOption = selectedWheelModel,
+            onSelectOption = onSelectWheelModel,
+            darkSurface = false,
+            accentColor = Color(0xFF7B00FF),
+          )
           OutlinedTextField(
             value = draftTitle,
             onValueChange = { draftTitle = it.take(60) },
@@ -573,6 +761,26 @@ fun ChatRoomScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
           )
+          Text(
+            text = "Max Bot Turns per Round ($draftMaxTurns)",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+          )
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            (1..6).forEach { count ->
+              FilterChip(
+                selected = draftMaxTurns == count,
+                onClick = { draftMaxTurns = count },
+                label = { Text("$count") },
+                modifier = Modifier.testTag("room_settings_turns_chip_$count"),
+              )
+            }
+          }
           Text("Bots in Room:", style = MaterialTheme.typography.labelLarge)
           allBots.forEach { bot ->
             val checked = bot.id in chosenIds
@@ -604,6 +812,7 @@ fun ChatRoomScreen(
                 title = draftTitle.ifBlank { room.title },
                 topic = draftTopic,
                 botIds = chosenIds.toList(),
+                maxPingPongTurns = draftMaxTurns,
               )
             )
             showRoomSettingsDialog = false
@@ -838,6 +1047,95 @@ private fun RoomMessageBubble(
             }
           }
         }
+      }
+    }
+  }
+}
+
+@Composable
+private fun LiveCafeStreamingBubble(
+  speakerBot: CompanionBot?,
+  speakerName: String,
+  modelLabel: String,
+  previewText: String,
+) {
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .testTag("cafe_streaming_bubble"),
+    horizontalArrangement = Arrangement.Start,
+    verticalAlignment = Alignment.Top,
+  ) {
+    if (speakerBot != null) {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+          .padding(top = 2.dp, end = 8.dp)
+          .size(80.dp)
+          .clip(CircleShape)
+          .background(
+            Brush.radialGradient(
+              colors = listOf(Color.White.copy(alpha = 0.34f), Color(0x33FF9800), Color.Transparent)
+            )
+          ),
+      ) {
+        BotVectorAvatar(
+          bot = speakerBot,
+          expression = BotExpression.WORKING,
+          size = 76.dp,
+          animate = true,
+        )
+      }
+    }
+
+    Surface(
+      shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 6.dp, bottomEnd = 20.dp),
+      color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+      border = BorderStroke(1.5.dp, Color(0xFFFF2E93)),
+      tonalElevation = 2.dp,
+      modifier = Modifier
+        .weight(1f, fill = false)
+        .widthIn(max = 520.dp),
+    ) {
+      Column(
+        modifier = Modifier.padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          CircularProgressIndicator(
+            modifier = Modifier.size(14.dp),
+            strokeWidth = 2.dp,
+            color = Color(0xFFFF2E93),
+          )
+          Text(
+            text = speakerName,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+          )
+          if (modelLabel.isNotBlank()) {
+            Surface(
+              shape = RoundedCornerShape(50),
+              color = Color(0x227B00FF),
+            ) {
+              Text(
+                text = modelLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF5D00C9),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+              )
+            }
+          }
+        }
+        Text(
+          text = previewText.ifBlank { "Thinking in Cafe Mode..." },
+          style = MaterialTheme.typography.bodyMedium,
+        )
       }
     }
   }

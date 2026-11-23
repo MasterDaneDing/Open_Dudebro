@@ -102,10 +102,11 @@ fun ChatsHomeScreen(
   botsState: UiState<List<CompanionBot>>,
   chatRoomsState: UiState<List<ChatRoom>>,
   userEmail: String?,
+  busyBotIds: Set<String> = emptySet(),
   onOpenBotChat: (CompanionBot) -> Unit,
   onOpenChatRoom: (ChatRoom) -> Unit,
   onAddNewBot: () -> Unit,
-  onCreateChatRoom: (title: String, topic: String, botIds: List<String>) -> Unit,
+  onCreateChatRoom: (title: String, topic: String, botIds: List<String>, maxPingPongTurns: Int) -> Unit,
   onUpdateBotMission: (CompanionBot, String) -> Unit,
   onDeleteBot: (String) -> Unit,
   onDeleteRoom: (String) -> Unit,
@@ -327,6 +328,7 @@ fun ChatsHomeScreen(
                   is InboxItem.BotEntry -> {
                     BotInboxRow(
                       bot = item.bot,
+                      isBusy = item.bot.id in busyBotIds,
                       onClick = { onOpenBotChat(item.bot) },
                       onEditMission = { missionEditingBot = item.bot },
                       onRequestDelete = { deleteTargetBot = item.bot },
@@ -544,6 +546,7 @@ fun ChatsHomeScreen(
   if (showNewRoomDialog) {
     var title by remember { mutableStateOf("") }
     var topic by remember { mutableStateOf("") }
+    var maxTurns by remember { mutableStateOf(3) }
     var chosenIds by remember(bots) {
       mutableStateOf(bots.take(2).map { it.id }.toSet())
     }
@@ -570,6 +573,32 @@ fun ChatsHomeScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
           )
+          Text("Max A2A Turns per Round: $maxTurns", style = MaterialTheme.typography.labelLarge)
+          Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            (1..6).forEach { count ->
+              val picked = maxTurns == count
+              Surface(
+                onClick = { maxTurns = count },
+                shape = RoundedCornerShape(50),
+                color = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(
+                  width = if (picked) 1.5.dp else 1.dp,
+                  color = if (picked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                ),
+                modifier = Modifier
+                  .defaultMinSize(minWidth = 40.dp, minHeight = 36.dp)
+                  .testTag("new_room_turns_chip_$count"),
+              ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                  Text(
+                    text = count.toString(),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (picked) FontWeight.Bold else FontWeight.Normal,
+                  )
+                }
+              }
+            }
+          }
           Text("Invite Bots (${chosenIds.size} selected):", style = MaterialTheme.typography.labelLarge)
           bots.forEach { bot ->
             val checked = bot.id in chosenIds
@@ -613,6 +642,7 @@ fun ChatsHomeScreen(
               title.ifBlank { "Cafe Squad" },
               topic.ifBlank { "Collaborate & review together" },
               chosenIds.toList(),
+              maxTurns,
             )
             showNewRoomDialog = false
           },
@@ -713,6 +743,7 @@ fun ChatsHomeScreen(
 @Composable
 private fun BotInboxRow(
   bot: CompanionBot,
+  isBusy: Boolean = false,
   onClick: () -> Unit,
   onEditMission: () -> Unit,
   onRequestDelete: () -> Unit,
@@ -721,7 +752,7 @@ private fun BotInboxRow(
     onClick = onClick,
     shape = RoundedCornerShape(18.dp),
     color = Color(0x4026083E),
-    border = BorderStroke(1.dp, Color(0x33FF85D4)),
+    border = BorderStroke(1.dp, if (isBusy) Color(0xFFFF66C4) else Color(0x33FF85D4)),
     modifier = Modifier
       .fillMaxWidth()
       .testTag("inbox_bot_row_${bot.name}"),
@@ -736,7 +767,7 @@ private fun BotInboxRow(
       // Animated blinking bot avatar right on the landing page
       BotVectorAvatar(
         bot = bot,
-        expression = BotExpression.HAPPY,
+        expression = if (isBusy) BotExpression.WORKING else BotExpression.HAPPY,
         size = 54.dp,
         animate = true,
       )
@@ -761,10 +792,17 @@ private fun BotInboxRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
           )
+          if (isBusy) {
+            CircularProgressIndicator(
+              modifier = Modifier.size(14.dp),
+              color = Color(0xFFFF85D4),
+              strokeWidth = 2.dp,
+            )
+          }
           Text(
-            text = formatInboxTimestamp(bot.updatedAt ?: bot.createdAt),
+            text = if (isBusy) "Working" else formatInboxTimestamp(bot.updatedAt ?: bot.createdAt),
             style = MaterialTheme.typography.labelMedium,
-            color = Color(0xFFE3A6D9),
+            color = if (isBusy) Color(0xFFFF85D4) else Color(0xFFE3A6D9),
           )
         }
 

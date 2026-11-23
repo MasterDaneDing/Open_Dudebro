@@ -195,7 +195,7 @@ enum class OpenClawLlmProvider(
   VENICE_AI(
     displayName = "Venice.ai",
     wireKey = "venice",
-    defaultModel = "claude-sonnet-4-6",
+    defaultModel = "deepseek-v4-1-flash-uncensored",
     description = "Route OpenClaw inference through your Venice.ai API key & model.",
   ),
   GOOGLE(
@@ -207,7 +207,7 @@ enum class OpenClawLlmProvider(
   LOCAL_LLM(
     displayName = "Local LLM (Ollama / LM Studio)",
     wireKey = "local",
-    defaultModel = "ollama/qwen2.5:14b",
+    defaultModel = "ollama/qwen3.5-fast",
     description = "Route OpenClaw inference to a local model running on your host PC.",
   ),
   ;
@@ -232,6 +232,7 @@ data class VeniceModelInfo(
 
 object VeniceModelCatalog {
   val popularPresets: List<VeniceModelInfo> = listOf(
+    VeniceModelInfo("deepseek-v4-1-flash-uncensored", "deepseek-v4-1-flash-uncensored", "Fast Cloud"),
     VeniceModelInfo("claude-sonnet-4-6", "claude-sonnet-4-6", "Coding"),
     VeniceModelInfo("claude-opus-4-8", "claude-opus-4-8", "Reasoning"),
     VeniceModelInfo("claude-haiku-5-5", "claude-haiku-5-5", "Fast"),
@@ -239,7 +240,7 @@ object VeniceModelCatalog {
     VeniceModelInfo("qwen-2.5-coder-32b", "qwen-2.5-coder-32b", "Coding"),
   )
 
-  val defaultModelId: String = "claude-sonnet-4-6"
+  val defaultModelId: String = "deepseek-v4-1-flash-uncensored"
 }
 
 enum class WheelLlmOption(
@@ -285,6 +286,8 @@ enum class FileLinkType(val label: String) {
 enum class GeneratedMediaType(val label: String) {
   IMAGE("Image"),
   VIDEO("Video"),
+  AUDIO("Audio"),
+  DOCUMENT("Document"),
   ;
 
   companion object {
@@ -301,7 +304,23 @@ data class MediaAttachmentPayload(
   val extractedContent: String = "",
   val uploadedHostId: String = "",
   val isPdf: Boolean = false,
+  val isDocx: Boolean = false,
+  val isImage: Boolean = false,
+  val imageDataUrl: String = "",
+  val fileBase64: String = "",
+  val pageImageDataUrls: List<String> = emptyList(),
 )
+
+enum class HostConnectionMode(val displayName: String, val shortPill: String) {
+  LAN("Home Mode (LAN)", "\uD83C\uDFE0 LAN"),
+  TAILSCALE("Outside Mode (Tailscale)", "\uD83C\uDF10 Tailscale"),
+  ;
+
+  companion object {
+    fun safeValueOf(raw: String?): HostConnectionMode =
+      entries.firstOrNull { it.name == raw } ?: LAN
+  }
+}
 
 @Keep
 @IgnoreExtraProperties
@@ -319,6 +338,9 @@ data class CompanionBot(
   val mission: String = "",
   val lastMessagePreview: String = "",
   val openClawAgentId: String = "main",
+  val sessionKey: String = "",
+  val toolPermissions: List<String> = emptyList(),
+  val workspacePath: String = "",
   val functionPreset: String = BotFunctionPreset.GENERAL.name,
   val llmProvider: String = OpenClawLlmProvider.HOST_DEFAULT.name,
   val llmModel: String = "",
@@ -334,6 +356,64 @@ data class CompanionBot(
   val llmProviderEnum: OpenClawLlmProvider get() = OpenClawLlmProvider.safeForBot(llmProvider)
   val displayMission: String get() = mission.ifBlank { roleTitle }
 
+  val effectiveToolPermissions: List<String>
+    get() = AgentToolPermission.normalizeKeys(toolPermissions).ifEmpty {
+      AgentToolPermission.defaultKeys()
+    }
+
+  /**
+   * Produces a persistent, sanitized unique agent slug so each Bot Dude runs on an isolated
+   * OpenClaw session lane instead of colliding on the shared global `main` session.
+   */
+  fun resolvedBotDudeSlug(): String {
+    val preferred = openClawAgentId.trim()
+      .takeIf { it.isNotBlank() && !it.equals("main", ignoreCase = true) }
+      ?: name.trim().ifBlank { functionPresetEnum.suggestedAgentId }
+    val cleanBase = preferred.lowercase(java.util.Locale.US)
+      .replace(Regex("[^a-z0-9_-]+"), "_")
+      .trim('_', '-')
+      .take(28)
+      .ifBlank { "bot_dude" }
+    val cleanId = id.trim().replace(Regex("[^a-zA-Z0-9_-]"), "")
+    return when {
+      cleanId.isBlank() -> cleanBase
+      cleanBase.contains(cleanId, ignoreCase = true) -> cleanBase
+      else -> "${cleanBase}_${cleanId.takeLast(8)}".take(48)
+    }
+  }
+
+  val effectivePrimarySessionKey: String
+    get() = sessionKey.trim().takeIf { it.isNotBlank() }
+      ?: "agent:${resolvedBotDudeSlug()}:main"
+
+  fun effectiveCafeSessionKey(roomId: String): String {
+    val cleanRoom = roomId.trim().replace(Regex("[^a-zA-Z0-9_-]"), "").ifBlank { "default" }
+    return "agent:${resolvedBotDudeSlug()}:cafe_${cleanRoom.take(28)}"
+  }
+
+  fun effectiveSpawnSessionKey(taskId: String): String {
+    val cleanTask = taskId.trim().replace(Regex("[^a-zA-Z0-9_-]"), "").ifBlank { "task" }
+    return "agent:${resolvedBotDudeSlug()}:spawn_${cleanTask.take(28)}"
+  }
+
+  fun toBotDude(
+    resolvedModelId: String = llmModel,
+    resolvedProvider: OpenClawLlmProvider = llmProviderEnum,
+  ): BotDude = BotDude(
+    id = id.ifBlank { resolvedBotDudeSlug() },
+    name = name,
+    systemPrompt = systemPersona,
+    modelId = resolvedModelId,
+    sessionKey = effectivePrimarySessionKey,
+    agentId = openClawAgentId.ifBlank { functionPresetEnum.suggestedAgentId },
+    provider = resolvedProvider,
+    functionPreset = functionPresetEnum,
+    mission = displayMission,
+    toolPermissions = effectiveToolPermissions,
+    workspacePath = workspacePath.trim(),
+    sourceBot = this,
+  )
+
   fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
     "userId" to ownerId,
     "name" to name.trim().take(40).ifBlank { "Claw Dudebro" },
@@ -347,6 +427,9 @@ data class CompanionBot(
     "mission" to mission.trim().take(160),
     "lastMessagePreview" to lastMessagePreview.trim().take(300),
     "openClawAgentId" to openClawAgentId.trim().take(80).ifBlank { "main" },
+    "sessionKey" to effectivePrimarySessionKey.take(160),
+    "toolPermissions" to effectiveToolPermissions,
+    "workspacePath" to workspacePath.trim().take(300),
     "functionPreset" to functionPresetEnum.name,
     "llmProvider" to llmProviderEnum.name,
     "llmModel" to llmModel.trim().take(120),
@@ -368,6 +451,9 @@ data class CompanionBot(
     "mission" to mission.trim().take(160),
     "lastMessagePreview" to lastMessagePreview.trim().take(300),
     "openClawAgentId" to openClawAgentId.trim().take(80).ifBlank { "main" },
+    "sessionKey" to effectivePrimarySessionKey.take(160),
+    "toolPermissions" to effectiveToolPermissions,
+    "workspacePath" to workspacePath.trim().take(300),
     "functionPreset" to functionPresetEnum.name,
     "llmProvider" to llmProviderEnum.name,
     "llmModel" to llmModel.trim().take(120),
@@ -440,8 +526,11 @@ data class OpenClawHost(
   @DocumentId val id: String = "",
   val userId: String = "",
   val label: String = "My OpenClaw PC",
-  val baseUrl: String = "http://192.168.1.50:18789",
-  val controlUrl: String = "http://192.168.1.50:18789/control",
+  val baseUrl: String = DEFAULT_LAN_URL,
+  val lanUrl: String = "",
+  val tailscaleUrl: String = "",
+  val connectionMode: String = HostConnectionMode.LAN.name,
+  val controlUrl: String = "",
   val gatewayToken: String = "",
   val aiMode: String = AiRoutingMode.HYBRID_GEMINI_OPENCLAW.name,
   val defaultLlmProvider: String = OpenClawLlmProvider.OPENCLAW_AUTO.name,
@@ -455,36 +544,144 @@ data class OpenClawHost(
   val aiModeEnum: AiRoutingMode get() = AiRoutingMode.safeValueOf(aiMode)
   val defaultLlmProviderEnum: OpenClawLlmProvider get() = OpenClawLlmProvider.safeForHost(defaultLlmProvider)
   val lastStatusEnum: HostStatus get() = HostStatus.safeValueOf(lastStatus)
+  val connectionModeEnum: HostConnectionMode get() = HostConnectionMode.safeValueOf(connectionMode)
 
-  fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
-    "userId" to ownerId,
-    "label" to label.trim().take(50).ifBlank { "My OpenClaw PC" },
-    "baseUrl" to baseUrl.trim().take(300).ifBlank { "http://192.168.1.50:18789" },
-    "controlUrl" to controlUrl.trim().take(300),
-    "gatewayToken" to gatewayToken.trim().take(256),
-    "aiMode" to aiModeEnum.name,
-    "defaultLlmProvider" to defaultLlmProviderEnum.name,
-    "defaultLlmModel" to defaultLlmModel.trim().take(120),
-    "localLlmEndpoint" to localLlmEndpoint.trim().take(300),
-    "autoParseCasual" to autoParseCasual,
-    "lastStatus" to lastStatusEnum.name,
-    "createdAt" to FieldValue.serverTimestamp(),
-    "updatedAt" to FieldValue.serverTimestamp(),
-  )
+  val effectiveLanUrl: String
+    get() = normalizeGatewayBaseUrl(lanUrl.trim().ifBlank { baseUrl.trim() })
 
-  fun toUpdateMap(): Map<String, Any> = mapOf(
-    "label" to label.trim().take(50).ifBlank { "My OpenClaw PC" },
-    "baseUrl" to baseUrl.trim().take(300).ifBlank { "http://192.168.1.50:18789" },
-    "controlUrl" to controlUrl.trim().take(300),
-    "gatewayToken" to gatewayToken.trim().take(256),
-    "aiMode" to aiModeEnum.name,
-    "defaultLlmProvider" to defaultLlmProviderEnum.name,
-    "defaultLlmModel" to defaultLlmModel.trim().take(120),
-    "localLlmEndpoint" to localLlmEndpoint.trim().take(300),
-    "autoParseCasual" to autoParseCasual,
-    "lastStatus" to lastStatusEnum.name,
-    "updatedAt" to FieldValue.serverTimestamp(),
-  )
+  val effectiveTailscaleUrl: String
+    get() = normalizeGatewayBaseUrl(tailscaleUrl.trim())
+
+  val effectiveBaseUrl: String
+    get() = when (connectionModeEnum) {
+      HostConnectionMode.TAILSCALE -> effectiveTailscaleUrl.ifBlank { effectiveLanUrl }
+      HostConnectionMode.LAN -> effectiveLanUrl.ifBlank { effectiveTailscaleUrl }
+    }.trim().trimEnd('/')
+
+  /**
+   * Secondary gateway URL for automatic LAN <-> Tailscale failover when the primary URL is unreachable.
+   */
+  val fallbackBaseUrl: String
+    get() {
+      val primary = effectiveBaseUrl
+      val secondary = when (connectionModeEnum) {
+        HostConnectionMode.LAN -> effectiveTailscaleUrl
+        HostConnectionMode.TAILSCALE -> effectiveLanUrl
+      }.trim().trimEnd('/')
+      return if (secondary.isNotBlank() && !secondary.equals(primary, ignoreCase = true)) {
+        secondary
+      } else {
+        ""
+      }
+    }
+
+  companion object {
+    const val DEFAULT_PORT = 18789
+    const val DEFAULT_LAN_URL = "http://192.168.68.53:18789"
+    const val DEFAULT_TAILSCALE_URL = "http://100.91.98.120:18789"
+
+    /**
+     * Normalizes a user-entered gateway host/URL:
+     * - Tolerates whitespace and trailing slashes
+     * - Prepends `http://` if scheme is omitted (e.g. `192.168.68.53:18789` or `192.168.68.53`)
+     * - Appends `:18789` if bare host/IP without port or path is provided
+     */
+    fun normalizeGatewayBaseUrl(raw: String, defaultPort: Int = DEFAULT_PORT): String {
+      val trimmed = raw.trim().trimEnd('/')
+      if (trimmed.isBlank()) return ""
+      val withScheme = if (trimmed.startsWith("http://", ignoreCase = true) ||
+        trimmed.startsWith("https://", ignoreCase = true)
+      ) {
+        trimmed
+      } else {
+        "http://$trimmed"
+      }
+      val schemeIdx = withScheme.indexOf("://")
+      val afterScheme = if (schemeIdx >= 0) withScheme.substring(schemeIdx + 3) else withScheme
+      val hostPortPart = afterScheme.substringBefore('/')
+      val hasPath = afterScheme.contains('/')
+      val hasPort = hostPortPart.contains(':')
+      return if (!hasPath && !hasPort && hostPortPart.isNotBlank()) {
+        "$withScheme:$defaultPort"
+      } else {
+        withScheme.trimEnd('/')
+      }
+    }
+  }
+
+  /**
+   * OpenClaw 2026.11.6 serves its web control dashboard at root (`/?token=...`), NOT `/control`.
+   * If controlUrl is blank or points to the legacy `/control` path, auto-resolve the root dashboard
+   * with the bearer token attached as query parameter. Otherwise respect explicit custom URLs (e.g. noVNC).
+   */
+  val resolvedDashboardUrl: String
+    get() {
+      val trimmedControl = controlUrl.trim()
+      val token = gatewayToken.trim()
+      val activeBase = effectiveBaseUrl
+      val isLegacyControlPath = trimmedControl.isBlank() ||
+        trimmedControl.endsWith("/control", ignoreCase = true) ||
+        trimmedControl.endsWith("/control/", ignoreCase = true)
+      if (!isLegacyControlPath) {
+        if (token.isNotBlank() && trimmedControl.startsWith(activeBase) && !trimmedControl.contains("token=")) {
+          val encoded = java.net.URLEncoder.encode(token, "UTF-8")
+          val sep = if (trimmedControl.contains('?')) "&" else "?"
+          return "$trimmedControl${sep}token=$encoded"
+        }
+        return trimmedControl
+      }
+      if (activeBase.isBlank()) return ""
+      return if (token.isNotBlank()) {
+        val encoded = java.net.URLEncoder.encode(token, "UTF-8")
+        "$activeBase/?token=$encoded"
+      } else {
+        "$activeBase/"
+      }
+    }
+
+  fun toCreateMap(ownerId: String): Map<String, Any> {
+    val activeBase = effectiveBaseUrl.ifBlank { DEFAULT_LAN_URL }
+    val normalizedLan = effectiveLanUrl.ifBlank { activeBase }
+    return mapOf(
+      "userId" to ownerId,
+      "label" to label.trim().take(50).ifBlank { "My OpenClaw PC" },
+      "baseUrl" to activeBase.take(300),
+      "lanUrl" to normalizedLan.take(300),
+      "tailscaleUrl" to effectiveTailscaleUrl.take(300),
+      "connectionMode" to connectionModeEnum.name,
+      "controlUrl" to controlUrl.trim().take(300),
+      "gatewayToken" to gatewayToken.trim().take(256),
+      "aiMode" to aiModeEnum.name,
+      "defaultLlmProvider" to defaultLlmProviderEnum.name,
+      "defaultLlmModel" to defaultLlmModel.trim().take(120),
+      "localLlmEndpoint" to localLlmEndpoint.trim().take(300),
+      "autoParseCasual" to autoParseCasual,
+      "lastStatus" to lastStatusEnum.name,
+      "createdAt" to FieldValue.serverTimestamp(),
+      "updatedAt" to FieldValue.serverTimestamp(),
+    )
+  }
+
+  fun toUpdateMap(): Map<String, Any> {
+    val activeBase = effectiveBaseUrl.ifBlank { DEFAULT_LAN_URL }
+    val normalizedLan = effectiveLanUrl.ifBlank { activeBase }
+    return mapOf(
+      "label" to label.trim().take(50).ifBlank { "My OpenClaw PC" },
+      "baseUrl" to activeBase.take(300),
+      "lanUrl" to normalizedLan.take(300),
+      "tailscaleUrl" to effectiveTailscaleUrl.take(300),
+      "connectionMode" to connectionModeEnum.name,
+      "controlUrl" to controlUrl.trim().take(300),
+      "gatewayToken" to gatewayToken.trim().take(256),
+      "aiMode" to aiModeEnum.name,
+      "defaultLlmProvider" to defaultLlmProviderEnum.name,
+      "defaultLlmModel" to defaultLlmModel.trim().take(120),
+      "localLlmEndpoint" to localLlmEndpoint.trim().take(300),
+      "autoParseCasual" to autoParseCasual,
+      "lastStatus" to lastStatusEnum.name,
+      "updatedAt" to FieldValue.serverTimestamp(),
+    )
+  }
 }
 
 @Keep
@@ -508,7 +705,7 @@ data class LinkedFile(
     "displayName" to displayName.trim().take(120).ifBlank { "Untitled File" },
     "uriOrPath" to uriOrPath.trim().take(500).ifBlank { "~/" },
     "linkType" to linkTypeEnum.name,
-    "mimeOrExt" to mimeOrExt.trim().take(60),
+    "mimeOrExt" to mimeOrExt.trim().take(120),
     "sizeBytes" to sizeBytes.coerceAtLeast(0L),
     "notes" to notes.trim().take(250),
     "createdAt" to FieldValue.serverTimestamp(),
@@ -572,15 +769,19 @@ data class ChatRoom(
   val title: String = "Cafe Squad",
   val topic: String = "Collaborate on tasks & feedback",
   val botIds: List<String> = emptyList(),
+  val maxPingPongTurns: Int = 3,
   val lastMessagePreview: String = "",
   @ServerTimestamp val createdAt: Timestamp? = null,
   @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
+  val effectiveMaxPingPongTurns: Int get() = maxPingPongTurns.coerceIn(1, 6)
+
   fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
     "userId" to ownerId,
     "title" to title.trim().take(60).ifBlank { "Cafe Squad" },
     "topic" to topic.trim().take(160),
     "botIds" to botIds.filter { it.isNotBlank() }.distinct().take(8),
+    "maxPingPongTurns" to effectiveMaxPingPongTurns,
     "lastMessagePreview" to lastMessagePreview.trim().take(300),
     "createdAt" to FieldValue.serverTimestamp(),
     "updatedAt" to FieldValue.serverTimestamp(),
@@ -590,6 +791,7 @@ data class ChatRoom(
     "title" to title.trim().take(60).ifBlank { "Cafe Squad" },
     "topic" to topic.trim().take(160),
     "botIds" to botIds.filter { it.isNotBlank() }.distinct().take(8),
+    "maxPingPongTurns" to effectiveMaxPingPongTurns,
     "lastMessagePreview" to lastMessagePreview.trim().take(300),
     "updatedAt" to FieldValue.serverTimestamp(),
   )

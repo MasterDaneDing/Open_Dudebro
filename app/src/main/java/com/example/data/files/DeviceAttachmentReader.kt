@@ -1,17 +1,28 @@
 package com.example.data.files
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.util.Base64
 import android.util.Log
 import com.example.model.FileLinkType
 import com.example.model.LinkedFile
 import com.example.model.MediaAttachmentPayload
 import com.example.model.OpenClawHost
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.zip.Inflater
+import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,9 +36,10 @@ import org.json.JSONObject
 class DeviceAttachmentReader(private val context: Context) {
 
   private val uploadClient = OkHttpClient.Builder()
-    .connectTimeout(8, TimeUnit.SECONDS)
+    .connectTimeout(4, TimeUnit.SECONDS)
     .readTimeout(25, TimeUnit.SECONDS)
-    .writeTimeout(25, TimeUnit.SECONDS)
+    .writeTimeout(60, TimeUnit.SECONDS)
+    .retryOnConnectionFailure(false)
     .build()
 
   suspend fun preparePayloads(
@@ -67,19 +79,71 @@ class DeviceAttachmentReader(private val context: Context) {
       .lowercase(Locale.US)
     val ext = file.displayName.substringAfterLast('.', "").lowercase(Locale.US)
 
+    if (mime.startsWith("image/") || ext in IMAGE_EXTENSIONS) {
+      val rawImgBytes = readBytesBounded(uri, maxBytes = 10 * 1024 * 1024)
+      if (rawImgBytes != null) {
+        val (dataUrl, infoLabel) = encodeImageDataUrl(rawImgBytes, mime, ext)
+        return MediaAttachmentPayload(
+          displayName = file.displayName,
+          uriOrPath = file.uriOrPath,
+          mimeType = mime.ifBlank { "image/jpeg" },
+          linkType = file.linkTypeEnum,
+          extractedContent = "Attached image/screenshot ($infoLabel) sent inline as base64 image_url.",
+          uploadedHostId = "",
+          isImage = true,
+          imageDataUrl = dataUrl,
+        )
+      }
+    }
+
     if (mime == "application/pdf" || ext == "pdf") {
-      val pdfBytes = readBytesBounded(uri, maxBytes = 10 * 1024 * 1024)
+      val pdfBytes = readBytesBounded(uri, maxBytes = 12 * 1024 * 1024)
       if (pdfBytes != null) {
-        val extracted = extractPdfText(pdfBytes)
+        val rawExtracted = extractPdfText(pdfBytes)
+        val hasSelectableText = rawExtracted.isNotBlank()
+        val renderedPages = if (!hasSelectableText) {
+          renderPdfPagesAsDataUrls(pdfBytes, maxPages = 4)
+        } else {
+          emptyList()
+        }
+        val finalExtracted = when {
+          hasSelectableText -> rawExtracted
+          renderedPages.isNotEmpty() ->
+            "[Scanned/image PDF: no selectable text stream; rendered ${renderedPages.size} page image(s) for multimodal visual inspection.]"
+          else ->
+            "[Scanned or image-only PDF: no selectable embedded text stream found. Uploaded/attached raw PDF for host-side OCR.]"
+        }
         val uploadedHostRef = tryUploadFileToOpenClaw(host, file.displayName, "application/pdf", pdfBytes)
+        val b64 = if (pdfBytes.size <= 3 * 1024 * 1024) Base64.encodeToString(pdfBytes, Base64.NO_WRAP) else ""
         return MediaAttachmentPayload(
           displayName = file.displayName,
           uriOrPath = file.uriOrPath,
           mimeType = "application/pdf",
           linkType = file.linkTypeEnum,
-          extractedContent = extracted.take(45_000),
+          extractedContent = finalExtracted.take(45_000),
           uploadedHostId = uploadedHostRef.orEmpty(),
           isPdf = true,
+          fileBase64 = b64,
+          pageImageDataUrls = renderedPages,
+        )
+      }
+    }
+
+    if (mime == DOCX_MIME || ext == "docx") {
+      val docxBytes = readBytesBounded(uri, maxBytes = 12 * 1024 * 1024)
+      if (docxBytes != null) {
+        val extracted = extractDocxText(docxBytes)
+        val uploadedHostRef = tryUploadFileToOpenClaw(host, file.displayName, DOCX_MIME, docxBytes)
+        val b64 = if (docxBytes.size <= 3 * 1024 * 1024) Base64.encodeToString(docxBytes, Base64.NO_WRAP) else ""
+        return MediaAttachmentPayload(
+          displayName = file.displayName,
+          uriOrPath = file.uriOrPath,
+          mimeType = DOCX_MIME,
+          linkType = file.linkTypeEnum,
+          extractedContent = extracted.take(45_000),
+          uploadedHostId = uploadedHostRef.orEmpty(),
+          isDocx = true,
+          fileBase64 = b64,
         )
       }
     }
@@ -99,7 +163,7 @@ class DeviceAttachmentReader(private val context: Context) {
       )
     }
 
-    // Other binary files: upload raw bytes to host if reachable
+    // Other binary files: upload raw bytes to host if reachable AND keep base64 fallback for small files
     val rawBytes = readBytesBounded(uri, maxBytes = 8 * 1024 * 1024)
     val uploadedHostRef = if (rawBytes != null) {
       tryUploadFileToOpenClaw(
@@ -109,6 +173,9 @@ class DeviceAttachmentReader(private val context: Context) {
         bytes = rawBytes,
       )
     } else null
+    val fallbackB64 = if (rawBytes != null && rawBytes.size <= 2 * 1024 * 1024) {
+      Base64.encodeToString(rawBytes, Base64.NO_WRAP)
+    } else ""
 
     return MediaAttachmentPayload(
       displayName = file.displayName,
@@ -116,8 +183,44 @@ class DeviceAttachmentReader(private val context: Context) {
       mimeType = mime,
       linkType = file.linkTypeEnum,
       uploadedHostId = uploadedHostRef.orEmpty(),
-      extractedContent = if (uploadedHostRef.isNullOrBlank()) "" else "Uploaded to host as $uploadedHostRef",
+      extractedContent = if (uploadedHostRef.isNullOrBlank()) {
+        "Attached file (${file.displayName}, ${rawBytes?.size ?: 0} bytes)"
+      } else {
+        "Uploaded to host as $uploadedHostRef"
+      },
+      fileBase64 = fallbackB64,
     )
+  }
+
+  private fun encodeImageDataUrl(rawBytes: ByteArray, mime: String, ext: String): Pair<String, String> {
+    return try {
+      val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, opts)
+      val maxDim = maxOf(opts.outWidth, opts.outHeight)
+      var sampleSize = 1
+      while (maxDim > 0 && (maxDim / sampleSize) > 1600) {
+        sampleSize *= 2
+      }
+      val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+      val bmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
+      if (bmp != null) {
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 86, out)
+        val jpegBytes = out.toByteArray()
+        val info = "${bmp.width}x${bmp.height}"
+        bmp.recycle()
+        val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+        "data:image/jpeg;base64,$b64" to info
+      } else {
+        val fallbackMime = mime.ifBlank { if (ext == "png") "image/png" else "image/jpeg" }
+        val b64 = Base64.encodeToString(rawBytes, Base64.NO_WRAP)
+        "data:$fallbackMime;base64,$b64" to "${rawBytes.size / 1024}KB"
+      }
+    } catch (_: Exception) {
+      val fallbackMime = mime.ifBlank { if (ext == "png") "image/png" else "image/jpeg" }
+      val b64 = Base64.encodeToString(rawBytes, Base64.NO_WRAP)
+      "data:$fallbackMime;base64,$b64" to "${rawBytes.size / 1024}KB"
+    }
   }
 
   private fun readBytesBounded(uri: Uri, maxBytes: Int): ByteArray? {
@@ -148,10 +251,15 @@ class DeviceAttachmentReader(private val context: Context) {
     mimeType: String,
     bytes: ByteArray,
   ): String? {
-    val cleanBase = host?.baseUrl?.trim()?.trimEnd('/').orEmpty()
+    val cleanBase = host?.effectiveBaseUrl?.trim()?.trimEnd('/').orEmpty()
     if (cleanBase.isBlank()) return null
 
-    val endpoints = listOf("$cleanBase/v1/files", "$cleanBase/files/upload")
+    val endpoints = listOf(
+      "$cleanBase/v1/files",
+      "$cleanBase/files/upload",
+      "$cleanBase/api/files/upload",
+      "$cleanBase/hooks/upload",
+    )
     val body = MultipartBody.Builder()
       .setType(MultipartBody.FORM)
       .addFormDataPart("purpose", "assistants")
@@ -178,14 +286,22 @@ class DeviceAttachmentReader(private val context: Context) {
           if (resp.isSuccessful) {
             val raw = resp.body?.string().orEmpty()
             val json = runCatching { JSONObject(raw) }.getOrNull()
-            return json?.optString("id")?.takeIf { it.isNotBlank() }
+            return json?.optString("file_path")?.takeIf { it.isNotBlank() }
+              ?: json?.optString("filePath")?.takeIf { it.isNotBlank() }
               ?: json?.optString("path")?.takeIf { it.isNotBlank() }
+              ?: json?.optString("id")?.takeIf { it.isNotBlank() }
               ?: json?.optString("url")?.takeIf { it.isNotBlank() }
               ?: filename
           }
         }
       } catch (e: CancellationException) {
         throw e
+      } catch (e: java.net.ConnectException) {
+        break
+      } catch (e: java.net.NoRouteToHostException) {
+        break
+      } catch (e: java.net.UnknownHostException) {
+        break
       } catch (_: Exception) {
         // Fallback to inline extracted text
       }
@@ -243,11 +359,47 @@ class DeviceAttachmentReader(private val context: Context) {
       if (fallback.isNotBlank()) extractedChunks.add(fallback)
     }
 
-    val combined = extractedChunks.joinToString("\n\n").trim()
-    return if (combined.isNotBlank()) {
-      combined
-    } else {
-      "[Scanned or image-only PDF: no selectable embedded text stream found. Uploaded/attached raw PDF for host-side OCR.]"
+    return extractedChunks.joinToString("\n\n").trim()
+  }
+
+  private fun renderPdfPagesAsDataUrls(pdfBytes: ByteArray, maxPages: Int = 4): List<String> {
+    var tempFile: File? = null
+    var pfd: ParcelFileDescriptor? = null
+    var renderer: PdfRenderer? = null
+    return try {
+      tempFile = File.createTempFile("clawpdf_", ".pdf", context.cacheDir)
+      FileOutputStream(tempFile).use { it.write(pdfBytes) }
+      pfd = ParcelFileDescriptor.open(tempFile, ParcelFileDescriptor.MODE_READ_ONLY)
+      renderer = PdfRenderer(pfd)
+      val count = minOf(renderer.pageCount, maxPages)
+      buildList {
+        for (i in 0 until count) {
+          renderer.openPage(i).use { page ->
+            val maxDim = 1400
+            val scale = minOf(
+              2.0f,
+              maxDim.toFloat() / maxOf(1, maxOf(page.width, page.height)).toFloat()
+            )
+            val width = maxOf(1, (page.width * scale).toInt())
+            val height = maxOf(1, (page.height * scale).toInt())
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            Canvas(bitmap).drawColor(Color.WHITE)
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 82, out)
+            bitmap.recycle()
+            val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            add("data:image/jpeg;base64,$b64")
+          }
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "PdfRenderer fallback failed: ${e.message}")
+      emptyList()
+    } finally {
+      runCatching { renderer?.close() }
+      runCatching { pfd?.close() }
+      runCatching { tempFile?.delete() }
     }
   }
 
@@ -343,8 +495,83 @@ class DeviceAttachmentReader(private val context: Context) {
       .trim()
   }
 
+  /**
+   * Pure-Kotlin DOCX text extractor that unzips `word/document.xml` (and headers/footers),
+   * preserves paragraph and table-row breaks, and strips OOXML tags cleanly.
+   */
+  private fun extractDocxText(docxBytes: ByteArray): String {
+    val parts = mutableListOf<String>()
+    try {
+      ZipInputStream(ByteArrayInputStream(docxBytes)).use { zis ->
+        var entry = zis.nextEntry
+        while (entry != null) {
+          val name = entry.name.lowercase(Locale.US)
+          if (!entry.isDirectory &&
+            (name == "word/document.xml" || name.startsWith("word/header") || name.startsWith("word/footer")) &&
+            name.endsWith(".xml")
+          ) {
+            val xml = readZipEntryText(zis)
+            val parsed = parseWordXmlToText(xml)
+            if (parsed.isNotBlank()) {
+              if (name == "word/document.xml") {
+                parts.add(0, parsed)
+              } else {
+                parts.add(parsed)
+              }
+            }
+          }
+          zis.closeEntry()
+          entry = zis.nextEntry
+        }
+      }
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Log.w(TAG, "DOCX extraction fallback failed: ${e.message}")
+    }
+    val combined = parts.joinToString("\n\n").trim()
+    return combined.ifBlank {
+      "[DOCX contains no extractable text in word/document.xml. Check Host Upload Reference if host upload succeeded.]"
+    }
+  }
+
+  private fun readZipEntryText(zis: ZipInputStream): String {
+    val out = ByteArrayOutputStream()
+    val buf = ByteArray(4096)
+    var total = 0
+    val max = 2 * 1024 * 1024
+    while (total < max) {
+      val n = zis.read(buf, 0, minOf(buf.size, max - total))
+      if (n <= 0) break
+      out.write(buf, 0, n)
+      total += n
+    }
+    return String(out.toByteArray(), StandardCharsets.UTF_8)
+  }
+
+  private fun parseWordXmlToText(xml: String): String {
+    return xml
+      .replace(Regex("<w:tab\\s*/?>"), "\t")
+      .replace(Regex("<w:(?:br|cr)\\s*[^>]*/>"), "\n")
+      .replace(Regex("</w:tc>"), " | ")
+      .replace(Regex("</w:(?:p|tr)>"), "\n")
+      .replace(Regex("<[^>]+>"), "")
+      .replace("&amp;", "&")
+      .replace("&lt;", "<")
+      .replace("&gt;", ">")
+      .replace("&quot;", "\"")
+      .replace("&apos;", "'")
+      .replace("&#160;", " ")
+      .replace(Regex(" \\|\\s*\\n"), "\n")
+      .replace(Regex("[ \\t]+\\n"), "\n")
+      .replace(Regex("\\n{3,}"), "\n\n")
+      .trim()
+  }
+
   companion object {
     private const val TAG = "DeviceAttachmentReader"
+    private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "gif", "heic", "bmp")
     private val CODE_AND_TEXT_EXTENSIONS = setOf(
       "txt", "md", "markdown", "kt", "kts", "java", "py", "ts", "tsx", "js", "jsx",
       "json", "xml", "yaml", "yml", "csv", "tsv", "log", "html", "htm", "css", "scss",

@@ -91,8 +91,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.shape.CircleShape
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.files.MediaSaveHelper
+import com.example.model.BotExpression
+import com.example.model.CompanionBot
 import com.example.model.FileLinkType
 import com.example.model.GeneralChatMessage
 import com.example.model.GeneralChatThread
@@ -102,10 +106,12 @@ import com.example.model.MessageSender
 import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.WheelLlmOption
+import com.example.ui.avatar.BotVectorAvatar
 import com.example.ui.components.InlineMediaCard
 import com.example.ui.components.LlmRotaryWheelSelector
 import com.example.ui.components.MediaLightboxDialog
 import com.example.ui.components.SectionSettingsIconButton
+import com.example.viewmodel.ConnectionFailureBanner
 import com.example.viewmodel.UiState
 import java.util.Locale
 import kotlinx.coroutines.launch
@@ -125,11 +131,18 @@ fun GeneralChatScreen(
   pendingAttachments: List<LinkedFile> = emptyList(),
   selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
+  activeElapsedSec: Int = 0,
+  streamingPreviewText: String? = null,
+  connectionFailureBanner: ConnectionFailureBanner? = null,
   onSelectChat: (String) -> Unit,
   onCreateNewChat: (WheelLlmOption) -> Unit,
   onTogglePinChat: (String, Boolean) -> Unit,
   onDeleteChat: (String) -> Unit,
   onSelectWheelModel: (WheelLlmOption, String?) -> Unit,
+  onToggleHostConnectionMode: (OpenClawHost) -> Unit = {},
+  onSwitchModeAndRetry: (ConnectionFailureBanner) -> Unit = {},
+  onDismissFailureBanner: () -> Unit = {},
+  onAbortRequest: () -> Unit = {},
   onSendMessage: (GeneralChatThread?, String, WheelLlmOption, OpenClawHost?) -> Unit,
   onAttachDeviceFile: (String, String, String, Long) -> Unit = { _, _, _, _ -> },
   onToggleAttachment: (LinkedFile) -> Unit = {},
@@ -236,15 +249,22 @@ fun GeneralChatScreen(
             selectedWheelModel = selectedWheelModel,
             composerText = composerText,
             isBusy = isBusy,
+            activeElapsedSec = activeElapsedSec,
+            streamingPreviewText = streamingPreviewText,
+            connectionFailureBanner = connectionFailureBanner,
             showBackArrow = false,
             onBackToList = {},
             onTogglePin = {
               if (activeThread != null) onTogglePinChat(activeThread.id, !activeThread.pinned)
             },
+            onToggleHostConnectionMode = onToggleHostConnectionMode,
+            onSwitchModeAndRetry = onSwitchModeAndRetry,
+            onDismissFailureBanner = onDismissFailureBanner,
+            onAbortRequest = onAbortRequest,
+            onOpenHostSettings = onOpenHostSettings,
             onOpenSettings = { showSettingsDialog = true },
             onOpenAttach = { showAttachSheet = true },
             onToggleAttachment = onToggleAttachment,
-            onSelectWheelModel = { option -> onSelectWheelModel(option, activeThread?.id) },
             onComposerChange = { composerText = it },
             onSend = {
               val prompt = composerText
@@ -256,7 +276,12 @@ fun GeneralChatScreen(
             },
             onSaveMedia = { url, type ->
               scope.launch {
-                MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                val res = if (type == GeneratedMediaType.DOCUMENT) {
+                  MediaSaveHelper.saveAndOpenDocument(context, url, activeHost)
+                } else {
+                  MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                }
+                res
                   .onSuccess { onShowBanner(it) }
                   .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
               }
@@ -305,15 +330,22 @@ fun GeneralChatScreen(
           selectedWheelModel = selectedWheelModel,
           composerText = composerText,
           isBusy = isBusy,
+          activeElapsedSec = activeElapsedSec,
+          streamingPreviewText = streamingPreviewText,
+          connectionFailureBanner = connectionFailureBanner,
           showBackArrow = true,
           onBackToList = { phoneShowingThread = false },
           onTogglePin = {
             if (activeThread != null) onTogglePinChat(activeThread.id, !activeThread.pinned)
           },
+          onToggleHostConnectionMode = onToggleHostConnectionMode,
+          onSwitchModeAndRetry = onSwitchModeAndRetry,
+          onDismissFailureBanner = onDismissFailureBanner,
+          onAbortRequest = onAbortRequest,
+          onOpenHostSettings = onOpenHostSettings,
           onOpenSettings = { showSettingsDialog = true },
           onOpenAttach = { showAttachSheet = true },
           onToggleAttachment = onToggleAttachment,
-          onSelectWheelModel = { option -> onSelectWheelModel(option, activeThread?.id) },
           onComposerChange = { composerText = it },
           onSend = {
             val prompt = composerText
@@ -325,7 +357,12 @@ fun GeneralChatScreen(
           },
           onSaveMedia = { url, type ->
             scope.launch {
-              MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+              val res = if (type == GeneratedMediaType.DOCUMENT) {
+                MediaSaveHelper.saveAndOpenDocument(context, url, activeHost)
+              } else {
+                MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+              }
+              res
                 .onSuccess { onShowBanner(it) }
                 .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
             }
@@ -346,25 +383,17 @@ fun GeneralChatScreen(
       onDismissRequest = { showSettingsDialog = false },
       title = { Text("General Chat Settings") },
       text = {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-          Text("Active Model Wheel", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-          WheelLlmOption.entries.forEach { option ->
-            val picked = option == selectedWheelModel
-            Surface(
-              onClick = { onSelectWheelModel(option, activeThread?.id) },
-              shape = RoundedCornerShape(12.dp),
-              color = if (picked) Color(0xFFFF6D00).copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant,
-              border = BorderStroke(1.dp, if (picked) Color(0xFFFF6D00) else Color.Transparent),
-              modifier = Modifier.fillMaxWidth(),
-            ) {
-              Text(
-                text = if (picked) "✓ ${option.fullLabel}" else option.fullLabel,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = if (picked) FontWeight.Bold else FontWeight.Normal,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-              )
-            }
-          }
+        Column(
+          modifier = Modifier.verticalScroll(rememberScrollState()),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Text("Spin Model Wheel", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+          LlmRotaryWheelSelector(
+            selectedOption = selectedWheelModel,
+            onSelectOption = { option -> onSelectWheelModel(option, activeThread?.id) },
+            darkSurface = false,
+            accentColor = Color(0xFFFF5500),
+          )
 
           if (activeThread != null) {
             HorizontalDivider()
@@ -393,7 +422,13 @@ fun GeneralChatScreen(
           HorizontalDivider()
           Text("General & OpenClaw Settings", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
           Text(
-            text = activeHost?.let { "Gateway: ${it.label} (${it.baseUrl})" } ?: "No OpenClaw Host PC configured yet",
+            text = "Routes to OpenClaw's APK agent (openclaw/apk) with per-thread sessions.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+          )
+          Text(
+            text = activeHost?.let { "Gateway (${it.connectionModeEnum.shortPill}): ${it.label} (${it.effectiveBaseUrl})" }
+              ?: "No OpenClaw Host PC configured yet",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
@@ -500,7 +535,12 @@ fun GeneralChatScreen(
         onDismiss = { lightboxMessage = null },
         onSaveToPhone = {
           scope.launch {
-            MediaSaveHelper.saveMediaToPhone(context, url, targetMsg.mediaTypeEnum, activeHost)
+            val res = if (targetMsg.mediaTypeEnum == GeneratedMediaType.DOCUMENT) {
+              MediaSaveHelper.saveAndOpenDocument(context, url, activeHost)
+            } else {
+              MediaSaveHelper.saveMediaToPhone(context, url, targetMsg.mediaTypeEnum, activeHost)
+            }
+            res
               .onSuccess { onShowBanner(it) }
               .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
           }
@@ -790,13 +830,20 @@ private fun GeneralChatConversationPane(
   selectedWheelModel: WheelLlmOption,
   composerText: String,
   isBusy: Boolean,
+  activeElapsedSec: Int,
+  streamingPreviewText: String?,
+  connectionFailureBanner: ConnectionFailureBanner?,
   showBackArrow: Boolean,
   onBackToList: () -> Unit,
   onTogglePin: () -> Unit,
+  onToggleHostConnectionMode: (OpenClawHost) -> Unit,
+  onSwitchModeAndRetry: (ConnectionFailureBanner) -> Unit,
+  onDismissFailureBanner: () -> Unit,
+  onAbortRequest: () -> Unit,
+  onOpenHostSettings: () -> Unit,
   onOpenSettings: () -> Unit,
   onOpenAttach: () -> Unit,
   onToggleAttachment: (LinkedFile) -> Unit,
-  onSelectWheelModel: (WheelLlmOption) -> Unit,
   onComposerChange: (String) -> Unit,
   onSend: () -> Unit,
   onAnimateImage: (String) -> Unit,
@@ -871,6 +918,25 @@ private fun GeneralChatConversationPane(
           modifier = Modifier.weight(1f),
         )
 
+        if (activeHost != null) {
+          Surface(
+            onClick = { onToggleHostConnectionMode(activeHost) },
+            shape = RoundedCornerShape(50),
+            color = Color(0xCC5600BA),
+            border = BorderStroke(1.2.dp, Color(0xFFFFD180)),
+            modifier = Modifier.testTag("general_connection_mode_pill"),
+          ) {
+            Text(
+              text = activeHost.connectionModeEnum.shortPill,
+              style = MaterialTheme.typography.labelSmall,
+              fontWeight = FontWeight.Bold,
+              color = Color.White,
+              maxLines = 1,
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+          }
+        }
+
         if (activeThread != null) {
           IconButton(
             onClick = onTogglePin,
@@ -891,14 +957,6 @@ private fun GeneralChatConversationPane(
           modifier = Modifier.testTag("general_section_settings_button"),
         )
       }
-
-      // Rotating LLM Wheel
-      LlmRotaryWheelSelector(
-        selectedOption = selectedWheelModel,
-        onSelectOption = onSelectWheelModel,
-        accentColor = Color(0xFFFF5500),
-        modifier = Modifier.padding(bottom = 6.dp),
-      )
 
       // Messages or Simple Clean Prompt Chips (No Welcome to Toga Q&A Forum banner)
       Box(
@@ -969,6 +1027,11 @@ private fun GeneralChatConversationPane(
                 }
               }
             } else {
+              val latestPendingAssistantId = messages.lastOrNull {
+                it.senderEnum != MessageSender.USER &&
+                  (it.statusEnum == MessageStatus.DISPATCHED || it.statusEnum == MessageStatus.PARSING)
+              }?.id
+              val dudebroCompanion = remember { CompanionBot() }
               LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(vertical = 8.dp),
@@ -978,10 +1041,45 @@ private fun GeneralChatConversationPane(
                 items(messages, key = { it.id }) { msg ->
                   val isUser = msg.senderEnum == MessageSender.USER
                   val isErr = msg.statusEnum == MessageStatus.FAILED || msg.statusEnum == MessageStatus.WARNING
+                  val isLivePending = !isUser && isBusy && msg.id == latestPendingAssistantId
+                  val bubbleExpression = when (msg.statusEnum) {
+                    MessageStatus.DISPATCHED, MessageStatus.PARSING -> BotExpression.THINKING
+                    MessageStatus.FAILED -> BotExpression.SORRY
+                    MessageStatus.WARNING -> BotExpression.WORRIED
+                    else -> BotExpression.UH_HUH
+                  }
                   Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+                    verticalAlignment = Alignment.Top,
                   ) {
+                    if (!isUser) {
+                      Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                          .padding(top = 2.dp, end = 8.dp)
+                          .size(48.dp)
+                          .clip(CircleShape)
+                          .background(
+                            Brush.radialGradient(
+                              colors = listOf(
+                                Color.White.copy(alpha = 0.34f),
+                                Color(0xFFFF6D00).copy(alpha = 0.22f),
+                                Color.Transparent,
+                              )
+                            )
+                          )
+                          .testTag("general_chat_floating_head_${msg.id}"),
+                      ) {
+                        BotVectorAvatar(
+                          bot = dudebroCompanion,
+                          expression = bubbleExpression,
+                          size = 44.dp,
+                          animate = msg.statusEnum == MessageStatus.DISPATCHED || msg.statusEnum == MessageStatus.PARSING,
+                        )
+                      }
+                    }
+
                     Surface(
                       shape = RoundedCornerShape(
                         topStart = 20.dp,
@@ -992,27 +1090,66 @@ private fun GeneralChatConversationPane(
                       color = if (isUser) Color(0xFF6A00F4) else Color(0xFAFFF8EE),
                       border = BorderStroke(
                         width = 1.2.dp,
-                        color = if (isUser) Color(0xAAFF9CE6) else Color(0x55FF6D00),
+                        color = when {
+                          isErr -> MaterialTheme.colorScheme.error
+                          isUser -> Color(0xAAFF9CE6)
+                          else -> Color(0x55FF6D00)
+                        },
                       ),
-                      modifier = Modifier.widthIn(max = 560.dp),
+                      modifier = if (isUser) {
+                        Modifier.widthIn(max = 540.dp)
+                      } else {
+                        Modifier
+                          .weight(1f, fill = false)
+                          .widthIn(max = 540.dp)
+                      },
                     ) {
                       Column(
                         modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                       ) {
-                        if (!isUser && msg.modelLabel.isNotBlank()) {
+                        val cleanedText = remember(msg.rawText) { sanitizeGeneralDisplayText(msg.rawText) }
+                        if (isLivePending) {
+                          val displayText = streamingPreviewText?.takeIf { it.isNotBlank() } ?: cleanedText
                           Text(
-                            text = msg.modelLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isErr) MaterialTheme.colorScheme.error else Color(0xFFE65100),
+                            text = displayText,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFF2D0F00),
+                          )
+                          Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth(),
+                          ) {
+                            Text(
+                              text = "Thinking / running tools on host... (${activeElapsedSec}s)",
+                              style = MaterialTheme.typography.labelSmall,
+                              color = Color(0xFFFF5500),
+                              fontWeight = FontWeight.SemiBold,
+                              modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                              onClick = onAbortRequest,
+                              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                              colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                              modifier = Modifier.testTag("general_abort_request_button"),
+                            ) {
+                              Text("Abort", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                          }
+                        } else {
+                          Text(
+                            text = cleanedText,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isUser) {
+                              Color.White
+                            } else if (isErr) {
+                              MaterialTheme.colorScheme.error
+                            } else {
+                              Color(0xFF2D0F00)
+                            },
                           )
                         }
-                        Text(
-                          text = msg.rawText,
-                          style = MaterialTheme.typography.bodyMedium,
-                          color = if (isUser) Color.White else Color(0xFF2D0F00),
-                        )
 
                         val mediaUrl = msg.mediaUrl
                         if (!mediaUrl.isNullOrBlank()) {
@@ -1041,6 +1178,77 @@ private fun GeneralChatConversationPane(
         }
       }
 
+      // Fast-fail Mode Switch & Retry Banner
+      AnimatedVisibility(visible = connectionFailureBanner != null) {
+        connectionFailureBanner?.let { banner ->
+          Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xFCFFF3E0),
+            border = BorderStroke(1.5.dp, Color(0xFFFF5500)),
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(bottom = 6.dp)
+              .testTag("general_connection_failure_banner"),
+          ) {
+            Column(
+              modifier = Modifier.padding(10.dp),
+              verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
+              ) {
+                Text(
+                  text = banner.cleanError,
+                  style = MaterialTheme.typography.labelSmall,
+                  color = Color(0xFF4A1800),
+                  fontWeight = FontWeight.SemiBold,
+                  modifier = Modifier.weight(1f),
+                )
+                IconButton(
+                  onClick = onDismissFailureBanner,
+                  modifier = Modifier.size(30.dp),
+                ) {
+                  Icon(Icons.Rounded.Close, contentDescription = "Dismiss", tint = Color(0xFF4A1800), modifier = Modifier.size(16.dp))
+                }
+              }
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (banner.alternativeHasUrl) {
+                  Button(
+                    onClick = { onSwitchModeAndRetry(banner) },
+                    colors = ButtonDefaults.buttonColors(
+                      containerColor = Color(0xFFFF5500),
+                      contentColor = Color.White,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.defaultMinSize(minHeight = 36.dp),
+                  ) {
+                    Text(
+                      text = "Switch to ${banner.alternativeMode.shortPill} & Retry",
+                      style = MaterialTheme.typography.labelSmall,
+                      fontWeight = FontWeight.Bold,
+                    )
+                  }
+                } else {
+                  OutlinedButton(
+                    onClick = onOpenHostSettings,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.defaultMinSize(minHeight = 36.dp),
+                  ) {
+                    Text(
+                      text = "Set ${banner.alternativeMode.shortPill} URL",
+                      style = MaterialTheme.typography.labelSmall,
+                      fontWeight = FontWeight.Bold,
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
       // Pending Document / Image Attachments
       AnimatedVisibility(visible = pendingAttachments.isNotEmpty()) {
         Row(
@@ -1051,26 +1259,38 @@ private fun GeneralChatConversationPane(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
           pendingAttachments.forEach { file ->
+            val isImage = isGeneralImageAttachment(file)
             Surface(
-              shape = RoundedCornerShape(50),
+              shape = RoundedCornerShape(18.dp),
               color = Color(0xFF6A00F4),
               border = BorderStroke(1.dp, Color(0xFFFFB2EB)),
             ) {
               Row(
-                modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                modifier = Modifier.padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
               ) {
-                Icon(
-                  imageVector = if (file.linkTypeEnum == FileLinkType.ANDROID_ATTACHMENT) {
-                    Icons.Rounded.AttachFile
-                  } else {
-                    Icons.Rounded.Link
-                  },
-                  contentDescription = null,
-                  modifier = Modifier.size(14.dp),
-                  tint = Color.White,
-                )
+                if (isImage && file.uriOrPath.isNotBlank()) {
+                  AsyncImage(
+                    model = file.uriOrPath,
+                    contentDescription = file.displayName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                      .size(32.dp)
+                      .clip(RoundedCornerShape(8.dp)),
+                  )
+                } else {
+                  Icon(
+                    imageVector = if (file.linkTypeEnum == FileLinkType.ANDROID_ATTACHMENT) {
+                      Icons.Rounded.AttachFile
+                    } else {
+                      Icons.Rounded.Link
+                    },
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = Color.White,
+                  )
+                }
                 Text(
                   text = file.displayName,
                   style = MaterialTheme.typography.labelMedium,
@@ -1150,7 +1370,7 @@ private fun GeneralChatConversationPane(
           Spacer(Modifier.width(8.dp))
           FilledIconButton(
             onClick = onSend,
-            enabled = composerText.isNotBlank() && !isBusy,
+            enabled = (composerText.isNotBlank() || pendingAttachments.isNotEmpty()) && !isBusy,
             colors = IconButtonDefaults.filledIconButtonColors(
               containerColor = Color(0xFFFF5500),
               contentColor = Color.White,
@@ -1198,4 +1418,22 @@ private fun resolveGeneralUriMeta(context: Context, uri: Uri): GeneralResolvedMe
     // Fallback
   }
   return GeneralResolvedMeta(name = name, mime = mime, size = size.coerceAtLeast(0L))
+}
+
+private val GENERAL_INLINE_DATA_IMAGE_REGEX = Regex(
+  """!?\[[^\]]*\]\(data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+\)|data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+"""
+)
+
+private fun sanitizeGeneralDisplayText(raw: String): String {
+  if (!raw.contains("data:image/", ignoreCase = true)) return raw
+  val cleaned = GENERAL_INLINE_DATA_IMAGE_REGEX.replace(raw, "").trim()
+  return cleaned.ifBlank { "Image attached below." }
+}
+
+private fun isGeneralImageAttachment(file: LinkedFile): Boolean {
+  val mime = file.mimeOrExt.lowercase(Locale.US)
+  val name = file.displayName.lowercase(Locale.US)
+  return mime.startsWith("image/") ||
+    name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg") ||
+    name.endsWith(".webp") || name.endsWith(".gif") || name.endsWith(".heic")
 }

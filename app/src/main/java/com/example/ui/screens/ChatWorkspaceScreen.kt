@@ -35,6 +35,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -99,8 +100,11 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.files.MediaSaveHelper
+import com.example.model.BackgroundAgentTask
+import com.example.model.BackgroundTaskStatus
 import com.example.model.BotExpression
 import com.example.model.BotMessage
 import com.example.model.CompanionBot
@@ -117,7 +121,9 @@ import com.example.ui.components.LlmRotaryWheelSelector
 import com.example.ui.components.MediaLightboxDialog
 import com.example.ui.components.SectionSettingsIconButton
 import com.example.ui.util.ReplyHaptics
+import com.example.viewmodel.ConnectionFailureBanner
 import com.example.viewmodel.UiState
+import java.util.Locale
 import kotlinx.coroutines.launch
 
 @Composable
@@ -131,11 +137,21 @@ fun ChatWorkspaceScreen(
   pendingAttachments: List<LinkedFile>,
   selectedWheelModel: WheelLlmOption,
   isBusy: Boolean,
+  busyBotIds: Set<String> = emptySet(),
+  backgroundTasks: List<BackgroundAgentTask> = emptyList(),
+  activeElapsedSec: Int = 0,
+  streamingPreviewText: String? = null,
+  connectionFailureBanner: ConnectionFailureBanner? = null,
   pendingChatDraft: String? = null,
   onConsumePendingChatDraft: () -> Unit = {},
   onShowBanner: (String) -> Unit = {},
   onSelectBot: (String) -> Unit,
   onSelectWheelModel: (WheelLlmOption) -> Unit,
+  onSwitchModeAndRetry: (ConnectionFailureBanner) -> Unit = {},
+  onDismissFailureBanner: () -> Unit = {},
+  onAbortRequest: () -> Unit = {},
+  onSpawnBackgroundTask: (String, CompanionBot, OpenClawHost?, WheelLlmOption) -> Unit = { _, _, _, _ -> },
+  onAbortBackgroundTask: (String) -> Unit = {},
   onBack: () -> Unit,
   onAddBotClick: () -> Unit,
   onEditBotClick: (CompanionBot) -> Unit,
@@ -163,6 +179,7 @@ fun ChatWorkspaceScreen(
   val messages = (messagesState as? UiState.Success)?.data.orEmpty()
 
   var minusMode by remember { mutableStateOf(false) }
+  var spawnInBackground by remember { mutableStateOf(false) }
   var composerText by remember { mutableStateOf("") }
   var showLinkDialog by remember { mutableStateOf(false) }
   var showAttachSheet by remember { mutableStateOf(false) }
@@ -310,6 +327,7 @@ fun ChatWorkspaceScreen(
         BotCrewBar(
           bots = bots,
           activeBotId = activeBot?.id.orEmpty(),
+          busyBotIds = busyBotIds,
           minusMode = minusMode,
           onToggleMinusMode = { minusMode = !minusMode },
           onSelectBot = onSelectBot,
@@ -368,6 +386,10 @@ fun ChatWorkspaceScreen(
                   onSampleClick = { sample -> composerText = sample },
                 )
               } else {
+                val latestPendingBotId = messages.lastOrNull {
+                  it.senderEnum == MessageSender.BOT &&
+                    (it.statusEnum == MessageStatus.DISPATCHED || it.statusEnum == MessageStatus.PARSING)
+                }?.id
                 LazyColumn(
                   state = listState,
                   contentPadding = PaddingValues(vertical = 8.dp),
@@ -375,10 +397,15 @@ fun ChatWorkspaceScreen(
                   modifier = Modifier.fillMaxSize(),
                 ) {
                   items(messages, key = { it.id }) { msg ->
+                    val isLiveStreaming = isBusy && msg.id == latestPendingBotId
                     MessageBubbleItem(
                       message = msg,
                       bot = activeBot,
                       activeHost = activeHost,
+                      isLiveStreaming = isLiveStreaming,
+                      liveElapsedSec = activeElapsedSec,
+                      streamingPreviewText = if (isLiveStreaming) streamingPreviewText else null,
+                      onAbortRequest = onAbortRequest,
                       onCopyInstruction = { text -> clipboard.setText(AnnotatedString(text)) },
                       onRetry = {
                         if (activeBot != null) onRetryMessage(msg, activeBot, activeHost)
@@ -389,7 +416,12 @@ fun ChatWorkspaceScreen(
                       },
                       onSaveMedia = { url, type ->
                         scope.launch {
-                          MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                          val res = if (type == GeneratedMediaType.DOCUMENT) {
+                            MediaSaveHelper.saveAndOpenDocument(context, url, activeHost)
+                          } else {
+                            MediaSaveHelper.saveMediaToPhone(context, url, type, activeHost)
+                          }
+                          res
                             .onSuccess { onShowBanner(it) }
                             .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
                         }
@@ -463,6 +495,77 @@ fun ChatWorkspaceScreen(
       }
     }
 
+    // Fast-fail Mode Switch & Retry Banner
+    AnimatedVisibility(visible = connectionFailureBanner != null) {
+      connectionFailureBanner?.let { banner ->
+        Surface(
+          shape = RoundedCornerShape(16.dp),
+          color = Color(0xFCFFF3E0),
+          border = BorderStroke(1.5.dp, Color(0xFFFF2E93)),
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp)
+            .testTag("bot_connection_failure_banner"),
+        ) {
+          Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.SpaceBetween,
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Text(
+                text = banner.cleanError,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF4A1800),
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+              )
+              IconButton(
+                onClick = onDismissFailureBanner,
+                modifier = Modifier.size(30.dp),
+              ) {
+                Icon(Icons.Rounded.Close, contentDescription = "Dismiss", tint = Color(0xFF4A1800), modifier = Modifier.size(16.dp))
+              }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+              if (banner.alternativeHasUrl) {
+                Button(
+                  onClick = { onSwitchModeAndRetry(banner) },
+                  colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFFF2E93),
+                    contentColor = Color.White,
+                  ),
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                  modifier = Modifier.defaultMinSize(minHeight = 36.dp),
+                ) {
+                  Text(
+                    text = "Switch to ${banner.alternativeMode.shortPill} & Retry",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                  )
+                }
+              } else {
+                OutlinedButton(
+                  onClick = onOpenHostSettings,
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                  modifier = Modifier.defaultMinSize(minHeight = 36.dp),
+                ) {
+                  Text(
+                    text = "Set ${banner.alternativeMode.shortPill} URL",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                  )
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     // 4. Pending File & Path Chips
     AnimatedVisibility(visible = pendingAttachments.isNotEmpty()) {
       Row(
@@ -473,25 +576,37 @@ fun ChatWorkspaceScreen(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
       ) {
         pendingAttachments.forEach { file ->
+          val isImage = isBotImageAttachment(file)
           Surface(
-            shape = RoundedCornerShape(50),
+            shape = RoundedCornerShape(18.dp),
             color = MaterialTheme.colorScheme.secondaryContainer,
           ) {
             Row(
-              modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+              modifier = Modifier.padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
               verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(4.dp),
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-              Icon(
-                imageVector = if (file.linkTypeEnum == FileLinkType.ANDROID_ATTACHMENT) {
-                  Icons.Rounded.AttachFile
-                } else {
-                  Icons.Rounded.Link
-                },
-                contentDescription = null,
-                modifier = Modifier.size(14.dp),
-                tint = MaterialTheme.colorScheme.onSecondaryContainer,
-              )
+              if (isImage && file.uriOrPath.isNotBlank()) {
+                AsyncImage(
+                  model = file.uriOrPath,
+                  contentDescription = file.displayName,
+                  contentScale = ContentScale.Crop,
+                  modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(8.dp)),
+                )
+              } else {
+                Icon(
+                  imageVector = if (file.linkTypeEnum == FileLinkType.ANDROID_ATTACHMENT) {
+                    Icons.Rounded.AttachFile
+                  } else {
+                    Icons.Rounded.Link
+                  },
+                  contentDescription = null,
+                  modifier = Modifier.size(16.dp),
+                  tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+              }
               Text(
                 text = file.displayName,
                 style = MaterialTheme.typography.labelMedium,
@@ -515,12 +630,123 @@ fun ChatWorkspaceScreen(
       }
     }
 
-    // 4.5 Rotating LLM Wheel Selector
-    LlmRotaryWheelSelector(
-      selectedOption = selectedWheelModel,
-      onSelectOption = onSelectWheelModel,
-      modifier = Modifier.padding(bottom = 6.dp),
-    )
+    // Active Background Sub-Agents strip
+    val activeOrRecentTasks = remember(backgroundTasks, activeBot?.id) {
+      backgroundTasks.filter {
+        it.status == BackgroundTaskStatus.RUNNING || it.botId == activeBot?.id
+      }.take(4)
+    }
+    AnimatedVisibility(visible = activeOrRecentTasks.isNotEmpty()) {
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .horizontalScroll(rememberScrollState())
+          .padding(bottom = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        activeOrRecentTasks.forEach { task ->
+          val isRunning = task.status == BackgroundTaskStatus.RUNNING
+          Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = if (isRunning) Color(0xEE2B084D) else Color(0xCC240B38),
+            border = BorderStroke(1.dp, if (isRunning) Color(0xFFFF80D5) else Color(0x66FFFFFF)),
+            modifier = Modifier.testTag("background_task_chip_${task.id}"),
+          ) {
+            Row(
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              if (isRunning) {
+                CircularProgressIndicator(
+                  modifier = Modifier.size(14.dp),
+                  color = Color(0xFFFF80D5),
+                  strokeWidth = 2.dp,
+                )
+              }
+              Column {
+                Text(
+                  text = "${task.botName} • ${task.status.label} (${task.elapsedSec}s)",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = Color.White,
+                  fontWeight = FontWeight.Bold,
+                  maxLines = 1,
+                )
+                Text(
+                  text = task.prompt,
+                  style = MaterialTheme.typography.labelSmall,
+                  color = Color(0xFFE4C2FA),
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                  modifier = Modifier.widthIn(max = 170.dp),
+                )
+              }
+              if (isRunning) {
+                IconButton(
+                  onClick = { onAbortBackgroundTask(task.id) },
+                  modifier = Modifier
+                    .size(28.dp)
+                    .testTag("abort_bg_task_${task.id}"),
+                ) {
+                  Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = "Cancel sub-agent",
+                    tint = Color(0xFFFF8A80),
+                    modifier = Modifier.size(16.dp),
+                  )
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Sub-Agent toggle row above composer
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(bottom = 4.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      val subAgentActive = spawnInBackground || isBusy
+      Surface(
+        onClick = { spawnInBackground = !spawnInBackground },
+        shape = RoundedCornerShape(50),
+        color = if (subAgentActive) Color(0xFF4A008F) else Color(0x772E064E),
+        border = BorderStroke(
+          width = 1.2.dp,
+          color = if (subAgentActive) Color(0xFFFF85D4) else Color(0x88FFFFFF),
+        ),
+        modifier = Modifier
+          .defaultMinSize(minHeight = 36.dp)
+          .testTag("spawn_background_toggle"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          Icon(
+            Icons.Rounded.AutoAwesome,
+            contentDescription = null,
+            tint = Color(0xFFFFB2EB),
+            modifier = Modifier.size(15.dp),
+          )
+          Text(
+            text = when {
+              isBusy -> "Primary lane active • Sending spawns Sub-Agent"
+              spawnInBackground -> "Sub-Agent Mode ON (isolated lane)"
+              else -> "Spawn Sub-Agent"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.White,
+            fontWeight = if (subAgentActive) FontWeight.Bold else FontWeight.Medium,
+          )
+        }
+      }
+    }
 
     // 5. Casual Message Composer
     Surface(
@@ -554,7 +780,11 @@ fun ChatWorkspaceScreen(
           onValueChange = { composerText = it },
           placeholder = {
             Text(
-              text = "Task ${activeBot?.name ?: "bot"} (${selectedWheelModel.wheelLabel})...",
+              text = if (spawnInBackground || isBusy) {
+                "Spawn isolated sub-agent for ${activeBot?.name ?: "bot"}..."
+              } else {
+                "Task ${activeBot?.name ?: "bot"} (${selectedWheelModel.wheelLabel})..."
+              },
               style = MaterialTheme.typography.bodyMedium,
               color = Color(0xFFE6C8FF),
               maxLines = 1,
@@ -579,17 +809,23 @@ fun ChatWorkspaceScreen(
 
         Spacer(Modifier.width(6.dp))
 
+        val canSend = activeBot != null && (composerText.isNotBlank() || pendingAttachments.isNotEmpty())
         FilledIconButton(
           onClick = {
-            if (activeBot != null && composerText.isNotBlank() && !isBusy) {
+            if (activeBot != null && (composerText.isNotBlank() || pendingAttachments.isNotEmpty())) {
               val textToSend = composerText
               composerText = ""
-              onSendMessage(textToSend, activeBot, activeHost, selectedWheelModel)
+              if (spawnInBackground || isBusy) {
+                onSpawnBackgroundTask(textToSend, activeBot, activeHost, selectedWheelModel)
+                spawnInBackground = false
+              } else {
+                onSendMessage(textToSend, activeBot, activeHost, selectedWheelModel)
+              }
             }
           },
-          enabled = activeBot != null && composerText.isNotBlank() && !isBusy,
+          enabled = canSend,
           colors = IconButtonDefaults.filledIconButtonColors(
-            containerColor = Color(0xFFFF2E93),
+            containerColor = if (spawnInBackground || isBusy) Color(0xFF9C27B0) else Color(0xFFFF2E93),
             contentColor = Color.White,
             disabledContainerColor = Color(0x66FF2E93),
             disabledContentColor = Color(0xAAFFFFFF),
@@ -598,18 +834,10 @@ fun ChatWorkspaceScreen(
             .size(48.dp)
             .testTag("send_chat_button"),
         ) {
-          if (isBusy) {
-            CircularProgressIndicator(
-              modifier = Modifier.size(20.dp),
-              color = Color.White,
-              strokeWidth = 2.dp,
-            )
-          } else {
-            Icon(
-              Icons.AutoMirrored.Rounded.Send,
-              contentDescription = "Send to bot",
-            )
-          }
+          Icon(
+            if (spawnInBackground || isBusy) Icons.Rounded.AutoAwesome else Icons.AutoMirrored.Rounded.Send,
+            contentDescription = if (spawnInBackground || isBusy) "Spawn background sub-agent" else "Send to bot",
+          )
         }
       }
     }
@@ -872,7 +1100,18 @@ fun ChatWorkspaceScreen(
         }
       },
       text = {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+          modifier = Modifier.verticalScroll(rememberScrollState()),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Text("Spin Model Wheel", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+          LlmRotaryWheelSelector(
+            selectedOption = selectedWheelModel,
+            onSelectOption = onSelectWheelModel,
+            darkSurface = false,
+            modifier = Modifier.fillMaxWidth(),
+          )
+
           Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
@@ -911,6 +1150,20 @@ fun ChatWorkspaceScreen(
                 text = "Agent ID: ${activeBot.openClawAgentId} • LLM: ${activeBot.llmProviderEnum.displayName}",
                 style = MaterialTheme.typography.bodySmall,
               )
+              Text(
+                text = "Session: ${activeBot.effectivePrimarySessionKey}",
+                style = MaterialTheme.typography.bodySmall,
+              )
+              Text(
+                text = "Tools: ${activeBot.effectiveToolPermissions.joinToString(", ")}",
+                style = MaterialTheme.typography.bodySmall,
+              )
+              if (activeBot.workspacePath.isNotBlank()) {
+                Text(
+                  text = "Workspace: ${activeBot.workspacePath}",
+                  style = MaterialTheme.typography.bodySmall,
+                )
+              }
             }
           }
 
@@ -1011,7 +1264,12 @@ fun ChatWorkspaceScreen(
         onDismiss = { lightboxMessage = null },
         onSaveToPhone = {
           scope.launch {
-            MediaSaveHelper.saveMediaToPhone(context, url, targetMsg.mediaTypeEnum, activeHost)
+            val res = if (targetMsg.mediaTypeEnum == GeneratedMediaType.DOCUMENT) {
+              MediaSaveHelper.saveAndOpenDocument(context, url, activeHost)
+            } else {
+              MediaSaveHelper.saveMediaToPhone(context, url, targetMsg.mediaTypeEnum, activeHost)
+            }
+            res
               .onSuccess { onShowBanner(it) }
               .onFailure { onShowBanner(it.localizedMessage ?: "Failed to save media") }
           }
@@ -1031,6 +1289,7 @@ fun ChatWorkspaceScreen(
 private fun BotCrewBar(
   bots: List<CompanionBot>,
   activeBotId: String,
+  busyBotIds: Set<String> = emptySet(),
   minusMode: Boolean,
   onToggleMinusMode: () -> Unit,
   onSelectBot: (String) -> Unit,
@@ -1044,6 +1303,7 @@ private fun BotCrewBar(
   ) {
     items(bots, key = { it.id }) { bot ->
       val selected = bot.id == activeBotId
+      val botBusy = bot.id in busyBotIds
       Surface(
         onClick = {
           if (minusMode) onRequestDeleteBot(bot) else onSelectBot(bot.id)
@@ -1055,10 +1315,11 @@ private fun BotCrewBar(
           else -> MaterialTheme.colorScheme.surface
         },
         border = BorderStroke(
-          width = if (selected) 2.dp else 1.dp,
+          width = if (selected || botBusy) 2.dp else 1.dp,
           color = when {
             minusMode -> MaterialTheme.colorScheme.error
             selected -> MaterialTheme.colorScheme.primary
+            botBusy -> Color(0xFFFF2E93)
             else -> MaterialTheme.colorScheme.outlineVariant
           },
         ),
@@ -1071,7 +1332,7 @@ private fun BotCrewBar(
         ) {
           BotVectorAvatar(
             bot = bot,
-            expression = if (selected) BotExpression.HAPPY else BotExpression.HAPPY,
+            expression = if (botBusy) BotExpression.WORKING else BotExpression.HAPPY,
             size = 34.dp,
             animate = false,
           )
@@ -1080,6 +1341,13 @@ private fun BotCrewBar(
             style = MaterialTheme.typography.labelLarge,
             maxLines = 1,
           )
+          if (botBusy && !minusMode) {
+            CircularProgressIndicator(
+              modifier = Modifier.size(14.dp),
+              color = Color(0xFFFF2E93),
+              strokeWidth = 2.dp,
+            )
+          }
           if (minusMode) {
             Icon(
               Icons.Rounded.DeleteOutline,
@@ -1341,6 +1609,10 @@ private fun MessageBubbleItem(
   message: BotMessage,
   bot: CompanionBot?,
   activeHost: OpenClawHost?,
+  isLiveStreaming: Boolean = false,
+  liveElapsedSec: Int = 0,
+  streamingPreviewText: String? = null,
+  onAbortRequest: () -> Unit = {},
   onCopyInstruction: (String) -> Unit,
   onRetry: () -> Unit,
   onOpenTakeover: () -> Unit,
@@ -1448,10 +1720,40 @@ private fun MessageBubbleItem(
           }
         }
 
-        Text(
-          text = message.rawText,
-          style = MaterialTheme.typography.bodyMedium,
-        )
+        val cleanedText = remember(message.rawText) { sanitizeBotDisplayText(message.rawText) }
+        if (isLiveStreaming) {
+          val liveText = streamingPreviewText?.takeIf { it.isNotBlank() } ?: cleanedText
+          Text(
+            text = liveText,
+            style = MaterialTheme.typography.bodyMedium,
+          )
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text(
+              text = "Thinking / running tools on host... (${liveElapsedSec}s)",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.primary,
+              fontWeight = FontWeight.SemiBold,
+              modifier = Modifier.weight(1f),
+            )
+            TextButton(
+              onClick = onAbortRequest,
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+              colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+              modifier = Modifier.testTag("bot_abort_request_button"),
+            ) {
+              Text("Abort", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            }
+          }
+        } else {
+          Text(
+            text = cleanedText,
+            style = MaterialTheme.typography.bodyMedium,
+          )
+        }
 
         val mediaUrl = message.mediaUrl
         if (!mediaUrl.isNullOrBlank()) {
@@ -1678,4 +1980,22 @@ private fun resolveUriMetadata(context: Context, uri: Uri): ResolvedFileMeta {
     // Fallback to URI segment
   }
   return ResolvedFileMeta(name = name, mime = mime, size = size.coerceAtLeast(0L))
+}
+
+private val BOT_INLINE_DATA_IMAGE_REGEX = Regex(
+  """!?\[[^\]]*\]\(data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+\)|data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+"""
+)
+
+private fun sanitizeBotDisplayText(raw: String): String {
+  if (!raw.contains("data:image/", ignoreCase = true)) return raw
+  val cleaned = BOT_INLINE_DATA_IMAGE_REGEX.replace(raw, "").trim()
+  return cleaned.ifBlank { "Image attached below." }
+}
+
+private fun isBotImageAttachment(file: LinkedFile): Boolean {
+  val mime = file.mimeOrExt.lowercase(Locale.US)
+  val name = file.displayName.lowercase(Locale.US)
+  return mime.startsWith("image/") ||
+    name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg") ||
+    name.endsWith(".webp") || name.endsWith(".gif") || name.endsWith(".heic")
 }

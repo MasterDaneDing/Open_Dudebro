@@ -45,6 +45,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -80,6 +81,7 @@ fun ComputerTakeoverScreen(
   hostsState: UiState<List<OpenClawHost>>,
   activeBot: CompanionBot?,
   takeoverActive: Boolean,
+  hostPaused: Boolean = false,
   pingResult: OpenClawPingResult?,
   controlLog: List<String>,
   onPingHost: (OpenClawHost) -> Unit,
@@ -90,9 +92,13 @@ fun ComputerTakeoverScreen(
   val hosts = (hostsState as? UiState.Success)?.data.orEmpty()
   val activeHost = hosts.firstOrNull()
 
-  var showLiveWebConsole by remember { mutableStateOf(false) }
+  var showLiveWebConsole by remember { mutableStateOf(takeoverActive) }
   var remoteCommandInput by remember { mutableStateOf("") }
   var showSectionSettings by remember { mutableStateOf(false) }
+
+  LaunchedEffect(takeoverActive) {
+    if (takeoverActive) showLiveWebConsole = true
+  }
 
   Column(
     modifier = Modifier
@@ -117,7 +123,7 @@ fun ComputerTakeoverScreen(
         )
       )
       .verticalScroll(rememberScrollState())
-      .padding(16.dp),
+      .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     Row(
@@ -184,19 +190,38 @@ fun ComputerTakeoverScreen(
         modifier = Modifier.padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
       ) {
-        Surface(
-          shape = RoundedCornerShape(50),
-          color = when (activeHost?.lastStatusEnum) {
-            HostStatus.ONLINE -> MaterialTheme.colorScheme.secondaryContainer
-            HostStatus.OFFLINE -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
-            else -> MaterialTheme.colorScheme.surfaceVariant
-          },
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalAlignment = Alignment.CenterVertically,
         ) {
-          Text(
-            text = "Host: ${activeHost?.lastStatusEnum?.label ?: "Unconfigured"}",
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-          )
+          Surface(
+            shape = RoundedCornerShape(50),
+            color = when (activeHost?.lastStatusEnum) {
+              HostStatus.ONLINE -> MaterialTheme.colorScheme.secondaryContainer
+              HostStatus.OFFLINE -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
+              else -> MaterialTheme.colorScheme.surfaceVariant
+            },
+          ) {
+            Text(
+              text = "Host: ${activeHost?.lastStatusEnum?.label ?: "Unconfigured"} (${activeHost?.connectionModeEnum?.shortPill ?: "LAN"})",
+              style = MaterialTheme.typography.labelMedium,
+              modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+            )
+          }
+          if (hostPaused) {
+            Surface(
+              shape = RoundedCornerShape(50),
+              color = Color(0xFFFF6D00),
+            ) {
+              Text(
+                text = "Queue Paused",
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+              )
+            }
+          }
         }
 
         Row(
@@ -319,8 +344,12 @@ fun ComputerTakeoverScreen(
     }
 
     // Remote Desktop / Control Web Console
-    val controlUrl = activeHost?.controlUrl?.trim().orEmpty()
+    val controlUrl = activeHost?.resolvedDashboardUrl.orEmpty()
     if (controlUrl.isNotBlank()) {
+      val displayDashboardUrl = remember(controlUrl) {
+        val qIdx = controlUrl.indexOf("token=")
+        if (qIdx >= 0) "${controlUrl.substring(0, qIdx)}token=•••" else controlUrl
+      }
       Card(
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -335,7 +364,7 @@ fun ComputerTakeoverScreen(
           }
 
           Text(
-            text = "Control URL: $controlUrl",
+            text = "OpenClaw Dashboard URL: $displayDashboardUrl",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
@@ -480,7 +509,7 @@ fun ComputerTakeoverScreen(
       text = {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
           Text(
-            text = activeHost?.let { "${it.label} (${it.baseUrl})" } ?: "No host PC configured yet.",
+            text = activeHost?.let { "${it.label} (${it.effectiveBaseUrl})" } ?: "No host PC configured yet.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )

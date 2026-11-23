@@ -59,6 +59,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.example.model.AccessoryStyle
+import com.example.model.AgentToolPermission
 import com.example.model.BotArchetype
 import com.example.model.BotExpression
 import com.example.model.BotFunctionPreset
@@ -125,6 +126,18 @@ fun BotStudioScreen(
   var llmModel by remember(existingBot?.id) {
     mutableStateOf(existingBot?.llmModel.orEmpty())
   }
+  var sessionKey by remember(existingBot?.id) {
+    mutableStateOf(existingBot?.sessionKey.orEmpty())
+  }
+  var workspacePath by remember(existingBot?.id) {
+    mutableStateOf(existingBot?.workspacePath.orEmpty())
+  }
+  var selectedPermissions by remember(existingBot?.id) {
+    mutableStateOf(
+      existingBot?.toolPermissions?.takeIf { it.isNotEmpty() }?.toSet()
+        ?: AgentToolPermission.defaultKeys().toSet()
+    )
+  }
   var persona by remember(existingBot?.id) {
     mutableStateOf(
       existingBot?.systemPersona
@@ -149,6 +162,9 @@ fun BotStudioScreen(
     accentColorHex = accentHex,
     systemPersona = persona,
     openClawAgentId = agentId.ifBlank { functionPreset.suggestedAgentId },
+    sessionKey = sessionKey.trim(),
+    toolPermissions = AgentToolPermission.normalizeKeys(selectedPermissions.toList()),
+    workspacePath = workspacePath.trim(),
     functionPreset = functionPreset.name,
     llmProvider = llmProvider.name,
     llmModel = llmModel,
@@ -571,6 +587,40 @@ fun BotStudioScreen(
         )
       }
     } else if (llmProvider != OpenClawLlmProvider.HOST_DEFAULT && llmProvider != OpenClawLlmProvider.OPENCLAW_AUTO) {
+      if (llmProvider == OpenClawLlmProvider.LOCAL_LLM) {
+        val localPresets = remember {
+          listOf(
+            "ollama/translategemma",
+            "ollama/qwen3.5-fast",
+            "ollama/qwen2.5-coder:32b",
+            "ollama/llama3.3",
+          )
+        }
+        Row(
+          modifier = Modifier.horizontalScroll(rememberScrollState()),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          localPresets.forEach { presetModel ->
+            val picked = llmModel.equals(presetModel, ignoreCase = true)
+            Surface(
+              onClick = { llmModel = presetModel },
+              shape = RoundedCornerShape(50),
+              color = if (picked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+              border = BorderStroke(
+                width = if (picked) 2.dp else 1.dp,
+                color = if (picked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+              ),
+              modifier = Modifier.testTag("local_model_chip_$presetModel"),
+            ) {
+              Text(
+                text = presetModel.removePrefix("ollama/"),
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+              )
+            }
+          }
+        }
+      }
       OutlinedTextField(
         value = llmModel,
         onValueChange = { llmModel = it.take(120) },
@@ -642,6 +692,63 @@ fun BotStudioScreen(
       singleLine = true,
       modifier = Modifier.fillMaxWidth(),
     )
+
+    OutlinedTextField(
+      value = sessionKey,
+      onValueChange = { sessionKey = it.take(120) },
+      label = { Text("Isolated Session Key (Optional)") },
+      placeholder = { Text("agent:${draftBot.resolvedBotDudeSlug()}:main") },
+      supportingText = {
+        Text("Blank auto-assigns isolated lane: ${draftBot.effectivePrimarySessionKey}")
+      },
+      singleLine = true,
+      modifier = Modifier
+        .fillMaxWidth()
+        .testTag("bot_session_key_input"),
+    )
+
+    OutlinedTextField(
+      value = workspacePath,
+      onValueChange = { workspacePath = it.take(260) },
+      label = { Text("Isolated Workspace Path (Optional)") },
+      placeholder = { Text("~/workspaces/${draftBot.resolvedBotDudeSlug()}") },
+      singleLine = true,
+      modifier = Modifier
+        .fillMaxWidth()
+        .testTag("bot_workspace_path_input"),
+    )
+
+    Text("Tool Permissions", style = MaterialTheme.typography.titleMedium)
+    Row(
+      modifier = Modifier.horizontalScroll(rememberScrollState()),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      AgentToolPermission.entries.forEach { perm ->
+        val enabledPerm = perm.wireKey in selectedPermissions
+        Surface(
+          onClick = {
+            selectedPermissions = if (enabledPerm) {
+              if (selectedPermissions.size > 1) selectedPermissions - perm.wireKey else selectedPermissions
+            } else {
+              selectedPermissions + perm.wireKey
+            }
+          },
+          shape = RoundedCornerShape(50),
+          color = if (enabledPerm) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+          border = BorderStroke(
+            width = if (enabledPerm) 2.dp else 1.dp,
+            color = if (enabledPerm) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+          ),
+          modifier = Modifier.testTag("tool_permission_chip_${perm.wireKey}"),
+        ) {
+          Text(
+            text = if (enabledPerm) "✓ ${perm.label}" else perm.label,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+          )
+        }
+      }
+    }
 
     OutlinedTextField(
       value = persona,

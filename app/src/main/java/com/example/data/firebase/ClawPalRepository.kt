@@ -10,6 +10,7 @@ import com.example.model.GeneralChatMessage
 import com.example.model.GeneralChatThread
 import com.example.model.GeneratedMediaItem
 import com.example.model.GeneratedMediaType
+import com.example.model.HostConnectionMode
 import com.example.model.HostStatus
 import com.example.model.LinkedFile
 import com.example.model.MessageSender
@@ -586,6 +587,41 @@ class ClawPalRepository(
         )
         .await()
       Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.UPDATE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  suspend fun updateHostConnectionMode(
+    userId: String,
+    host: OpenClawHost,
+    newMode: HostConnectionMode,
+  ): Result<OpenClawHost> {
+    val docPath = "users/$userId/hosts/${host.id}"
+    return try {
+      val uid = requireUserId(userId)
+      require(host.id.isNotBlank()) { "Host ID must not be blank" }
+      val updatedHost = host.copy(
+        connectionMode = newMode.name,
+        lanUrl = host.effectiveLanUrl,
+      )
+      val activeBase = updatedHost.effectiveBaseUrl.ifBlank { host.baseUrl }
+      val finalHost = updatedHost.copy(baseUrl = activeBase)
+      db.collection("users").document(uid).collection("hosts").document(host.id)
+        .update(
+          mapOf(
+            "connectionMode" to newMode.name,
+            "baseUrl" to activeBase.take(300),
+            "lanUrl" to finalHost.effectiveLanUrl.take(300),
+            "tailscaleUrl" to finalHost.effectiveTailscaleUrl.take(300),
+            "updatedAt" to FieldValue.serverTimestamp(),
+          )
+        )
+        .await()
+      Result.success(finalHost)
     } catch (e: CancellationException) {
       throw e
     } catch (e: Exception) {

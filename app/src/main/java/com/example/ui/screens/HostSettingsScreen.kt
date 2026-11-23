@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +24,7 @@ import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DesktopWindows
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
@@ -49,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -56,8 +61,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.openclaw.BridgeFolderStatus
 import com.example.data.openclaw.OpenClawPingResult
 import com.example.model.AiRoutingMode
+import com.example.model.HostConnectionMode
 import com.example.model.HostStatus
 import com.example.model.OpenClawHost
 import com.example.model.OpenClawLlmProvider
@@ -65,6 +72,8 @@ import com.example.model.VeniceModelCatalog
 import com.example.model.VeniceModelInfo
 import com.example.ui.components.VeniceModelPickerPanel
 import com.example.viewmodel.UiState
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 
 @Composable
 fun HostSettingsScreen(
@@ -75,22 +84,46 @@ fun HostSettingsScreen(
   savedVeniceApiKey: String = "",
   savedGoogleApiKey: String = "",
   savedGlobalVeniceModel: String = VeniceModelCatalog.defaultModelId,
+  savedDevicePairingId: String = "claw-dudebro-apk",
+  savedBridgeEnabled: Boolean = false,
+  savedBridgeFolderUri: String = "",
+  bridgeStatus: BridgeFolderStatus? = null,
+  onInspectBridgeFolder: (String) -> Unit = {},
   veniceLiveModels: List<VeniceModelInfo> = VeniceModelCatalog.popularPresets,
   isFetchingVeniceModels: Boolean = false,
   onFetchVeniceModels: (String) -> Unit = {},
   onBack: () -> Unit = {},
-  onSaveHost: (OpenClawHost, String, String, String) -> Unit,
+  onSaveHost: (
+    host: OpenClawHost,
+    veniceKey: String,
+    googleKey: String,
+    globalVeniceModel: String,
+    devicePairingId: String,
+    bridgeEnabled: Boolean,
+    bridgeFolderUri: String,
+  ) -> Unit,
   onDeleteHost: (String) -> Unit,
   onPingHost: (OpenClawHost) -> Unit,
   onSignOut: () -> Unit,
 ) {
+  val context = LocalContext.current
   val hosts = (hostsState as? UiState.Success)?.data.orEmpty()
   val primaryHost = hosts.firstOrNull()
 
   var editingId by remember(primaryHost?.id) { mutableStateOf(primaryHost?.id.orEmpty()) }
   var label by remember(primaryHost?.id) { mutableStateOf(primaryHost?.label ?: "My OpenClaw PC") }
-  var baseUrl by remember(primaryHost?.id) { mutableStateOf(primaryHost?.baseUrl ?: "http://192.168.1.50:18789") }
-  var controlUrl by remember(primaryHost?.id) { mutableStateOf(primaryHost?.controlUrl ?: "http://192.168.1.50:18789/control") }
+  var connectionMode by remember(primaryHost?.id) { mutableStateOf(primaryHost?.connectionModeEnum ?: HostConnectionMode.LAN) }
+  var lanUrl by remember(primaryHost?.id) {
+    mutableStateOf(
+      primaryHost?.effectiveLanUrl?.ifBlank { OpenClawHost.DEFAULT_LAN_URL } ?: OpenClawHost.DEFAULT_LAN_URL
+    )
+  }
+  var tailscaleUrl by remember(primaryHost?.id) {
+    mutableStateOf(
+      primaryHost?.effectiveTailscaleUrl?.ifBlank { OpenClawHost.DEFAULT_TAILSCALE_URL } ?: OpenClawHost.DEFAULT_TAILSCALE_URL
+    )
+  }
+  var controlUrl by remember(primaryHost?.id) { mutableStateOf(primaryHost?.controlUrl.orEmpty()) }
   var gatewayToken by remember(primaryHost?.id) { mutableStateOf(primaryHost?.gatewayToken.orEmpty()) }
   var aiMode by remember(primaryHost?.id) { mutableStateOf(primaryHost?.aiModeEnum ?: AiRoutingMode.HYBRID_GEMINI_OPENCLAW) }
   var defaultLlmProvider by remember(primaryHost?.id) {
@@ -115,13 +148,33 @@ fun HostSettingsScreen(
   }
   var veniceApiKey by remember(savedVeniceApiKey) { mutableStateOf(savedVeniceApiKey) }
   var googleApiKey by remember(savedGoogleApiKey) { mutableStateOf(savedGoogleApiKey) }
+  var devicePairingId by remember(savedDevicePairingId) {
+    mutableStateOf(savedDevicePairingId.ifBlank { "claw-dudebro-apk" })
+  }
+  var bridgeEnabled by remember(savedBridgeEnabled) { mutableStateOf(savedBridgeEnabled) }
+  var bridgeFolderUri by remember(savedBridgeFolderUri) { mutableStateOf(savedBridgeFolderUri) }
   var autoParseCasual by remember(primaryHost?.id) { mutableStateOf(primaryHost?.autoParseCasual ?: true) }
+
+  val bridgeFolderPicker = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.OpenDocumentTree(),
+  ) { uri ->
+    if (uri != null) {
+      try {
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        context.contentResolver.takePersistableUriPermission(uri, flags)
+      } catch (_: Exception) {
+      }
+      bridgeFolderUri = uri.toString()
+      bridgeEnabled = true
+      onInspectBridgeFolder(uri.toString())
+    }
+  }
 
   Column(
     modifier = Modifier
       .fillMaxSize()
       .verticalScroll(rememberScrollState())
-      .padding(16.dp),
+      .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 96.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
     Row(
@@ -169,7 +222,9 @@ fun HostSettingsScreen(
           onClick = {
             editingId = host.id
             label = host.label
-            baseUrl = host.baseUrl
+            connectionMode = host.connectionModeEnum
+            lanUrl = host.effectiveLanUrl
+            tailscaleUrl = host.effectiveTailscaleUrl
             controlUrl = host.controlUrl
             gatewayToken = host.gatewayToken
             aiMode = host.aiModeEnum
@@ -191,7 +246,12 @@ fun HostSettingsScreen(
             Icon(Icons.Rounded.DesktopWindows, contentDescription = null)
             Column(modifier = Modifier.weight(1f)) {
               Text(host.label, style = MaterialTheme.typography.titleSmall)
-              Text(host.baseUrl, style = MaterialTheme.typography.labelSmall)
+              Text(
+                text = "${host.connectionModeEnum.shortPill} • ${host.effectiveBaseUrl}",
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
             }
             Surface(
               shape = RoundedCornerShape(50),
@@ -218,8 +278,10 @@ fun HostSettingsScreen(
         onClick = {
           editingId = ""
           label = "New OpenClaw PC"
-          baseUrl = "http://192.168.1.100:18789"
-          controlUrl = "http://192.168.1.100:18789/control"
+          connectionMode = HostConnectionMode.LAN
+          lanUrl = OpenClawHost.DEFAULT_LAN_URL
+          tailscaleUrl = OpenClawHost.DEFAULT_TAILSCALE_URL
+          controlUrl = ""
           gatewayToken = ""
           aiMode = AiRoutingMode.HYBRID_GEMINI_OPENCLAW
           defaultLlmProvider = OpenClawLlmProvider.OPENCLAW_AUTO
@@ -247,20 +309,81 @@ fun HostSettingsScreen(
           singleLine = true,
           modifier = Modifier.fillMaxWidth(),
         )
+
+        Text("Active Connection Mode", style = MaterialTheme.typography.titleSmall)
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = MaterialTheme.colorScheme.surfaceVariant,
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            HostConnectionMode.entries.forEach { modeOption ->
+              val isSelected = connectionMode == modeOption
+              Surface(
+                onClick = { connectionMode = modeOption },
+                shape = RoundedCornerShape(10.dp),
+                color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                modifier = Modifier
+                  .weight(1f)
+                  .testTag("host_mode_toggle_${modeOption.name}"),
+              ) {
+                Text(
+                  text = modeOption.displayName,
+                  style = MaterialTheme.typography.labelMedium,
+                  fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                  color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                  textAlign = TextAlign.Center,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                )
+              }
+            }
+          }
+        }
+
         OutlinedTextField(
-          value = baseUrl,
-          onValueChange = { baseUrl = it.take(300) },
-          label = { Text("OpenClaw Gateway URL") },
-          placeholder = { Text("http://192.168.1.50:18789 or https://...") },
+          value = lanUrl,
+          onValueChange = { lanUrl = it.take(300) },
+          label = { Text("Home Mode (LAN) Host / URL") },
+          placeholder = { Text("http://192.168.68.53:18789") },
+          supportingText = if (connectionMode == HostConnectionMode.LAN) {
+            { Text("Primary route (default port 18789). Auto-falls back to Tailscale if LAN is unreachable.") }
+          } else null,
           singleLine = true,
           modifier = Modifier
             .fillMaxWidth()
             .testTag("host_url_input"),
         )
         OutlinedTextField(
+          value = tailscaleUrl,
+          onValueChange = { tailscaleUrl = it.take(300) },
+          label = { Text("Outside Mode (Tailscale) Host / URL") },
+          placeholder = { Text("http://100.91.98.120:18789") },
+          supportingText = if (connectionMode == HostConnectionMode.TAILSCALE) {
+            { Text("Active right now — remote Tailscale route (default port 18789).") }
+          } else {
+            { Text("Automatic fallback if LAN is unreachable. Shares the same Gateway Bearer Token.") }
+          },
+          singleLine = true,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("host_tailscale_url_input"),
+        )
+        OutlinedTextField(
           value = controlUrl,
           onValueChange = { controlUrl = it.take(300) },
-          label = { Text("Take Over Computer Control URL (Web/noVNC)") },
+          label = { Text("Take Over Dashboard URL Override (Optional)") },
+          placeholder = { Text("Optional override (blank = OpenClaw root /?token=...)") },
+          supportingText = { Text("Leave blank to open OpenClaw's built-in root web dashboard automatically.") },
           singleLine = true,
           modifier = Modifier.fillMaxWidth(),
         )
@@ -287,6 +410,98 @@ fun HostSettingsScreen(
             .fillMaxWidth()
             .testTag("host_gateway_token_input"),
         )
+
+        OutlinedTextField(
+          value = devicePairingId,
+          onValueChange = { devicePairingId = it.take(120) },
+          label = { Text("Device Pairing ID") },
+          placeholder = { Text("claw-dudebro-apk") },
+          supportingText = {
+            Text("Attached as x-openclaw-device-id alongside Authorization: Bearer on both chat and /__openclaw__/assistant-media requests.")
+          },
+          singleLine = true,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("host_device_pairing_id_input"),
+        )
+
+        Surface(
+          shape = MaterialTheme.shapes.medium,
+          color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.SpaceBetween,
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Column(modifier = Modifier.weight(1f)) {
+                Text("Drive Bridge Mode (APK-Bridge)", style = MaterialTheme.typography.titleSmall)
+                Text(
+                  text = "Write task JSONs to instructions/ and watch processed/ & outbox/ instead of direct HTTP.",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+              Switch(
+                checked = bridgeEnabled,
+                onCheckedChange = { bridgeEnabled = it },
+                modifier = Modifier.testTag("host_drive_bridge_switch"),
+              )
+            }
+            AnimatedVisibility(visible = bridgeEnabled) {
+              Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                  value = bridgeFolderUri,
+                  onValueChange = { bridgeFolderUri = it.take(500) },
+                  label = { Text("APK-Bridge Folder URI or Synced Path") },
+                  placeholder = { Text("Pick My Drive/OpenClaw/APK-Bridge or enter local path") },
+                  singleLine = true,
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("host_bridge_folder_input"),
+                )
+                Row(
+                  horizontalArrangement = Arrangement.spacedBy(8.dp),
+                  modifier = Modifier.fillMaxWidth(),
+                ) {
+                  OutlinedButton(
+                    onClick = { bridgeFolderPicker.launch(null) },
+                    modifier = Modifier
+                      .weight(1f)
+                      .height(48.dp)
+                      .testTag("host_pick_bridge_folder_button"),
+                  ) {
+                    Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Pick Folder", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                  }
+                  OutlinedButton(
+                    onClick = { onInspectBridgeFolder(bridgeFolderUri) },
+                    enabled = bridgeFolderUri.isNotBlank(),
+                    modifier = Modifier
+                      .height(48.dp)
+                      .testTag("host_check_bridge_button"),
+                  ) {
+                    Text("Check Bridge")
+                  }
+                }
+                if (bridgeStatus != null) {
+                  Text(
+                    text = bridgeStatus.summary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (bridgeStatus.valid) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                  )
+                }
+              }
+            }
+          }
+        }
 
         Row(
           verticalAlignment = Alignment.CenterVertically,
@@ -402,14 +617,27 @@ fun HostSettingsScreen(
           }
         }
 
-        if (defaultLlmProvider != OpenClawLlmProvider.OPENCLAW_AUTO &&
-          defaultLlmProvider != OpenClawLlmProvider.VENICE_AI
-        ) {
+        if (defaultLlmProvider != OpenClawLlmProvider.VENICE_AI) {
           OutlinedTextField(
             value = defaultLlmModel,
             onValueChange = { defaultLlmModel = it.take(120) },
-            label = { Text("Default Model ID for OpenClaw") },
-            placeholder = { Text(defaultLlmProvider.defaultModel.ifBlank { "provider/model-name" }) },
+            label = {
+              Text(
+                if (defaultLlmProvider == OpenClawLlmProvider.OPENCLAW_AUTO) {
+                  "Advanced: x-openclaw-model Override (Optional)"
+                } else {
+                  "Default Model ID for OpenClaw"
+                }
+              )
+            },
+            placeholder = {
+              Text(
+                defaultLlmProvider.defaultModel.ifBlank { "venice/deepseek-v4-1-flash-uncensored" }
+              )
+            },
+            supportingText = if (defaultLlmProvider == OpenClawLlmProvider.OPENCLAW_AUTO) {
+              { Text("All chat requests target model=\"openclaw/apk\". Leave blank for agent default or enter e.g. venice/deepseek-v4-1-flash-uncensored.") }
+            } else null,
             singleLine = true,
             modifier = Modifier
               .fillMaxWidth()
@@ -458,11 +686,19 @@ fun HostSettingsScreen(
           defaultLlmModel
         }
 
+        val resolvedActiveUrl = when (connectionMode) {
+          HostConnectionMode.TAILSCALE -> tailscaleUrl.trim().ifBlank { lanUrl.trim() }
+          HostConnectionMode.LAN -> lanUrl.trim()
+        }
+
         val draftHost = OpenClawHost(
           id = editingId,
           userId = currentUserId,
           label = label,
-          baseUrl = baseUrl,
+          baseUrl = resolvedActiveUrl,
+          lanUrl = lanUrl,
+          tailscaleUrl = tailscaleUrl,
+          connectionMode = connectionMode.name,
           controlUrl = controlUrl,
           gatewayToken = gatewayToken,
           aiMode = aiMode.name,
@@ -482,10 +718,20 @@ fun HostSettingsScreen(
           ) {
             Icon(Icons.Rounded.WifiTethering, contentDescription = null, Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text("Test Ping")
+            Text("Test Connection")
           }
           Button(
-            onClick = { onSaveHost(draftHost, veniceApiKey, googleApiKey, globalVeniceModel) },
+            onClick = {
+              onSaveHost(
+                draftHost,
+                veniceApiKey,
+                googleApiKey,
+                globalVeniceModel,
+                devicePairingId,
+                bridgeEnabled,
+                bridgeFolderUri,
+              )
+            },
             modifier = Modifier
               .weight(1f)
               .height(48.dp)
@@ -526,6 +772,6 @@ fun HostSettingsScreen(
       }
     }
 
-    Spacer(Modifier.height(20.dp))
+    Spacer(Modifier.height(32.dp))
   }
 }

@@ -56,6 +56,18 @@
           "type": "string",
           "description": "Target OpenClaw agent identifier."
         },
+        "sessionKey": {
+          "type": "string",
+          "description": "Isolated OpenClaw session key (e.g., agent:<bot_dude_id>:main)."
+        },
+        "toolPermissions": {
+          "type": "array",
+          "description": "Enabled tool/workspace capability keys for this Bot Dude."
+        },
+        "workspacePath": {
+          "type": "string",
+          "description": "Optional isolated workspace path on the OpenClaw host."
+        },
         "functionPreset": {
           "type": "string",
           "enum": ["GENERAL", "TRANSLATION", "PROOFREADING", "CRITIQUING", "CODING", "RESEARCH"],
@@ -123,7 +135,7 @@
         "linkedPaths": { "type": "array" },
         "takeoverSuggested": { "type": "boolean" },
         "mediaUrl": { "type": "string" },
-        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO", "AUDIO", "DOCUMENT"] },
         "mediaPrompt": { "type": "string" },
         "mediaModel": { "type": "string" },
         "mediaDurationSec": { "type": "integer" },
@@ -144,6 +156,9 @@
         "userId": { "type": "string" },
         "label": { "type": "string" },
         "baseUrl": { "type": "string" },
+        "lanUrl": { "type": "string" },
+        "tailscaleUrl": { "type": "string" },
+        "connectionMode": { "type": "string", "enum": ["LAN", "TAILSCALE"] },
         "controlUrl": { "type": "string" },
         "gatewayToken": { "type": "string" },
         "aiMode": { "type": "string", "enum": ["HYBRID_GEMINI_OPENCLAW", "OPENCLAW_ONLY", "GEMINI_PARSER_PREVIEW"] },
@@ -187,7 +202,7 @@
       "properties": {
         "userId": { "type": "string" },
         "mediaUrl": { "type": "string" },
-        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO", "AUDIO", "DOCUMENT"] },
         "prompt": { "type": "string" },
         "modelUsed": { "type": "string" },
         "durationSec": { "type": "integer" },
@@ -224,6 +239,7 @@
         "title": { "type": "string" },
         "topic": { "type": "string" },
         "botIds": { "type": "array" },
+        "maxPingPongTurns": { "type": "integer", "description": "Maximum autonomous A2A bot turns per Cafe round." },
         "lastMessagePreview": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -245,7 +261,7 @@
         "parsedInstruction": { "type": "string" },
         "expression": { "type": "string", "enum": ["HAPPY", "THINKING", "UH_HUH", "WORRIED", "SORRY", "WORKING", "ALERT"] },
         "mediaUrl": { "type": "string" },
-        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO", "AUDIO", "DOCUMENT"] },
         "mediaPrompt": { "type": "string" },
         "mediaModel": { "type": "string" },
         "mediaDurationSec": { "type": "integer" },
@@ -284,7 +300,7 @@
         "modelLabel": { "type": "string" },
         "status": { "type": "string", "enum": ["IDLE", "PARSING", "DISPATCHED", "COMPLETED", "WARNING", "FAILED"] },
         "mediaUrl": { "type": "string" },
-        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO", "AUDIO", "DOCUMENT"] },
         "mediaPrompt": { "type": "string" },
         "mediaModel": { "type": "string" },
         "mediaDurationSec": { "type": "integer" },

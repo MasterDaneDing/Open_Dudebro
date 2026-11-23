@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.net.Uri
 import android.widget.VideoView
@@ -25,7 +26,9 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Button
@@ -38,6 +41,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,12 +57,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.example.data.files.MediaSaveHelper
 import com.example.model.GeneratedMediaType
 import com.example.model.OpenClawHost
@@ -76,8 +80,11 @@ fun MediaLightboxDialog(
   onSendToChat: (() -> Unit)? = null,
 ) {
   val context = LocalContext.current
-  val resolvedUrl = remember(mediaUrl, activeHost?.baseUrl) {
+  val resolvedUrl = remember(mediaUrl, activeHost?.effectiveBaseUrl) {
     MediaSaveHelper.resolveDownloadUrl(mediaUrl, activeHost) ?: mediaUrl
+  }
+  val authHeaders = remember(resolvedUrl, activeHost?.effectiveBaseUrl, activeHost?.gatewayToken) {
+    MediaSaveHelper.authHeadersForUrl(resolvedUrl, activeHost)
   }
 
   Dialog(
@@ -91,35 +98,145 @@ fun MediaLightboxDialog(
         .safeDrawingPadding()
         .testTag("media_lightbox_dialog"),
     ) {
-      if (mediaType == GeneratedMediaType.IMAGE) {
-        var scale by remember { mutableFloatStateOf(1f) }
-        var offset by remember { mutableStateOf(Offset.Zero) }
+      when (mediaType) {
+        GeneratedMediaType.IMAGE -> {
+          var scale by remember { mutableFloatStateOf(1f) }
+          var offset by remember { mutableStateOf(Offset.Zero) }
 
-        AsyncImage(
-          model = ImageRequest.Builder(context)
-            .data(resolvedUrl)
-            .crossfade(true)
-            .build(),
-          contentDescription = prompt.ifBlank { "Zoomable generated image" },
-          contentScale = ContentScale.Fit,
-          modifier = Modifier
-            .fillMaxSize()
-            .padding(bottom = 160.dp, top = 56.dp)
-            .pointerInput(Unit) {
-              detectTransformGestures { _, pan, zoom, _ ->
-                val newScale = (scale * zoom).coerceIn(1f, 5f)
-                scale = newScale
-                offset = if (newScale > 1.01f) offset + pan else Offset.Zero
+          AsyncImage(
+            model = MediaSaveHelper.buildAuthorizedImageRequest(context, mediaUrl, activeHost),
+            imageLoader = remember(context) { MediaSaveHelper.getImageLoader(context) },
+            contentDescription = prompt.ifBlank { "Zoomable generated image" },
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+              .fillMaxSize()
+              .padding(bottom = 160.dp, top = 56.dp)
+              .pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                  val newScale = (scale * zoom).coerceIn(1f, 5f)
+                  scale = newScale
+                  offset = if (newScale > 1.01f) offset + pan else Offset.Zero
+                }
+              }
+              .graphicsLayer(
+                scaleX = scale,
+                scaleY = scale,
+                translationX = offset.x,
+                translationY = offset.y,
+              ),
+          )
+        }
+        GeneratedMediaType.AUDIO -> {
+          var isPlaying by remember(resolvedUrl) { mutableStateOf(false) }
+          var isPrepared by remember(resolvedUrl) { mutableStateOf(false) }
+          val audioPlayer = remember(resolvedUrl) {
+            MediaPlayer().apply {
+              setAudioAttributes(
+                AudioAttributes.Builder()
+                  .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                  .setUsage(AudioAttributes.USAGE_MEDIA)
+                  .build()
+              )
+              setOnPreparedListener {
+                isPrepared = true
+                start()
+                isPlaying = true
+              }
+              setOnCompletionListener { isPlaying = false }
+              setOnErrorListener { _, _, _ ->
+                isPlaying = false
+                isPrepared = false
+                true
               }
             }
-            .graphicsLayer(
-              scaleX = scale,
-              scaleY = scale,
-              translationX = offset.x,
-              translationY = offset.y,
-            ),
-        )
-      } else {
+          }
+          DisposableEffect(resolvedUrl) {
+            onDispose {
+              runCatching {
+                if (audioPlayer.isPlaying) audioPlayer.stop()
+                audioPlayer.release()
+              }
+            }
+          }
+
+          Column(
+            modifier = Modifier
+              .fillMaxSize()
+              .padding(top = 56.dp, bottom = 180.dp, start = 24.dp, end = 24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+          ) {
+            Icon(Icons.Rounded.GraphicEq, contentDescription = null, tint = Color(0xFFFF8CE0), modifier = Modifier.size(72.dp))
+            Text(
+              text = resolvedUrl.substringAfterLast('/').substringBefore('?').ifBlank { "Audio Clip" },
+              style = MaterialTheme.typography.titleMedium,
+              color = Color.White,
+              fontWeight = FontWeight.Bold,
+              maxLines = 2,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.padding(vertical = 12.dp),
+            )
+            IconButton(
+              onClick = {
+                if (isPlaying) {
+                  runCatching { audioPlayer.pause() }
+                  isPlaying = false
+                } else if (isPrepared) {
+                  runCatching { audioPlayer.start() }
+                  isPlaying = true
+                } else {
+                  runCatching {
+                    audioPlayer.reset()
+                    if (authHeaders.isNotEmpty()) {
+                      audioPlayer.setDataSource(context, Uri.parse(resolvedUrl), authHeaders)
+                    } else {
+                      audioPlayer.setDataSource(context, Uri.parse(resolvedUrl))
+                    }
+                    audioPlayer.prepareAsync()
+                  }
+                }
+              },
+              colors = IconButtonDefaults.iconButtonColors(
+                containerColor = Color(0xFFFF2E93),
+                contentColor = Color.White,
+              ),
+              modifier = Modifier.size(64.dp),
+            ) {
+              Icon(
+                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                contentDescription = if (isPlaying) "Pause audio" else "Play audio",
+                modifier = Modifier.size(34.dp),
+              )
+            }
+          }
+        }
+        GeneratedMediaType.DOCUMENT -> {
+          Column(
+            modifier = Modifier
+              .fillMaxSize()
+              .padding(top = 56.dp, bottom = 180.dp, start = 24.dp, end = 24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+          ) {
+            Icon(Icons.Rounded.Description, contentDescription = null, tint = Color(0xFFFFB74D), modifier = Modifier.size(76.dp))
+            Text(
+              text = resolvedUrl.substringAfterLast('/').substringBefore('?').ifBlank { "Document" },
+              style = MaterialTheme.typography.titleMedium,
+              color = Color.White,
+              fontWeight = FontWeight.Bold,
+              maxLines = 2,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.padding(top = 12.dp),
+            )
+            Text(
+              text = "Use Save / Open below to download into Downloads/ClawDudebro and open this file.",
+              style = MaterialTheme.typography.bodySmall,
+              color = Color(0xFFFFD1F3),
+              modifier = Modifier.padding(top = 6.dp),
+            )
+          }
+        }
+        GeneratedMediaType.VIDEO -> {
         var muted by remember { mutableStateOf(false) }
         var isPlaying by remember { mutableStateOf(true) }
         var playerRef by remember { mutableStateOf<MediaPlayer?>(null) }
@@ -135,7 +252,11 @@ fun MediaLightboxDialog(
             factory = { ctx ->
               VideoView(ctx).apply {
                 videoViewRef = this
-                setVideoURI(Uri.parse(resolvedUrl))
+                if (authHeaders.isNotEmpty()) {
+                  setVideoURI(Uri.parse(resolvedUrl), authHeaders)
+                } else {
+                  setVideoURI(Uri.parse(resolvedUrl))
+                }
                 setOnPreparedListener { mp ->
                   playerRef = mp
                   mp.isLooping = true
@@ -218,6 +339,7 @@ fun MediaLightboxDialog(
             }
           }
         }
+        }
       }
 
       // Close button at top-right
@@ -294,6 +416,11 @@ fun MediaLightboxDialog(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
           ) {
+            val saveButtonLabel = when (mediaType) {
+              GeneratedMediaType.IMAGE -> "Save to Gallery"
+              GeneratedMediaType.DOCUMENT -> "Save / Open Doc"
+              else -> "Save to Phone"
+            }
             OutlinedButton(
               onClick = onSaveToPhone,
               contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
@@ -304,7 +431,7 @@ fun MediaLightboxDialog(
             ) {
               Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
               Spacer(Modifier.width(6.dp))
-              Text("Save to Phone")
+              Text(saveButtonLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
 
             if (onSendToChat != null) {

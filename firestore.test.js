@@ -275,8 +275,11 @@ test("Hosts and LinkedFiles: CRUD and validation parity", async () => {
     aliceDb.collection(`users/${ALICE_UID}/hosts`).doc("host_1").set({
       userId: ALICE_UID,
       label: "Windows Studio PC",
-      baseUrl: "http://192.168.1.42:18789",
-      controlUrl: "http://192.168.1.42:18789/control",
+      baseUrl: "http://192.168.68.53:18789",
+      lanUrl: "http://192.168.68.53:18789",
+      tailscaleUrl: "http://100.91.98.120:18789",
+      connectionMode: "LAN",
+      controlUrl: "",
       gatewayToken: "secret-token-123",
       aiMode: "HYBRID_GEMINI_OPENCLAW",
       defaultLlmProvider: "VENICE_AI",
@@ -292,9 +295,18 @@ test("Hosts and LinkedFiles: CRUD and validation parity", async () => {
   await assertSucceeds(
     aliceDb.collection(`users/${ALICE_UID}/hosts`).doc("host_1").update({
       lastStatus: "ONLINE",
+      connectionMode: "TAILSCALE",
+      baseUrl: "http://100.91.98.120:18789",
       defaultLlmProvider: "LOCAL_LLM",
       defaultLlmModel: "ollama/qwen2.5:14b",
       updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertFails(
+    aliceDb.collection(`users/${ALICE_UID}/hosts`).doc("host_1").update({
+      connectionMode: "PUBLIC_INTERNET",
+      updatedAt: new Date(Date.now() - 300),
     })
   );
 
@@ -307,6 +319,20 @@ test("Hosts and LinkedFiles: CRUD and validation parity", async () => {
       mimeOrExt: "application/pdf",
       sizeBytes: 204800,
       notes: "Quarterly summary for OpenClaw review",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/linkedFiles`).doc("file_docx").set({
+      userId: ALICE_UID,
+      displayName: "spec_sheet.docx",
+      uriOrPath: "content://com.android.providers.downloads/document/42",
+      linkType: "ANDROID_ATTACHMENT",
+      mimeOrExt: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      sizeBytes: 48120,
+      notes: "Word document attachment",
       createdAt: now,
       updatedAt: now,
     })
@@ -351,7 +377,7 @@ test("ChatRooms & bot missions: mission update, room CRUD, room messages, and cr
     })
   );
 
-  // ChatRoom CRUD
+  // ChatRoom CRUD with maxPingPongTurns
   const roomsRef = aliceDb.collection(`users/${ALICE_UID}/chatRooms`);
   await assertSucceeds(
     roomsRef.doc("room_cafe").set({
@@ -359,7 +385,28 @@ test("ChatRooms & bot missions: mission update, room CRUD, room messages, and cr
       title: "Cafe Translation Squad",
       topic: "Translate & critique documents together",
       botIds: ["bot_volt", "bot_maru"],
+      maxPingPongTurns: 4,
       lastMessagePreview: "Volt-50 & Prof. Maru are at the cafe!",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/bots`).doc("bot_volt").update({
+      sessionKey: "agent:translator_volt:main",
+      toolPermissions: ["read", "write", "spawn"],
+      workspacePath: "~/workspaces/translator",
+      updatedAt: new Date(Date.now() - 400),
+    })
+  );
+  await assertFails(
+    roomsRef.doc("room_bad_turns").set({
+      userId: ALICE_UID,
+      title: "Runaway Loop Room",
+      topic: "Too many turns",
+      botIds: ["bot_volt", "bot_maru"],
+      maxPingPongTurns: 50,
+      lastMessagePreview: "",
       createdAt: now,
       updatedAt: now,
     })
@@ -528,6 +575,33 @@ test("GeneratedMedia & UserVeniceSettings: CRUD, mediaType bounds, message media
       modelUsed: "venice-video-i2v",
       durationSec: 6,
       sourceBotName: "Volt-50",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/generatedMedia`).doc("media_aud_1").set({
+      userId: ALICE_UID,
+      mediaUrl: "http://192.168.1.50:18789/media/voice_note.mp3",
+      mediaType: "AUDIO",
+      prompt: "Read translated summary aloud",
+      modelUsed: "tts-1",
+      durationSec: 18,
+      sourceBotName: "Volt-50",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/generatedMedia`).doc("media_doc_1").set({
+      userId: ALICE_UID,
+      mediaUrl: "http://192.168.1.50:18789/media/edited_report.docx",
+      mediaType: "DOCUMENT",
+      prompt: "Edited report.docx",
+      modelUsed: "claude-sonnet-4-6",
+      durationSec: 0,
+      sourceBotName: "Bimbo",
       createdAt: now,
       updatedAt: now,
     })

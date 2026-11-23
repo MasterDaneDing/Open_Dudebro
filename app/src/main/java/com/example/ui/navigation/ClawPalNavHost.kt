@@ -74,7 +74,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -94,6 +96,7 @@ import com.example.data.ai.PromptRefinerService
 import com.example.data.files.DeviceAttachmentReader
 import com.example.data.firebase.ClawPalRepository
 import com.example.data.local.LocalPrefsStore
+import com.example.data.openclaw.DriveBridgeManager
 import com.example.data.openclaw.OpenClawClient
 import com.example.model.FileLinkType
 import com.example.ui.screens.AuthScreen
@@ -106,6 +109,7 @@ import com.example.ui.screens.FilesVaultScreen
 import com.example.ui.screens.GeneralChatScreen
 import com.example.ui.screens.HostSettingsScreen
 import com.example.ui.screens.OutlinedArcadeTitle
+import com.example.util.WakeLockHelper
 import com.example.viewmodel.ClawPalViewModel
 import com.example.viewmodel.UiState
 import com.google.firebase.Firebase
@@ -139,7 +143,7 @@ private data class TopTab(
 private val topTabs = listOf(
   TopTab(ROUTE_HOME, "Bot Dudes", R.drawable.ic_min_bot_dudes),
   TopTab(ROUTE_GENERAL, "General", R.drawable.ic_min_general),
-  TopTab(ROUTE_TAKEOVER, "Take Over", R.drawable.ic_min_takeover),
+  TopTab(ROUTE_TAKEOVER, "Takeover", R.drawable.ic_min_takeover),
   TopTab(ROUTE_FILES, "Files", R.drawable.ic_min_files),
   TopTab(ROUTE_SETTINGS, "Host", R.drawable.ic_min_host),
 )
@@ -286,13 +290,16 @@ private fun AuthenticatedWorkspace(
         }
         val databaseId = app.getString(R.string.firestore_database_id)
         val db = FirebaseFirestore.getInstance(databaseId)
+        val bridgeManager = DriveBridgeManager(app, app.filesDir)
         ClawPalViewModel(
           repository = ClawPalRepository(db),
           refinerService = PromptRefinerService(),
-          openClawClient = OpenClawClient(),
+          openClawClient = OpenClawClient(app.filesDir, bridgeManager),
           localPrefsStore = LocalPrefsStore(app),
           attachmentReader = DeviceAttachmentReader(app),
           currentUserId = currentUserId,
+          wakeLockHelper = WakeLockHelper(app),
+          driveBridgeManager = bridgeManager,
         )
       }
     },
@@ -317,14 +324,25 @@ private fun AuthenticatedWorkspace(
   val generatedMediaState by viewModel.generatedMediaState.collectAsStateWithLifecycle()
   val liveExpression by viewModel.liveExpression.collectAsStateWithLifecycle()
   val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
-  val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
+  val busyBotIds by viewModel.busyBotIds.collectAsStateWithLifecycle()
+  val isSelectedBotBusy by viewModel.isSelectedBotBusy.collectAsStateWithLifecycle()
+  val selectedBotElapsedSec by viewModel.selectedBotElapsedSec.collectAsStateWithLifecycle()
+  val selectedBotStreamingPreview by viewModel.selectedBotStreamingPreview.collectAsStateWithLifecycle()
+  val isSelectedGeneralBusy by viewModel.isSelectedGeneralBusy.collectAsStateWithLifecycle()
+  val generalElapsedSec by viewModel.generalElapsedSec.collectAsStateWithLifecycle()
+  val generalStreamingPreview by viewModel.generalStreamingPreview.collectAsStateWithLifecycle()
+  val backgroundTasks by viewModel.backgroundTasks.collectAsStateWithLifecycle()
+  val cafeSessions by viewModel.cafeSessions.collectAsStateWithLifecycle()
+  val isRoomBusy by viewModel.isRoomBusy.collectAsStateWithLifecycle()
   val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
   val localPrefs by viewModel.localPrefs.collectAsStateWithLifecycle()
+  val bridgeStatus by viewModel.bridgeStatus.collectAsStateWithLifecycle()
   val pingResult by viewModel.pingResult.collectAsStateWithLifecycle()
   val controlLog by viewModel.controlLog.collectAsStateWithLifecycle()
   val veniceLiveModels by viewModel.veniceLiveModels.collectAsStateWithLifecycle()
   val isFetchingVeniceModels by viewModel.isFetchingVeniceModels.collectAsStateWithLifecycle()
   val pendingChatDraft by viewModel.pendingChatDraft.collectAsStateWithLifecycle()
+  val connectionFailureBanner by viewModel.connectionFailureBanner.collectAsStateWithLifecycle()
 
   val snackbarHostState = remember { SnackbarHostState() }
   LaunchedEffect(statusBanner) {
@@ -456,9 +474,12 @@ private fun AuthenticatedWorkspace(
                 label = {
                   Text(
                     text = tab.label,
+                    fontSize = 11.sp,
+                    letterSpacing = (-0.2).sp,
                     fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
                     maxLines = 1,
                     softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                   )
                 },
                 colors = NavigationBarItemDefaults.colors(
@@ -538,6 +559,7 @@ private fun AuthenticatedWorkspace(
                 botsState = botsState,
                 chatRoomsState = chatRoomsState,
                 userEmail = userEmail,
+                busyBotIds = busyBotIds,
                 onOpenBotChat = { bot ->
                   viewModel.selectBot(bot.id)
                   navController.navigate(ROUTE_CHAT)
@@ -547,8 +569,8 @@ private fun AuthenticatedWorkspace(
                   navController.navigate("room/${room.id}")
                 },
                 onAddNewBot = { navController.navigate("bot_studio?botId=") },
-                onCreateChatRoom = { title, topic, botIds ->
-                  viewModel.createChatRoom(title, topic, botIds) { newRoomId ->
+                onCreateChatRoom = { title, topic, botIds, maxTurns ->
+                  viewModel.createChatRoom(title, topic, botIds, maxTurns) { newRoomId ->
                     navController.navigate("room/$newRoomId")
                   }
                 },
@@ -568,12 +590,23 @@ private fun AuthenticatedWorkspace(
                 linkedFilesState = linkedFilesState,
                 pendingAttachments = pendingAttachments,
                 selectedWheelModel = selectedWheelModel,
-                isBusy = isBusy,
+                isBusy = isSelectedGeneralBusy,
+                activeElapsedSec = generalElapsedSec,
+                streamingPreviewText = generalStreamingPreview,
+                connectionFailureBanner = connectionFailureBanner,
                 onSelectChat = viewModel::selectGeneralChat,
                 onCreateNewChat = { wheel -> viewModel.createGeneralChat(wheel) },
                 onTogglePinChat = viewModel::togglePinGeneralChat,
                 onDeleteChat = viewModel::deleteGeneralChat,
                 onSelectWheelModel = viewModel::selectWheelModel,
+                onToggleHostConnectionMode = { host -> viewModel.toggleHostConnectionMode(host) },
+                onSwitchModeAndRetry = { banner ->
+                  viewModel.toggleHostConnectionMode(banner.host) { updatedHost ->
+                    banner.retryAction(updatedHost)
+                  }
+                },
+                onDismissFailureBanner = viewModel::dismissConnectionFailureBanner,
+                onAbortRequest = { viewModel.abortGeneralRequest() },
                 onSendMessage = { thread, text, wheel, host ->
                   viewModel.sendGeneralMessage(thread, text, wheel, host)
                 },
@@ -604,12 +637,26 @@ private fun AuthenticatedWorkspace(
                 liveExpression = liveExpression,
                 pendingAttachments = pendingAttachments,
                 selectedWheelModel = selectedWheelModel,
-                isBusy = isBusy,
+                isBusy = isSelectedBotBusy,
+                busyBotIds = busyBotIds,
+                backgroundTasks = backgroundTasks,
+                activeElapsedSec = selectedBotElapsedSec,
+                streamingPreviewText = selectedBotStreamingPreview,
+                connectionFailureBanner = connectionFailureBanner,
                 pendingChatDraft = pendingChatDraft,
                 onConsumePendingChatDraft = viewModel::consumePendingChatDraft,
                 onShowBanner = viewModel::showBanner,
                 onSelectBot = viewModel::selectBot,
                 onSelectWheelModel = { option -> viewModel.selectWheelModel(option, null) },
+                onSwitchModeAndRetry = { banner ->
+                  viewModel.toggleHostConnectionMode(banner.host) { updatedHost ->
+                    banner.retryAction(updatedHost)
+                  }
+                },
+                onDismissFailureBanner = viewModel::dismissConnectionFailureBanner,
+                onAbortRequest = { viewModel.abortBotRequest() },
+                onSpawnBackgroundTask = viewModel::spawnBackgroundTaskForBot,
+                onAbortBackgroundTask = viewModel::abortBackgroundTask,
                 onBack = { navController.popBackStack() },
                 onAddBotClick = { navController.navigate("bot_studio?botId=") },
                 onEditBotClick = { bot -> navController.navigate("bot_studio?botId=${bot.id}") },
@@ -666,12 +713,16 @@ private fun AuthenticatedWorkspace(
                 hostsState = hostsState,
                 activeExpressions = roomActiveExpressions,
                 selectedWheelModel = selectedWheelModel,
-                isBusy = isBusy,
+                isBusy = isRoomBusy,
+                cafeSession = cafeSessions[roomId],
                 onShowBanner = viewModel::showBanner,
                 onBack = { navController.popBackStack() },
                 onSelectWheelModel = { option -> viewModel.selectWheelModel(option, null) },
-                onSendRoomMessage = { r, p, h, prompt, postBubble, wheel ->
-                  viewModel.sendRoomMessage(r, p, h, prompt, postBubble, wheel)
+                onPauseCafe = viewModel::pauseCafeDiscussion,
+                onResumeCafe = viewModel::resumeCafeDiscussion,
+                onStopCafe = viewModel::stopCafeDiscussion,
+                onSendRoomMessage = { r, p, h, prompt, postBubble, wheel, targetId ->
+                  viewModel.sendRoomMessage(r, p, h, prompt, postBubble, wheel, targetId)
                 },
                 onUpdateRoom = viewModel::updateChatRoom,
                 onUpdateBotMission = viewModel::updateBotMission,
@@ -712,6 +763,7 @@ private fun AuthenticatedWorkspace(
                 hostsState = hostsState,
                 activeBot = activeBot,
                 takeoverActive = localPrefs.takeoverActive,
+                hostPaused = localPrefs.hostPaused,
                 pingResult = pingResult,
                 controlLog = controlLog,
                 onPingHost = viewModel::pingHost,
@@ -750,12 +802,25 @@ private fun AuthenticatedWorkspace(
                 savedVeniceApiKey = localPrefs.veniceApiKey,
                 savedGoogleApiKey = localPrefs.googleApiKey,
                 savedGlobalVeniceModel = localPrefs.globalVeniceModel,
+                savedDevicePairingId = localPrefs.devicePairingId,
+                savedBridgeEnabled = localPrefs.driveBridgeEnabled,
+                savedBridgeFolderUri = localPrefs.driveBridgeFolderUri,
+                bridgeStatus = bridgeStatus,
+                onInspectBridgeFolder = viewModel::inspectBridgeFolder,
                 veniceLiveModels = veniceLiveModels,
                 isFetchingVeniceModels = isFetchingVeniceModels,
                 onFetchVeniceModels = viewModel::fetchLiveVeniceModels,
                 onBack = { navigateToTopTab(ROUTE_HOME) },
-                onSaveHost = { host, veniceKey, googleKey, globalModel ->
-                  viewModel.saveHost(host, veniceKey, googleKey, globalModel)
+                onSaveHost = { host, veniceKey, googleKey, globalModel, deviceId, bridgeEnabled, bridgeUri ->
+                  viewModel.saveHost(
+                    host = host,
+                    veniceApiKey = veniceKey,
+                    googleApiKey = googleKey,
+                    globalVeniceModel = globalModel,
+                    devicePairingId = deviceId,
+                    driveBridgeEnabled = bridgeEnabled,
+                    driveBridgeFolderUri = bridgeUri,
+                  )
                 },
                 onDeleteHost = viewModel::deleteHost,
                 onPingHost = viewModel::pingHost,

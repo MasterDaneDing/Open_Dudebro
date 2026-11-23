@@ -34,7 +34,9 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Movie
@@ -74,7 +76,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.example.R
 import com.example.data.files.MediaSaveHelper
 import com.example.model.FileLinkType
@@ -96,6 +97,8 @@ private enum class MediaGalleryFilter(val label: String) {
   ALL("All"),
   IMAGES("Images"),
   VIDEOS("Videos"),
+  AUDIO("Audio"),
+  DOCUMENTS("Docs"),
 }
 
 @Composable
@@ -440,6 +443,8 @@ fun FilesVaultScreen(
                 MediaGalleryFilter.ALL -> true
                 MediaGalleryFilter.IMAGES -> item.mediaTypeEnum == GeneratedMediaType.IMAGE
                 MediaGalleryFilter.VIDEOS -> item.mediaTypeEnum == GeneratedMediaType.VIDEO
+                MediaGalleryFilter.AUDIO -> item.mediaTypeEnum == GeneratedMediaType.AUDIO
+                MediaGalleryFilter.DOCUMENTS -> item.mediaTypeEnum == GeneratedMediaType.DOCUMENT
               }
             }
           }
@@ -507,13 +512,22 @@ fun FilesVaultScreen(
       onDismiss = { lightboxMedia = null },
       onSaveToPhone = {
         scope.launch {
-          val res = MediaSaveHelper.saveMediaToPhone(
-            context = context,
-            mediaUrl = item.mediaUrl,
-            mediaType = item.mediaTypeEnum,
-            host = activeHost,
-            suggestedPrefix = item.sourceBotName.ifBlank { "ClawDudebro" },
-          )
+          val res = if (item.mediaTypeEnum == GeneratedMediaType.DOCUMENT) {
+            MediaSaveHelper.saveAndOpenDocument(
+              context = context,
+              mediaUrl = item.mediaUrl,
+              host = activeHost,
+              suggestedPrefix = item.sourceBotName.ifBlank { "ClawDudebro_Doc" },
+            )
+          } else {
+            MediaSaveHelper.saveMediaToPhone(
+              context = context,
+              mediaUrl = item.mediaUrl,
+              mediaType = item.mediaTypeEnum,
+              host = activeHost,
+              suggestedPrefix = item.sourceBotName.ifBlank { "ClawDudebro" },
+            )
+          }
           onShowBanner(
             res.getOrElse { err -> "Save failed: ${err.localizedMessage ?: "Error"}" }
           )
@@ -641,10 +655,8 @@ private fun GeneratedMediaGridCard(
   onDelete: () -> Unit,
 ) {
   val context = LocalContext.current
-  val resolvedUrl = remember(item.mediaUrl, activeHost?.baseUrl) {
-    MediaSaveHelper.resolveDownloadUrl(item.mediaUrl, activeHost) ?: item.mediaUrl
-  }
-  val isVideo = item.mediaTypeEnum == GeneratedMediaType.VIDEO
+  val mediaType = item.mediaTypeEnum
+  val isVideo = mediaType == GeneratedMediaType.VIDEO
 
   Card(
     shape = RoundedCornerShape(18.dp),
@@ -663,28 +675,55 @@ private fun GeneratedMediaGridCard(
           .aspectRatio(1f)
           .background(Color(0xFF1A072E)),
       ) {
-        if (isVideo) {
-          Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center,
-          ) {
-            Icon(
-              Icons.Rounded.PlayCircle,
-              contentDescription = "Play video clip",
-              tint = Color(0xFFFF8CE0),
-              modifier = Modifier.size(54.dp),
+        when (mediaType) {
+          GeneratedMediaType.VIDEO -> {
+            Box(
+              modifier = Modifier.fillMaxSize(),
+              contentAlignment = Alignment.Center,
+            ) {
+              Icon(
+                Icons.Rounded.PlayCircle,
+                contentDescription = "Play video clip",
+                tint = Color(0xFFFF8CE0),
+                modifier = Modifier.size(54.dp),
+              )
+            }
+          }
+          GeneratedMediaType.AUDIO -> {
+            Box(
+              modifier = Modifier.fillMaxSize(),
+              contentAlignment = Alignment.Center,
+            ) {
+              Icon(
+                Icons.Rounded.GraphicEq,
+                contentDescription = "Open audio clip",
+                tint = Color(0xFFFF8CE0),
+                modifier = Modifier.size(52.dp),
+              )
+            }
+          }
+          GeneratedMediaType.DOCUMENT -> {
+            Box(
+              modifier = Modifier.fillMaxSize(),
+              contentAlignment = Alignment.Center,
+            ) {
+              Icon(
+                Icons.Rounded.Description,
+                contentDescription = "Open document",
+                tint = Color(0xFFFFB74D),
+                modifier = Modifier.size(52.dp),
+              )
+            }
+          }
+          GeneratedMediaType.IMAGE -> {
+            AsyncImage(
+              model = MediaSaveHelper.buildAuthorizedImageRequest(context, item.mediaUrl, activeHost),
+              imageLoader = remember(context) { MediaSaveHelper.getImageLoader(context) },
+              contentDescription = item.prompt,
+              contentScale = ContentScale.Crop,
+              modifier = Modifier.fillMaxSize(),
             )
           }
-        } else {
-          AsyncImage(
-            model = ImageRequest.Builder(context)
-              .data(resolvedUrl)
-              .crossfade(true)
-              .build(),
-            contentDescription = item.prompt,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-          )
         }
 
         // Top-left type + duration badge
@@ -701,13 +740,18 @@ private fun GeneratedMediaGridCard(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
           ) {
             Icon(
-              imageVector = if (isVideo) Icons.Rounded.Movie else Icons.Rounded.Image,
+              imageVector = when (mediaType) {
+                GeneratedMediaType.VIDEO -> Icons.Rounded.Movie
+                GeneratedMediaType.AUDIO -> Icons.Rounded.GraphicEq
+                GeneratedMediaType.DOCUMENT -> Icons.Rounded.Description
+                GeneratedMediaType.IMAGE -> Icons.Rounded.Image
+              },
               contentDescription = null,
               tint = Color(0xFFFF8CE0),
               modifier = Modifier.size(12.dp),
             )
             Text(
-              text = if (isVideo && item.durationSec > 0) "Video • ${item.durationSec}s" else item.mediaTypeEnum.label,
+              text = if (isVideo && item.durationSec > 0) "Video • ${item.durationSec}s" else mediaType.label,
               style = MaterialTheme.typography.labelSmall,
               color = Color.White,
               fontWeight = FontWeight.Bold,

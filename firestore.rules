@@ -45,7 +45,7 @@ service cloud.firestore {
 
     function isValidOptionalMediaFields(data) {
       return (!('mediaUrl' in data) || data.mediaUrl == null || (data.mediaUrl is string && data.mediaUrl.size() <= 1500)) &&
-             (!('mediaType' in data) || data.mediaType == null || data.mediaType in ['IMAGE', 'VIDEO']) &&
+             (!('mediaType' in data) || data.mediaType == null || data.mediaType in ['IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT']) &&
              (!('mediaPrompt' in data) || data.mediaPrompt == null || (data.mediaPrompt is string && data.mediaPrompt.size() <= 1000)) &&
              (!('mediaModel' in data) || data.mediaModel == null || (data.mediaModel is string && data.mediaModel.size() <= 120)) &&
              (!('mediaDurationSec' in data) || data.mediaDurationSec == null || (data.mediaDurationSec is int && data.mediaDurationSec >= 0 && data.mediaDurationSec <= 600));
@@ -71,6 +71,9 @@ service cloud.firestore {
              (!('functionPreset' in data) || data.functionPreset in ['GENERAL', 'TRANSLATION', 'PROOFREADING', 'CRITIQUING', 'CODING', 'RESEARCH']) &&
              (!('llmProvider' in data) || data.llmProvider in ['HOST_DEFAULT', 'OPENCLAW_AUTO', 'VENICE_AI', 'GOOGLE', 'LOCAL_LLM']) &&
              (!('llmModel' in data) || (data.llmModel is string && data.llmModel.size() <= 120)) &&
+             (!('sessionKey' in data) || (data.sessionKey is string && data.sessionKey.size() <= 160)) &&
+             (!('workspacePath' in data) || (data.workspacePath is string && data.workspacePath.size() <= 300)) &&
+             (!('toolPermissions' in data) || isValidStringList(data.toolPermissions, 12, 40)) &&
              (!('openClawSynced' in data) || data.openClawSynced is bool) &&
              data.pinnedDefault is bool;
     }
@@ -81,6 +84,7 @@ service cloud.firestore {
              data.topic is string && data.topic.size() <= 160 &&
              isValidStringList(data.botIds, 8, 128) &&
              data.botIds.size() >= 1 &&
+             (!('maxPingPongTurns' in data) || (data.maxPingPongTurns is int && data.maxPingPongTurns >= 1 && data.maxPingPongTurns <= 8)) &&
              data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300;
     }
 
@@ -117,6 +121,9 @@ service cloud.firestore {
       return data.userId is string && data.userId == userId &&
              data.label is string && data.label.size() >= 1 && data.label.size() <= 50 &&
              data.baseUrl is string && data.baseUrl.size() >= 1 && data.baseUrl.size() <= 300 &&
+             (!('lanUrl' in data) || (data.lanUrl is string && data.lanUrl.size() <= 300)) &&
+             (!('tailscaleUrl' in data) || (data.tailscaleUrl is string && data.tailscaleUrl.size() <= 300)) &&
+             (!('connectionMode' in data) || data.connectionMode in ['LAN', 'TAILSCALE']) &&
              data.controlUrl is string && data.controlUrl.size() <= 300 &&
              data.gatewayToken is string && data.gatewayToken.size() <= 256 &&
              data.aiMode in ['HYBRID_GEMINI_OPENCLAW', 'OPENCLAW_ONLY', 'GEMINI_PARSER_PREVIEW'] &&
@@ -132,7 +139,7 @@ service cloud.firestore {
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
              data.uriOrPath is string && data.uriOrPath.size() >= 1 && data.uriOrPath.size() <= 500 &&
              data.linkType in ['ANDROID_ATTACHMENT', 'HOST_PATH', 'CLOUD_URL'] &&
-             data.mimeOrExt is string && data.mimeOrExt.size() <= 60 &&
+             data.mimeOrExt is string && data.mimeOrExt.size() <= 120 &&
              data.sizeBytes is int && data.sizeBytes >= 0 &&
              data.notes is string && data.notes.size() <= 250;
     }
@@ -140,7 +147,7 @@ service cloud.firestore {
     function isValidGeneratedMedia(data, userId) {
       return data.userId is string && data.userId == userId &&
              data.mediaUrl is string && data.mediaUrl.size() >= 1 && data.mediaUrl.size() <= 1500 &&
-             data.mediaType in ['IMAGE', 'VIDEO'] &&
+             data.mediaType in ['IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT'] &&
              data.prompt is string && data.prompt.size() <= 1000 &&
              data.modelUsed is string && data.modelUsed.size() <= 120 &&
              data.durationSec is int && data.durationSec >= 0 && data.durationSec <= 600 &&
@@ -188,7 +195,8 @@ service cloud.firestore {
                          'userId', 'name', 'roleTitle', 'archetype', 'hatStyle',
                          'accessoryStyle', 'primaryColorHex', 'accentColorHex',
                          'systemPersona', 'mission', 'lastMessagePreview',
-                         'openClawAgentId', 'functionPreset', 'llmProvider',
+                         'openClawAgentId', 'sessionKey', 'toolPermissions', 'workspacePath',
+                         'functionPreset', 'llmProvider',
                          'llmModel', 'openClawSynced', 'pinnedDefault',
                          'createdAt', 'updatedAt'
                        ]) &&
@@ -206,7 +214,8 @@ service cloud.firestore {
                          'name', 'roleTitle', 'archetype', 'hatStyle',
                          'accessoryStyle', 'primaryColorHex', 'accentColorHex',
                          'systemPersona', 'mission', 'lastMessagePreview',
-                         'openClawAgentId', 'functionPreset', 'llmProvider',
+                         'openClawAgentId', 'sessionKey', 'toolPermissions', 'workspacePath',
+                         'functionPreset', 'llmProvider',
                          'llmModel', 'openClawSynced', 'pinnedDefault', 'updatedAt'
                        ]);
 
@@ -269,7 +278,7 @@ service cloud.firestore {
                        ]) &&
                        incoming().keys().hasOnly([
                          'userId', 'title', 'topic', 'botIds',
-                         'lastMessagePreview', 'createdAt', 'updatedAt'
+                         'maxPingPongTurns', 'lastMessagePreview', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidTimestamp(incoming().createdAt) &&
                        isValidTimestamp(incoming().updatedAt) &&
@@ -282,7 +291,7 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        isValidTimestamp(incoming().updatedAt) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'title', 'topic', 'botIds', 'lastMessagePreview', 'updatedAt'
+                         'title', 'topic', 'botIds', 'maxPingPongTurns', 'lastMessagePreview', 'updatedAt'
                        ]);
 
       allow delete: if isOwner(userId) && isValidId(roomId);
@@ -340,8 +349,8 @@ service cloud.firestore {
                          'aiMode', 'autoParseCasual', 'lastStatus', 'createdAt', 'updatedAt'
                        ]) &&
                        incoming().keys().hasOnly([
-                         'userId', 'label', 'baseUrl', 'controlUrl', 'gatewayToken',
-                         'aiMode', 'defaultLlmProvider', 'defaultLlmModel',
+                         'userId', 'label', 'baseUrl', 'lanUrl', 'tailscaleUrl', 'connectionMode',
+                         'controlUrl', 'gatewayToken', 'aiMode', 'defaultLlmProvider', 'defaultLlmModel',
                          'localLlmEndpoint', 'autoParseCasual', 'lastStatus',
                          'createdAt', 'updatedAt'
                        ]) &&
@@ -356,8 +365,8 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        isValidTimestamp(incoming().updatedAt) &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'label', 'baseUrl', 'controlUrl', 'gatewayToken',
-                         'aiMode', 'defaultLlmProvider', 'defaultLlmModel',
+                         'label', 'baseUrl', 'lanUrl', 'tailscaleUrl', 'connectionMode',
+                         'controlUrl', 'gatewayToken', 'aiMode', 'defaultLlmProvider', 'defaultLlmModel',
                          'localLlmEndpoint', 'autoParseCasual', 'lastStatus', 'updatedAt'
                        ]);
 

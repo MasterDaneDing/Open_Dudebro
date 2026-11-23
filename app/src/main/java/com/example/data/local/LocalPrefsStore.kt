@@ -22,10 +22,14 @@ data class LocalUiPrefs(
   val selectedBotId: String = "",
   val showParsedCardExpanded: Boolean = true,
   val takeoverActive: Boolean = false,
+  val hostPaused: Boolean = false,
   val veniceApiKey: String = "",
   val googleApiKey: String = "",
   val globalVeniceModel: String = VeniceModelCatalog.defaultModelId,
   val cachedVeniceModels: List<VeniceModelInfo> = emptyList(),
+  val devicePairingId: String = "claw-dudebro-apk",
+  val driveBridgeEnabled: Boolean = false,
+  val driveBridgeFolderUri: String = "",
 )
 
 class LocalPrefsStore(private val context: Context) {
@@ -33,10 +37,14 @@ class LocalPrefsStore(private val context: Context) {
     val SELECTED_BOT_ID = stringPreferencesKey("selected_bot_id")
     val SHOW_PARSED_EXPANDED = booleanPreferencesKey("show_parsed_expanded")
     val TAKEOVER_ACTIVE = booleanPreferencesKey("takeover_active")
+    val HOST_PAUSED = booleanPreferencesKey("host_paused")
     val VENICE_API_KEY = stringPreferencesKey("venice_api_key")
     val GOOGLE_API_KEY = stringPreferencesKey("google_api_key")
     val GLOBAL_VENICE_MODEL = stringPreferencesKey("global_venice_model")
     val CACHED_VENICE_MODELS = stringPreferencesKey("cached_venice_models_json")
+    val DEVICE_PAIRING_ID = stringPreferencesKey("device_pairing_id")
+    val DRIVE_BRIDGE_ENABLED = booleanPreferencesKey("drive_bridge_enabled")
+    val DRIVE_BRIDGE_FOLDER_URI = stringPreferencesKey("drive_bridge_folder_uri")
   }
 
   val prefsFlow: Flow<LocalUiPrefs> = context.clawPalDataStore.data.map { prefs ->
@@ -44,11 +52,16 @@ class LocalPrefsStore(private val context: Context) {
       selectedBotId = prefs[Keys.SELECTED_BOT_ID] ?: "",
       showParsedCardExpanded = prefs[Keys.SHOW_PARSED_EXPANDED] ?: true,
       takeoverActive = prefs[Keys.TAKEOVER_ACTIVE] ?: false,
+      hostPaused = prefs[Keys.HOST_PAUSED] ?: false,
       veniceApiKey = prefs[Keys.VENICE_API_KEY] ?: "",
       googleApiKey = prefs[Keys.GOOGLE_API_KEY] ?: "",
       globalVeniceModel = prefs[Keys.GLOBAL_VENICE_MODEL]?.takeIf { it.isNotBlank() }
         ?: VeniceModelCatalog.defaultModelId,
       cachedVeniceModels = decodeModels(prefs[Keys.CACHED_VENICE_MODELS].orEmpty()),
+      devicePairingId = prefs[Keys.DEVICE_PAIRING_ID]?.takeIf { it.isNotBlank() }
+        ?: "claw-dudebro-apk",
+      driveBridgeEnabled = prefs[Keys.DRIVE_BRIDGE_ENABLED] ?: false,
+      driveBridgeFolderUri = prefs[Keys.DRIVE_BRIDGE_FOLDER_URI] ?: "",
     )
   }
 
@@ -64,6 +77,10 @@ class LocalPrefsStore(private val context: Context) {
     context.clawPalDataStore.edit { it[Keys.TAKEOVER_ACTIVE] = active }
   }
 
+  suspend fun setHostPaused(paused: Boolean) {
+    context.clawPalDataStore.edit { it[Keys.HOST_PAUSED] = paused }
+  }
+
   suspend fun setProviderApiKeys(
     veniceKey: String,
     googleKey: String,
@@ -75,6 +92,18 @@ class LocalPrefsStore(private val context: Context) {
       if (!globalVeniceModel.isNullOrBlank()) {
         it[Keys.GLOBAL_VENICE_MODEL] = globalVeniceModel.trim()
       }
+    }
+  }
+
+  suspend fun setDeviceAndBridgeConfig(
+    devicePairingId: String,
+    bridgeEnabled: Boolean,
+    bridgeFolderUri: String,
+  ) {
+    context.clawPalDataStore.edit {
+      it[Keys.DEVICE_PAIRING_ID] = devicePairingId.trim().ifBlank { "claw-dudebro-apk" }
+      it[Keys.DRIVE_BRIDGE_ENABLED] = bridgeEnabled
+      it[Keys.DRIVE_BRIDGE_FOLDER_URI] = bridgeFolderUri.trim()
     }
   }
 

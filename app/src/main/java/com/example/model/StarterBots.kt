@@ -149,8 +149,11 @@ object StarterBots {
   fun defaultHost(userId: String): OpenClawHost = OpenClawHost(
     userId = userId,
     label = "Home OpenClaw PC",
-    baseUrl = "http://192.168.1.50:18789",
-    controlUrl = "http://192.168.1.50:18789/control",
+    baseUrl = OpenClawHost.DEFAULT_LAN_URL,
+    lanUrl = OpenClawHost.DEFAULT_LAN_URL,
+    tailscaleUrl = OpenClawHost.DEFAULT_TAILSCALE_URL,
+    connectionMode = HostConnectionMode.LAN.name,
+    controlUrl = "",
     gatewayToken = "",
     aiMode = AiRoutingMode.HYBRID_GEMINI_OPENCLAW.name,
     defaultLlmProvider = OpenClawLlmProvider.OPENCLAW_AUTO.name,
