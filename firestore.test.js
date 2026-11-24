@@ -679,3 +679,82 @@ test("GeneratedMedia & UserVeniceSettings: CRUD, mediaType bounds, message media
   );
 });
 
+test("ContextChats: owner CRUD, docRefs/docLabels updates, citedDocs, parent check, and cross-user isolation", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const now = new Date(Date.now() - 1000);
+
+  await assertFails(unauthDb.collection(`users/${ALICE_UID}/contextChats`).get());
+
+  const ctxRef = aliceDb.collection(`users/${ALICE_UID}/contextChats`);
+
+  // Orphaned context message must fail
+  await assertFails(
+    ctxRef.doc("missing_ctx").collection("messages").doc("cm_1").set({
+      userId: ALICE_UID,
+      chatId: "missing_ctx",
+      sender: "USER",
+      rawText: "What does section 3 say?",
+      modelLabel: "OpenClaw Default",
+      status: "IDLE",
+      citedDocs: [],
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    ctxRef.doc("ctx_1").set({
+      userId: ALICE_UID,
+      title: "Q4 Lease Review",
+      pinned: false,
+      lastMessagePreview: "",
+      wheelModel: "OPENCLAW_DEFAULT",
+      docLabels: ["lease.pdf"],
+      docRefs: ["content://docs/lease.pdf"],
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    ctxRef.doc("ctx_1").update({
+      pinned: true,
+      docLabels: ["lease.pdf", "addendum.docx"],
+      docRefs: ["content://docs/lease.pdf", "https://drive.google.com/file/d/abc123/view"],
+      updatedAt: new Date(Date.now() - 500),
+    })
+  );
+
+  await assertSucceeds(
+    ctxRef.doc("ctx_1").collection("messages").doc("cm_1").set({
+      userId: ALICE_UID,
+      chatId: "ctx_1",
+      sender: "BOT",
+      rawText: "Inspecting lease.pdf...",
+      modelLabel: "OpenClaw Default",
+      status: "DISPATCHED",
+      citedDocs: ["lease.pdf"],
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  await assertSucceeds(
+    ctxRef.doc("ctx_1").collection("messages").doc("cm_1").update({
+      rawText: "Per [Source: lease.pdf], the renewal notice period is 60 days.",
+      status: "COMPLETED",
+      citedDocs: ["lease.pdf"],
+      updatedAt: new Date(Date.now() - 300),
+    })
+  );
+
+  await assertSucceeds(ctxRef.orderBy("updatedAt", "desc").get());
+  await assertSucceeds(ctxRef.doc("ctx_1").collection("messages").orderBy("createdAt", "asc").get());
+
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/contextChats`).get());
+  await assertFails(bobDb.collection(`users/${ALICE_UID}/contextChats/ctx_1/messages`).get());
+  await assertSucceeds(ctxRef.doc("ctx_1").delete());
+});
+

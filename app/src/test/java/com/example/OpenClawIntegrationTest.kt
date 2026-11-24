@@ -1,5 +1,9 @@
 package com.example
 
+import com.example.data.files.CloudDocProvider
+import com.example.data.files.CloudFetchOutcome
+import com.example.data.files.ContextDocCache
+import com.example.data.files.GoogleDriveDocumentFetcher
 import com.example.data.files.MediaSaveHelper
 import com.example.data.openclaw.DriveBridgeManager
 import com.example.data.openclaw.LocalProviderKeys
@@ -7,13 +11,17 @@ import com.example.data.openclaw.OpenClawClient
 import com.example.model.AgentToolPermission
 import com.example.model.CafeSpeakerRole
 import com.example.model.CafeTranscriptEntry
+import com.example.model.CaptainContextDocument
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
+import com.example.model.ContextChatMessage
+import com.example.model.ContextDocStatus
 import com.example.model.FileLinkType
 import com.example.model.GeneralChatMessage
 import com.example.model.GeneratedMediaType
 import com.example.model.MediaAttachmentPayload
 import com.example.model.MessageSender
+import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
 import com.example.model.OpenClawLlmProvider
 import com.example.model.WheelLlmOption
@@ -975,6 +983,278 @@ class OpenClawIntegrationTest {
       assertEquals(fakePng.size, cached.readBytes().size)
     } finally {
       rootDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun googleDriveFetcher_parsesWorkspaceUrls_handlesVirusConfirm_andDetectsPrivateWalls() {
+    val docInfo = GoogleDriveDocumentFetcher.parseCloudDocumentUrl(
+      "https://docs.google.com/document/d/1AbCdEfG_hIjKlMn/edit?usp=sharing"
+    )
+    assertEquals(CloudDocProvider.GOOGLE_DOC, docInfo.provider)
+    assertEquals("1AbCdEfG_hIjKlMn", docInfo.fileId)
+    assertEquals("https://docs.google.com/document/d/1AbCdEfG_hIjKlMn/export?format=txt", docInfo.downloadUrl)
+
+    val sheetInfo = GoogleDriveDocumentFetcher.parseCloudDocumentUrl(
+      "https://docs.google.com/spreadsheets/d/SHEET98765/edit#gid=0"
+    )
+    assertEquals(CloudDocProvider.GOOGLE_SHEET, sheetInfo.provider)
+    assertEquals("https://docs.google.com/spreadsheets/d/SHEET98765/export?format=csv", sheetInfo.downloadUrl)
+
+    val slideInfo = GoogleDriveDocumentFetcher.parseCloudDocumentUrl(
+      "https://docs.google.com/presentation/d/SLIDE555/view"
+    )
+    assertEquals(CloudDocProvider.GOOGLE_SLIDES, slideInfo.provider)
+    assertEquals("https://docs.google.com/presentation/d/SLIDE555/export/txt", slideInfo.downloadUrl)
+
+    val driveFileInfo = GoogleDriveDocumentFetcher.parseCloudDocumentUrl(
+      "https://drive.google.com/file/d/FILE_XYZ_123/view?usp=drive_link"
+    )
+    assertEquals(CloudDocProvider.GOOGLE_DRIVE_FILE, driveFileInfo.provider)
+    assertEquals("https://drive.google.com/uc?export=download&id=FILE_XYZ_123", driveFileInfo.downloadUrl)
+
+    // Virus scan HTML confirmation extraction + HTTP server integration
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    try {
+      server.createContext("/public/spec.txt") { ex ->
+        val body = "Launch date is October 14, 2026. Budget cap is $48,000.".toByteArray(StandardCharsets.UTF_8)
+        ex.responseHeaders.add("Content-Type", "text/plain; charset=utf-8")
+        ex.responseHeaders.add("Content-Disposition", "attachment; filename=\"Project_Spec_v2.txt\"")
+        ex.sendResponseHeaders(200, body.size.toLong())
+        ex.responseBody.use { it.write(body) }
+      }
+      server.createContext("/private-wall") { ex ->
+        ex.sendResponseHeaders(403, -1)
+        ex.close()
+      }
+      server.start()
+
+      val baseUrl = "http://127.0.0.1:${server.address.port}"
+      val confirmHtml = """
+        <form id="download-form" action="$baseUrl/public/spec.txt" method="post">
+          <input type="hidden" name="confirm" value="t" />
+        </form>
+      """.trimIndent()
+      val extractedConfirm = GoogleDriveDocumentFetcher.extractGoogleDriveConfirmUrl(confirmHtml, "FILE123")
+      assertEquals("$baseUrl/public/spec.txt?confirm=t", extractedConfirm)
+
+      val okOutcome = GoogleDriveDocumentFetcher.fetchDocument("$baseUrl/public/spec.txt")
+      assertTrue(okOutcome is CloudFetchOutcome.Success)
+      val success = okOutcome as CloudFetchOutcome.Success
+      assertEquals("Project_Spec_v2.txt", success.resolvedName)
+      assertTrue(String(success.bytes, StandardCharsets.UTF_8).contains("October 14, 2026"))
+
+      val privateOutcome = GoogleDriveDocumentFetcher.fetchDocument("$baseUrl/private-wall")
+      assertTrue(privateOutcome is CloudFetchOutcome.NeedsAccess)
+    } finally {
+      server.stop(0)
+    }
+  }
+
+  @Test
+  fun contextDocCache_persistsAndRemovesDocumentsCleanly() {
+    val cacheRoot = File(System.getProperty("java.io.tmpdir"), "clawpal_ctx_cache_${System.nanoTime()}").apply {
+      mkdirs()
+    }
+    try {
+      val cache = ContextDocCache(cacheRoot)
+      val doc = CaptainContextDocument(
+        id = "doc-1",
+        displayName = "Q4_Contract.pdf",
+        uriOrPath = "https://docs.google.com/document/d/abc123/edit",
+        linkType = FileLinkType.CLOUD_URL,
+        mimeType = "application/pdf",
+        extractedText = "Section 3: Payment due within 30 days.",
+        status = ContextDocStatus.READY,
+        statusDetail = "Loaded • 38 chars",
+        isGoogleDriveUrl = true,
+        isPdf = true,
+      )
+      cache.save("uid-alice", doc)
+      val loaded = cache.load("uid-alice", doc.uriOrPath)
+      assertNotNull(loaded)
+      assertEquals("Q4_Contract.pdf", loaded!!.displayName)
+      assertEquals(ContextDocStatus.READY, loaded.status)
+      assertEquals("Section 3: Payment due within 30 days.", loaded.extractedText)
+      assertTrue(loaded.isGoogleDriveUrl)
+
+      cache.remove("uid-alice", doc.uriOrPath)
+      assertNull(cache.load("uid-alice", doc.uriOrPath))
+    } finally {
+      cacheRoot.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun sendCaptainContextChat_groundsMultiTurnPromptsInDocumentVault_andFollowsOpenClawContract() = runTest {
+    val tempFilesDir = File(System.getProperty("java.io.tmpdir"), "clawpal_ctx_oc_${System.nanoTime()}").apply {
+      mkdirs()
+    }
+    val capturedPayloads = Collections.synchronizedList(mutableListOf<JSONObject>())
+    val capturedHeaders = Collections.synchronizedList(mutableListOf<Map<String, String?>>())
+
+    val capturedMediaAuth = mutableListOf<String?>()
+    val capturedMediaQueries = mutableListOf<Map<String, String>>()
+    val fakeChartPng = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9, 8, 7, 6)
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/chat/completions") { ex ->
+      capturedHeaders.add(
+        mapOf(
+          "Authorization" to ex.requestHeaders.getFirst("Authorization"),
+          "x-openclaw-session-key" to ex.requestHeaders.getFirst("x-openclaw-session-key"),
+          "x-openclaw-agent-id" to ex.requestHeaders.getFirst("x-openclaw-agent-id"),
+        )
+      )
+      val body = JSONObject(ex.requestBody.readBytes().toString(StandardCharsets.UTF_8))
+      capturedPayloads.add(body)
+
+      val turnIndex = capturedPayloads.size
+      val replyContent = if (turnIndex == 1) {
+        "Renewal deadline is November 15, 2026 [Source: Master_Agreement.pdf].\nMEDIA:/tmp/summary_badge.png"
+      } else {
+        "Based on [Source: Drive_Budget_Sheet.csv], Phase 2 allocation is $18,500."
+      }
+      val sse = (
+        "data: {\"id\":\"ctx-$turnIndex\",\"model\":\"openclaw/apk\",\"choices\":[{\"delta\":{\"content\":${JSONObject.quote(replyContent)}}}]}\n\n" +
+          "data: [DONE]\n\n"
+        ).toByteArray(StandardCharsets.UTF_8)
+      ex.responseHeaders.add("Content-Type", "text/event-stream")
+      ex.sendResponseHeaders(200, sse.size.toLong())
+      ex.responseBody.use { it.write(sse) }
+    }
+    server.createContext("/__openclaw__/assistant-media") { ex ->
+      val query = parseQuery(ex.requestURI.rawQuery)
+      capturedMediaAuth.add(ex.requestHeaders.getFirst("Authorization"))
+      capturedMediaQueries.add(query)
+      if (query["meta"] == "1") {
+        val meta = """{"available":true,"mimeType":"image/png","sizeBytes":${fakeChartPng.size}}""".toByteArray(StandardCharsets.UTF_8)
+        ex.responseHeaders.add("Content-Type", "application/json")
+        ex.sendResponseHeaders(200, meta.size.toLong())
+        ex.responseBody.use { it.write(meta) }
+      } else {
+        ex.responseHeaders.add("Content-Type", "image/png")
+        ex.sendResponseHeaders(200, fakeChartPng.size.toLong())
+        ex.responseBody.use { it.write(fakeChartPng) }
+      }
+    }
+    server.start()
+
+    try {
+      val baseUrl = "http://127.0.0.1:${server.address.port}"
+      val host = OpenClawHost(id = "h-ctx", baseUrl = baseUrl, gatewayToken = "ctx-token")
+      val client = OpenClawClient(appFilesDir = tempFilesDir)
+
+      val pdfDoc = CaptainContextDocument(
+        id = "doc-pdf",
+        displayName = "Master_Agreement.pdf",
+        uriOrPath = "content://docs/master.pdf",
+        linkType = FileLinkType.ANDROID_ATTACHMENT,
+        mimeType = "application/pdf",
+        extractedText = "Clause 7: Written notice of non-renewal is due by November 15, 2026.",
+        status = ContextDocStatus.READY,
+        isPdf = true,
+      )
+      val driveDoc = CaptainContextDocument(
+        id = "doc-drive",
+        displayName = "Drive_Budget_Sheet.csv",
+        uriOrPath = "https://docs.google.com/spreadsheets/d/BUDGET_1/edit",
+        linkType = FileLinkType.CLOUD_URL,
+        mimeType = "text/csv",
+        extractedText = "Phase,Allocation\nPhase 1,$12000\nPhase 2,$18500",
+        status = ContextDocStatus.READY,
+        isGoogleDriveUrl = true,
+      )
+      val privateDoc = CaptainContextDocument(
+        id = "doc-private",
+        displayName = "Secret_Notes.gdoc",
+        uriOrPath = "https://docs.google.com/document/d/PRIVATE_DOC/edit",
+        linkType = FileLinkType.CLOUD_URL,
+        status = ContextDocStatus.NEEDS_ACCESS,
+        statusDetail = "Private Drive file requires sharing toggle.",
+        isGoogleDriveUrl = true,
+      )
+      val vault = listOf(pdfDoc, driveDoc, privateDoc)
+
+      // Turn 1
+      val streamed = mutableListOf<String>()
+      val turn1 = client.sendCaptainContextChat(
+        host = host,
+        userId = "uid-hero",
+        conversationId = "case-42",
+        contextDocs = vault,
+        history = emptyList(),
+        userPrompt = "When is the renewal deadline?",
+        wheelOption = WheelLlmOption.OPENCLAW_DEFAULT,
+        onPartialText = { streamed += it },
+      ).getOrThrow()
+
+      assertTrue(streamed.isNotEmpty())
+      assertEquals("Renewal deadline is November 15, 2026 [Source: Master_Agreement.pdf].", turn1.replyText)
+      assertEquals(GeneratedMediaType.IMAGE, turn1.mediaType)
+      assertTrue(turn1.mediaUrl.orEmpty().startsWith("file://"))
+      val cachedChart = File(turn1.mediaUrl!!.removePrefix("file://"))
+      assertTrue(cachedChart.exists())
+      assertEquals(fakeChartPng.size, cachedChart.readBytes().size)
+      assertTrue(capturedMediaAuth.all { it == "Bearer ctx-token" })
+      assertTrue(capturedMediaQueries.any { it["source"] == "/tmp/summary_badge.png" && !it.containsKey("sessionKey") && !it.containsKey("agentId") })
+
+      assertNull(capturedHeaders[0]["x-openclaw-session-key"])
+      assertNull(capturedHeaders[0]["x-openclaw-agent-id"])
+      assertEquals("Bearer ctx-token", capturedHeaders[0]["Authorization"])
+
+      val body1 = capturedPayloads[0]
+      assertEquals("openclaw/apk", body1.getString("model"))
+      assertEquals("conv:ctx_case-42", body1.getString("user"))
+      assertTrue(body1.getBoolean("stream"))
+      val msgs1 = body1.getJSONArray("messages")
+      val sys1 = msgs1.getJSONObject(0).getString("content")
+      assertTrue(sys1.contains("Captain Context"))
+      assertTrue(sys1.contains("[Source: <filename>]"))
+      assertTrue(sys1.contains("Master_Agreement.pdf"))
+      assertTrue(sys1.contains("Drive_Budget_Sheet.csv"))
+      val userMsg1 = msgs1.getJSONObject(1).getString("content")
+      assertTrue(userMsg1.contains("November 15, 2026"))
+      assertTrue(userMsg1.contains("NEEDS_ACCESS"))
+
+      // Turn 2 with conversation history — Document Vault deck still injected!
+      val history = listOf(
+        ContextChatMessage(
+          id = "m1",
+          chatId = "case-42",
+          sender = MessageSender.USER.name,
+          rawText = "When is the renewal deadline?",
+          status = MessageStatus.COMPLETED.name,
+        ),
+        ContextChatMessage(
+          id = "m2",
+          chatId = "case-42",
+          sender = MessageSender.BOT.name,
+          rawText = turn1.replyText,
+          status = MessageStatus.COMPLETED.name,
+        ),
+      )
+      val turn2 = client.sendCaptainContextChat(
+        host = host,
+        userId = "uid-hero",
+        conversationId = "case-42",
+        contextDocs = vault,
+        history = history,
+        userPrompt = "And what is Phase 2's budget?",
+        wheelOption = WheelLlmOption.OPENCLAW_DEFAULT,
+      ).getOrThrow()
+
+      assertTrue(turn2.replyText.contains("$18,500"))
+      val body2 = capturedPayloads[1]
+      assertEquals("conv:ctx_case-42", body2.getString("user"))
+      val msgs2 = body2.getJSONArray("messages")
+      // system + 2 history turns + latest user turn = 4 messages
+      assertEquals(4, msgs2.length())
+      val latestUserContent = msgs2.getJSONObject(3).getString("content")
+      assertTrue(latestUserContent.contains("Phase 2,$18500"))
+      assertTrue(latestUserContent.contains("And what is Phase 2's budget?"))
+    } finally {
+      server.stop(0)
+      tempFilesDir.deleteRecursively()
     }
   }
 }

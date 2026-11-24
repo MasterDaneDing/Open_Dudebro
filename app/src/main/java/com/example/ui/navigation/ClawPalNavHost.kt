@@ -22,34 +22,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.automirrored.outlined.Chat
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.AutoAwesome
-import androidx.compose.material.icons.outlined.Computer
-import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Settings
-import androidx.annotation.DrawableRes
-import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -74,9 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -93,14 +69,18 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.R
 import com.example.data.ai.PromptRefinerService
+import com.example.data.files.ContextDocCache
 import com.example.data.files.DeviceAttachmentReader
 import com.example.data.firebase.ClawPalRepository
 import com.example.data.local.LocalPrefsStore
 import com.example.data.openclaw.DriveBridgeManager
 import com.example.data.openclaw.OpenClawClient
 import com.example.model.FileLinkType
+import com.example.ui.components.WhimsicalBottomDock
+import com.example.ui.components.WhimsicalNavRail
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.BotStudioScreen
+import com.example.ui.screens.CaptainContextScreen
 import com.example.ui.screens.ChatRoomScreen
 import com.example.ui.screens.ChatWorkspaceScreen
 import com.example.ui.screens.ChatsHomeScreen
@@ -127,26 +107,13 @@ import kotlinx.coroutines.withContext
 
 const val ROUTE_HOME = "home"
 const val ROUTE_GENERAL = "general"
+const val ROUTE_CONTEXT = "captain_context"
 const val ROUTE_CHAT = "chat"
 const val ROUTE_ROOM = "room/{roomId}"
 const val ROUTE_TAKEOVER = "takeover"
 const val ROUTE_FILES = "files"
 const val ROUTE_SETTINGS = "settings"
 const val ROUTE_BOT_STUDIO = "bot_studio?botId={botId}"
-
-private data class TopTab(
-  val route: String,
-  val label: String,
-  @DrawableRes val iconRes: Int,
-)
-
-private val topTabs = listOf(
-  TopTab(ROUTE_HOME, "Bot Dudes", R.drawable.ic_min_bot_dudes),
-  TopTab(ROUTE_GENERAL, "General", R.drawable.ic_min_general),
-  TopTab(ROUTE_TAKEOVER, "Takeover", R.drawable.ic_min_takeover),
-  TopTab(ROUTE_FILES, "Files", R.drawable.ic_min_files),
-  TopTab(ROUTE_SETTINGS, "Host", R.drawable.ic_min_host),
-)
 
 internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
   val listener = FirebaseAuth.AuthStateListener { auth ->
@@ -300,6 +267,7 @@ private fun AuthenticatedWorkspace(
           currentUserId = currentUserId,
           wakeLockHelper = WakeLockHelper(app),
           driveBridgeManager = bridgeManager,
+          contextDocCache = ContextDocCache(app.filesDir),
         )
       }
     },
@@ -312,12 +280,16 @@ private fun AuthenticatedWorkspace(
   val botsState by viewModel.botsState.collectAsStateWithLifecycle()
   val chatRoomsState by viewModel.chatRoomsState.collectAsStateWithLifecycle()
   val generalChatsState by viewModel.generalChatsState.collectAsStateWithLifecycle()
+  val contextChatsState by viewModel.contextChatsState.collectAsStateWithLifecycle()
   val selectedBotId by viewModel.selectedBotId.collectAsStateWithLifecycle()
   val selectedGeneralChatId by viewModel.selectedGeneralChatId.collectAsStateWithLifecycle()
+  val selectedContextChatId by viewModel.selectedContextChatId.collectAsStateWithLifecycle()
   val selectedWheelModel by viewModel.selectedWheelModel.collectAsStateWithLifecycle()
   val messagesState by viewModel.messagesState.collectAsStateWithLifecycle()
   val roomMessagesState by viewModel.roomMessagesState.collectAsStateWithLifecycle()
   val generalMessagesState by viewModel.generalMessagesState.collectAsStateWithLifecycle()
+  val contextMessagesState by viewModel.contextMessagesState.collectAsStateWithLifecycle()
+  val activeContextDocs by viewModel.activeContextDocs.collectAsStateWithLifecycle()
   val roomActiveExpressions by viewModel.roomActiveExpressions.collectAsStateWithLifecycle()
   val hostsState by viewModel.hostsState.collectAsStateWithLifecycle()
   val linkedFilesState by viewModel.linkedFilesState.collectAsStateWithLifecycle()
@@ -331,6 +303,9 @@ private fun AuthenticatedWorkspace(
   val isSelectedGeneralBusy by viewModel.isSelectedGeneralBusy.collectAsStateWithLifecycle()
   val generalElapsedSec by viewModel.generalElapsedSec.collectAsStateWithLifecycle()
   val generalStreamingPreview by viewModel.generalStreamingPreview.collectAsStateWithLifecycle()
+  val isSelectedContextBusy by viewModel.isSelectedContextBusy.collectAsStateWithLifecycle()
+  val contextElapsedSec by viewModel.contextElapsedSec.collectAsStateWithLifecycle()
+  val contextStreamingPreview by viewModel.contextStreamingPreview.collectAsStateWithLifecycle()
   val backgroundTasks by viewModel.backgroundTasks.collectAsStateWithLifecycle()
   val cafeSessions by viewModel.cafeSessions.collectAsStateWithLifecycle()
   val isRoomBusy by viewModel.isRoomBusy.collectAsStateWithLifecycle()
@@ -359,12 +334,24 @@ private fun AuthenticatedWorkspace(
   val activeBot = bots.firstOrNull { it.id == selectedBotId } ?: bots.firstOrNull()
   val isHomeRoute = currentRoute == ROUTE_HOME
   val isGeneralRoute = currentRoute == ROUTE_GENERAL
+  val isContextRoute = currentRoute == ROUTE_CONTEXT
   val isTakeoverRoute = currentRoute == ROUTE_TAKEOVER
   val isFilesRoute = currentRoute == ROUTE_FILES
   val isSettingsRoute = currentRoute == ROUTE_SETTINGS
   val isNeonPinkRoute = currentRoute == ROUTE_CHAT || isTakeoverRoute
-  val useNeonChrome = true
-  val showNavChrome = currentRoute in setOf(ROUTE_HOME, ROUTE_GENERAL, ROUTE_TAKEOVER, ROUTE_FILES, ROUTE_SETTINGS)
+  val showNavChrome = currentRoute in setOf(
+    ROUTE_HOME,
+    ROUTE_GENERAL,
+    ROUTE_CONTEXT,
+    ROUTE_TAKEOVER,
+    ROUTE_FILES,
+    ROUTE_SETTINGS,
+  )
+  val busyRoutes = buildSet {
+    if (busyBotIds.isNotEmpty() || isRoomBusy) add(ROUTE_HOME)
+    if (isSelectedGeneralBusy) add(ROUTE_GENERAL)
+    if (isSelectedContextBusy) add(ROUTE_CONTEXT)
+  }
 
   val navigateToTopTab: (String) -> Unit = { targetRoute ->
     if (targetRoute == ROUTE_HOME) {
@@ -427,6 +414,17 @@ private fun AuthenticatedWorkspace(
               )
             )
           }
+          isContextRoute -> {
+            Modifier.background(
+              Brush.verticalGradient(
+                colors = listOf(
+                  Color(0xFF152778),
+                  Color(0xFF2744B8),
+                  Color(0xFF0E1B54),
+                )
+              )
+            )
+          }
           isFilesRoute || isSettingsRoute -> {
             Modifier.background(
               Brush.verticalGradient(
@@ -443,10 +441,11 @@ private fun AuthenticatedWorkspace(
       ),
   ) {
     val useRail = maxWidth >= 600.dp
+    val dockHeight = (maxHeight * 0.24f).coerceIn(158.dp, 214.dp)
 
     Scaffold(
       containerColor = when {
-        isNeonPinkRoute || isGeneralRoute || isFilesRoute || isSettingsRoute -> Color.Transparent
+        isNeonPinkRoute || isGeneralRoute || isContextRoute || isFilesRoute || isSettingsRoute -> Color.Transparent
         isHomeRoute -> Color(0xFF280054)
         else -> MaterialTheme.colorScheme.background
       },
@@ -454,44 +453,12 @@ private fun AuthenticatedWorkspace(
       snackbarHost = { SnackbarHost(snackbarHostState) },
       bottomBar = {
         if (showNavChrome && !useRail) {
-          NavigationBar(
-            windowInsets = WindowInsets.navigationBars,
-            containerColor = Color(0xFF5800C7),
-          ) {
-            topTabs.forEach { tab ->
-              val selected = currentRoute == tab.route
-              NavigationBarItem(
-                selected = selected,
-                onClick = { navigateToTopTab(tab.route) },
-                icon = {
-                  Icon(
-                    painter = painterResource(id = tab.iconRes),
-                    contentDescription = tab.label,
-                    tint = if (selected) Color.White else Color(0xFFFFA8E6),
-                    modifier = Modifier.size(25.dp),
-                  )
-                },
-                label = {
-                  Text(
-                    text = tab.label,
-                    fontSize = 11.sp,
-                    letterSpacing = (-0.2).sp,
-                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                  )
-                },
-                colors = NavigationBarItemDefaults.colors(
-                  selectedIconColor = Color.White,
-                  selectedTextColor = Color.White,
-                  indicatorColor = Color(0xAAFF2E93),
-                  unselectedIconColor = Color(0xFFFFA8E6),
-                  unselectedTextColor = Color(0xFFFFC7EE),
-                ),
-              )
-            }
-          }
+          WhimsicalBottomDock(
+            currentRoute = currentRoute,
+            dockHeight = dockHeight,
+            busyRoutes = busyRoutes,
+            onSelectDestination = navigateToTopTab,
+          )
         }
       },
     ) { innerPadding ->
@@ -501,52 +468,11 @@ private fun AuthenticatedWorkspace(
           .padding(innerPadding),
       ) {
         if (showNavChrome && useRail) {
-          NavigationRail(
-            modifier = Modifier
-              .fillMaxHeight()
-              .background(
-                Brush.verticalGradient(
-                  colors = listOf(
-                    Color(0xFF6B00F5),
-                    Color(0xFF8B1EFF),
-                    Color(0xFF4A00AE),
-                  )
-                )
-              ),
-            containerColor = Color.Transparent,
-          ) {
-            Spacer(Modifier.height(6.dp))
-            topTabs.forEach { tab ->
-              val selected = currentRoute == tab.route
-              NavigationRailItem(
-                selected = selected,
-                onClick = { navigateToTopTab(tab.route) },
-                icon = {
-                  Icon(
-                    painter = painterResource(id = tab.iconRes),
-                    contentDescription = tab.label,
-                    tint = if (selected) Color.White else Color(0xFFFFA8E6),
-                    modifier = Modifier.size(26.dp),
-                  )
-                },
-                label = {
-                  Text(
-                    text = tab.label,
-                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
-                    maxLines = 1,
-                    softWrap = false,
-                  )
-                },
-                colors = NavigationRailItemDefaults.colors(
-                  selectedIconColor = Color.White,
-                  selectedTextColor = Color.White,
-                  indicatorColor = if (tab.route == ROUTE_GENERAL) Color(0xCCFF6D00) else Color(0xCCFF2E93),
-                  unselectedIconColor = Color(0xFFFFA8E6),
-                  unselectedTextColor = Color(0xFFFFC7EE),
-                ),
-              )
-            }
-          }
+          WhimsicalNavRail(
+            currentRoute = currentRoute,
+            busyRoutes = busyRoutes,
+            onSelectDestination = navigateToTopTab,
+          )
         }
 
         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
@@ -625,6 +551,45 @@ private fun AuthenticatedWorkspace(
                   )
                 },
                 onToggleAttachment = viewModel::togglePendingAttachment,
+                onShowBanner = viewModel::showBanner,
+                onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
+              )
+            }
+
+            composable(ROUTE_CONTEXT) {
+              CaptainContextScreen(
+                contextChatsState = contextChatsState,
+                selectedChatId = selectedContextChatId,
+                messagesState = contextMessagesState,
+                activeDocs = activeContextDocs,
+                hostsState = hostsState,
+                linkedFilesState = linkedFilesState,
+                selectedWheelModel = selectedWheelModel,
+                isBusy = isSelectedContextBusy,
+                activeElapsedSec = contextElapsedSec,
+                streamingPreviewText = contextStreamingPreview,
+                connectionFailureBanner = connectionFailureBanner,
+                onSelectChat = viewModel::selectContextChat,
+                onCreateNewCase = { wheel -> viewModel.createContextChat(wheel) },
+                onTogglePinCase = viewModel::togglePinContextChat,
+                onDeleteCase = viewModel::deleteContextChat,
+                onSelectWheelModel = viewModel::selectContextWheelModel,
+                onToggleHostConnectionMode = { host -> viewModel.toggleHostConnectionMode(host) },
+                onSwitchModeAndRetry = { banner ->
+                  viewModel.toggleHostConnectionMode(banner.host) { updatedHost ->
+                    banner.retryAction(updatedHost)
+                  }
+                },
+                onDismissFailureBanner = viewModel::dismissConnectionFailureBanner,
+                onAbortRequest = { viewModel.abortContextRequest() },
+                onAddDeviceDocs = viewModel::addDeviceDocsToContext,
+                onAddDriveUrl = viewModel::addDriveOrCloudDocToContext,
+                onAddVaultFile = viewModel::addVaultOrHostDocToContext,
+                onRefreshDoc = viewModel::refreshContextDoc,
+                onRemoveDoc = viewModel::removeContextDoc,
+                onSendMessage = { thread, text, wheel, host ->
+                  viewModel.sendCaptainContextMessage(thread, text, wheel, host)
+                },
                 onShowBanner = viewModel::showBanner,
                 onOpenHostSettings = { navigateToTopTab(ROUTE_SETTINGS) },
               )

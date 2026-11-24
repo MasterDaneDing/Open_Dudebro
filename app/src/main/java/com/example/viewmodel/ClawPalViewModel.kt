@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.PromptRefinerService
+import com.example.data.files.ContextDocCache
 import com.example.data.files.DeviceAttachmentReader
 import com.example.data.firebase.ClawPalRepository
 import com.example.data.local.LocalPrefsStore
@@ -29,8 +30,12 @@ import com.example.model.CafeSessionStatus
 import com.example.model.CafeEntryKind
 import com.example.model.CafeSpeakerRole
 import com.example.model.CafeTranscriptEntry
+import com.example.model.CaptainContextDocument
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
+import com.example.model.ContextChatMessage
+import com.example.model.ContextChatThread
+import com.example.model.ContextDocStatus
 import com.example.model.FileLinkType
 import com.example.model.GeneralChatMessage
 import com.example.model.GeneralChatThread
@@ -97,6 +102,12 @@ private sealed interface ActiveMessageTarget {
     val messageId: String,
     val modelLabel: String,
   ) : ActiveMessageTarget
+
+  data class ContextTarget(
+    val chatId: String,
+    val messageId: String,
+    val modelLabel: String,
+  ) : ActiveMessageTarget
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -109,6 +120,7 @@ class ClawPalViewModel(
   val currentUserId: String,
   private val wakeLockHelper: WakeLockHelper? = null,
   private val driveBridgeManager: DriveBridgeManager? = null,
+  private val contextDocCache: ContextDocCache? = null,
 ) : ViewModel() {
 
   private val _bridgeStatus = MutableStateFlow<BridgeFolderStatus?>(null)
@@ -147,6 +159,11 @@ class ClawPalViewModel(
     .catch { error -> emit(unwrapFirestoreError("general chats", error)) }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
+  val contextChatsState: StateFlow<UiState<List<ContextChatThread>>> = repository.observeContextChats(currentUserId)
+    .map<List<ContextChatThread>, UiState<List<ContextChatThread>>> { UiState.Success(it) }
+    .catch { error -> emit(unwrapFirestoreError("captain context chats", error)) }
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
   private val _selectedBotId = MutableStateFlow("")
   val selectedBotId: StateFlow<String> = _selectedBotId.asStateFlow()
 
@@ -155,6 +172,9 @@ class ClawPalViewModel(
 
   private val _selectedGeneralChatId = MutableStateFlow("")
   val selectedGeneralChatId: StateFlow<String> = _selectedGeneralChatId.asStateFlow()
+
+  private val _selectedContextChatId = MutableStateFlow("")
+  val selectedContextChatId: StateFlow<String> = _selectedContextChatId.asStateFlow()
 
   private val _selectedWheelModel = MutableStateFlow(WheelLlmOption.OPENCLAW_DEFAULT)
   val selectedWheelModel: StateFlow<WheelLlmOption> = _selectedWheelModel.asStateFlow()
@@ -191,6 +211,18 @@ class ClawPalViewModel(
         repository.observeGeneralMessages(currentUserId, chatId)
           .map<List<GeneralChatMessage>, UiState<List<GeneralChatMessage>>> { UiState.Success(it) }
           .catch { error -> emit(unwrapFirestoreError("general messages", error)) }
+      }
+    }
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+  val contextMessagesState: StateFlow<UiState<List<ContextChatMessage>>> = _selectedContextChatId
+    .flatMapLatest { chatId ->
+      if (chatId.isBlank()) {
+        flowOf(UiState.Success(emptyList()))
+      } else {
+        repository.observeContextMessages(currentUserId, chatId)
+          .map<List<ContextChatMessage>, UiState<List<ContextChatMessage>>> { UiState.Success(it) }
+          .catch { error -> emit(unwrapFirestoreError("captain context messages", error)) }
       }
     }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
@@ -242,6 +274,31 @@ class ClawPalViewModel(
     map[id] ?: 0
   }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), 0)
 
+  // Concurrent per-Captain-Context-Case lanes + Document Vault state
+  private val contextJobs = ConcurrentHashMap<String, Job>()
+  private val contextElapsedJobs = ConcurrentHashMap<String, Job>()
+  private val contextTargets = ConcurrentHashMap<String, ActiveMessageTarget.ContextTarget>()
+  private val _busyContextChatIds = MutableStateFlow<Set<String>>(emptySet())
+  private val _contextStreamingPreviews = MutableStateFlow<Map<String, String>>(emptyMap())
+  private val _contextElapsedSecs = MutableStateFlow<Map<String, Int>>(emptyMap())
+  private val _contextDocsByChatId = MutableStateFlow<Map<String, List<CaptainContextDocument>>>(emptyMap())
+
+  val isSelectedContextBusy: StateFlow<Boolean> = combine(_selectedContextChatId, _busyContextChatIds) { id, set ->
+    id.isNotBlank() && id in set
+  }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), false)
+
+  val contextStreamingPreview: StateFlow<String?> = combine(_selectedContextChatId, _contextStreamingPreviews) { id, map ->
+    map[id]
+  }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+
+  val contextElapsedSec: StateFlow<Int> = combine(_selectedContextChatId, _contextElapsedSecs) { id, map ->
+    map[id] ?: 0
+  }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), 0)
+
+  val activeContextDocs: StateFlow<List<CaptainContextDocument>> = combine(_selectedContextChatId, _contextDocsByChatId) { id, map ->
+    map[id.ifBlank { "__draft__" }].orEmpty()
+  }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
   // Isolated background sub-agent tasks (`agent:<bot_dude_id>:spawn_<taskId>`)
   private val _backgroundTasks = MutableStateFlow<List<BackgroundAgentTask>>(emptyList())
   val backgroundTasks: StateFlow<List<BackgroundAgentTask>> = _backgroundTasks.asStateFlow()
@@ -263,11 +320,13 @@ class ClawPalViewModel(
   val isBusy: StateFlow<Boolean> = combine(
     _busyBotIds,
     _busyGeneralChatIds,
+    _busyContextChatIds,
     cafeSessions,
     _nonChatBusy,
-  ) { botsBusy, generalBusy, roomsMap, nonChat ->
+  ) { botsBusy, generalBusy, contextBusy, roomsMap, nonChat ->
     botsBusy.isNotEmpty() ||
       generalBusy.isNotEmpty() ||
+      contextBusy.isNotEmpty() ||
       roomsMap.values.any { it.status == CafeSessionStatus.RUNNING } ||
       nonChat
   }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), false)
@@ -400,6 +459,16 @@ class ClawPalViewModel(
         }
       }
     }
+    viewModelScope.launch {
+      combine(_selectedContextChatId, contextChatsState) { chatId, chatsUi ->
+        val list = (chatsUi as? UiState.Success)?.data.orEmpty()
+        list.firstOrNull { it.id == chatId }
+      }.collect { thread ->
+        if (thread != null) {
+          hydrateDocsForThread(thread)
+        }
+      }
+    }
   }
 
   fun selectBot(botId: String) {
@@ -441,6 +510,25 @@ class ClawPalViewModel(
     if (chatId.isNotBlank()) {
       viewModelScope.launch {
         repository.updateGeneralChatWheel(currentUserId, chatId, option)
+      }
+    }
+  }
+
+  fun selectContextChat(chatId: String) {
+    _selectedContextChatId.value = chatId
+    val thread = (contextChatsState.value as? UiState.Success)?.data?.firstOrNull { it.id == chatId }
+    if (thread != null) {
+      _selectedWheelModel.value = thread.wheelModelEnum
+      hydrateDocsForThread(thread)
+    }
+  }
+
+  fun selectContextWheelModel(option: WheelLlmOption, activeContextChatId: String? = null) {
+    _selectedWheelModel.value = option
+    val chatId = activeContextChatId?.takeIf { it.isNotBlank() } ?: _selectedContextChatId.value
+    if (chatId.isNotBlank()) {
+      viewModelScope.launch {
+        repository.updateContextChatWheel(currentUserId, chatId, option)
       }
     }
   }
@@ -564,10 +652,36 @@ class ClawPalViewModel(
     _controlLog.value = (listOf("[ABORT] Stopped sub-agent ${task.subSessionKey}.") + _controlLog.value).take(25)
   }
 
+  fun abortContextRequest(chatId: String = _selectedContextChatId.value) {
+    if (chatId.isBlank()) return
+    openClawClient.abortSession("conv:ctx_$chatId")
+    contextJobs.remove(chatId)?.cancel()
+    stopContextElapsedTimer(chatId)
+    _busyContextChatIds.update { it - chatId }
+    val target = contextTargets.remove(chatId)
+    if (target != null) {
+      viewModelScope.launch {
+        withContext(NonCancellable) {
+          repository.updateContextMessage(
+            userId = currentUserId,
+            chatId = target.chatId,
+            messageId = target.messageId,
+            rawText = "Aborted by user.",
+            modelLabel = target.modelLabel,
+            status = MessageStatus.WARNING,
+          )
+        }
+      }
+    }
+    _controlLog.value = (listOf("[ABORT] Cancelled Captain Context stream cleanly.") + _controlLog.value).take(25)
+    _statusBanner.value = "Captain Context request aborted."
+  }
+
   fun abortActiveRequest() {
     openClawClient.abortActiveRequest()
     botJobs.keys.toList().forEach { abortBotRequest(it) }
     generalJobs.keys.toList().forEach { abortGeneralRequest(it) }
+    contextJobs.keys.toList().forEach { abortContextRequest(it) }
     backgroundTaskJobs.keys.toList().forEach { abortBackgroundTask(it) }
     cafeOrchestrator.abortAll { sessionKey -> openClawClient.abortSession(sessionKey) }
     wakeLockHelper?.forceReleaseAll()
@@ -636,6 +750,38 @@ class ClawPalViewModel(
     } finally {
       stopGeneralElapsedTimer(chatId)
       generalTargets.remove(chatId)
+    }
+  }
+
+  private fun startContextElapsedTimer(chatId: String) {
+    contextElapsedJobs.remove(chatId)?.cancel()
+    _contextElapsedSecs.update { it + (chatId to 0) }
+    _contextStreamingPreviews.update { it - chatId }
+    contextElapsedJobs[chatId] = viewModelScope.launch {
+      while (true) {
+        delay(1000L)
+        _contextElapsedSecs.update { map -> map + (chatId to ((map[chatId] ?: 0) + 1)) }
+      }
+    }
+  }
+
+  private fun stopContextElapsedTimer(chatId: String) {
+    contextElapsedJobs.remove(chatId)?.cancel()
+    _contextElapsedSecs.update { it - chatId }
+    _contextStreamingPreviews.update { it - chatId }
+  }
+
+  private suspend fun <T> withContextRequestLifecycle(chatId: String, block: suspend () -> T): T {
+    startContextElapsedTimer(chatId)
+    return try {
+      if (wakeLockHelper != null) {
+        wakeLockHelper.withPartialWakeLock { block() }
+      } else {
+        block()
+      }
+    } finally {
+      stopContextElapsedTimer(chatId)
+      contextTargets.remove(chatId)
     }
   }
 
@@ -2210,6 +2356,547 @@ class ClawPalViewModel(
       }
       generalJobs[resolvedChatId] = streamJob
       streamJob.invokeOnCompletion { generalJobs.remove(resolvedChatId, streamJob) }
+    }
+  }
+
+  private fun hydrateDocsForThread(thread: ContextChatThread) {
+    val chatKey = thread.id.ifBlank { return }
+    val refs = thread.docRefs
+    if (refs.isEmpty()) return
+    val current = _contextDocsByChatId.value[chatKey].orEmpty()
+    val currentByRef = current.associateBy { it.uriOrPath }
+    val missingRefs = refs.filter { ref -> currentByRef[ref] == null }
+    if (missingRefs.isEmpty()) return
+
+    val initialList = refs.mapIndexed { idx, ref ->
+      val label = thread.docLabels.getOrNull(idx).orEmpty()
+      currentByRef[ref]
+        ?: contextDocCache?.load(currentUserId, ref)
+        ?: CaptainContextDocument(
+          id = "ctxdoc_${ref.hashCode().toUInt()}",
+          displayName = label.ifBlank { ref.substringAfterLast('/').ifBlank { "Document" } },
+          uriOrPath = ref,
+          linkType = if (ref.startsWith("http", true)) FileLinkType.CLOUD_URL
+          else if (ref.startsWith("content://", true)) FileLinkType.ANDROID_ATTACHMENT
+          else FileLinkType.HOST_PATH,
+          status = ContextDocStatus.LOADING,
+          statusDetail = "Loading document...",
+        )
+    }
+    _contextDocsByChatId.update { it + (chatKey to initialList) }
+
+    val toRead = initialList.filter { it.status == ContextDocStatus.LOADING }
+    if (toRead.isEmpty()) return
+    val host = currentPrimaryHost()
+    viewModelScope.launch {
+      toRead.forEach { stub ->
+        val loaded = attachmentReader.readContextDocument(
+          docRef = stub.uriOrPath,
+          displayNameHint = stub.displayName,
+          linkType = stub.linkType,
+          host = host,
+        )
+        if (loaded.status == ContextDocStatus.READY) {
+          contextDocCache?.save(currentUserId, loaded)
+        }
+        _contextDocsByChatId.update { map ->
+          val list = map[chatKey].orEmpty().map { existing ->
+            if (existing.uriOrPath == stub.uriOrPath) loaded else existing
+          }
+          map + (chatKey to list)
+        }
+      }
+    }
+  }
+
+  fun createContextChat(
+    wheelOption: WheelLlmOption = _selectedWheelModel.value,
+    initialDocs: List<CaptainContextDocument> = emptyList(),
+    onCreated: (String) -> Unit = {},
+  ) {
+    viewModelScope.launch {
+      _nonChatBusy.value = true
+      val draftDocs = initialDocs.ifEmpty { _contextDocsByChatId.value["__draft__"].orEmpty() }
+      val title = draftDocs.firstOrNull()?.displayName?.take(60)?.ifBlank { "New Context Case" }
+        ?: "New Context Case"
+      val thread = ContextChatThread(
+        userId = currentUserId,
+        title = title,
+        pinned = false,
+        lastMessagePreview = if (draftDocs.isNotEmpty()) "${draftDocs.size} doc(s) loaded" else "",
+        wheelModel = wheelOption.name,
+        docLabels = draftDocs.map { it.displayName },
+        docRefs = draftDocs.map { it.uriOrPath },
+      )
+      repository.createContextChat(currentUserId, thread)
+        .onSuccess { newId ->
+          if (draftDocs.isNotEmpty()) {
+            _contextDocsByChatId.update { map ->
+              (map - "__draft__") + (newId to draftDocs)
+            }
+          }
+          _selectedContextChatId.value = newId
+          _selectedWheelModel.value = wheelOption
+          onCreated(newId)
+        }
+        .onFailure { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not create Captain Context case."
+        }
+      _nonChatBusy.value = false
+    }
+  }
+
+  fun togglePinContextChat(chatId: String, pinned: Boolean) {
+    viewModelScope.launch {
+      repository.togglePinContextChat(currentUserId, chatId, pinned)
+        .onFailure { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not update pin state."
+        }
+    }
+  }
+
+  fun deleteContextChat(chatId: String) {
+    if (chatId in _busyContextChatIds.value) {
+      abortContextRequest(chatId)
+    }
+    viewModelScope.launch {
+      repository.deleteContextChat(currentUserId, chatId)
+        .onSuccess {
+          _contextDocsByChatId.update { it - chatId }
+          if (_selectedContextChatId.value == chatId) {
+            _selectedContextChatId.value = ""
+          }
+          _statusBanner.value = "Context case deleted."
+        }
+        .onFailure { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not delete context case."
+        }
+    }
+  }
+
+  private suspend fun ensureContextChatForDocs(
+    requestedChatId: String,
+    initialLabel: String,
+  ): String? {
+    if (requestedChatId.isNotBlank()) return requestedChatId
+    val draftDocs = _contextDocsByChatId.value["__draft__"].orEmpty()
+    val createdId = repository.createContextChat(
+      currentUserId,
+      ContextChatThread(
+        userId = currentUserId,
+        title = initialLabel.take(60).ifBlank { "New Context Case" },
+        pinned = false,
+        lastMessagePreview = "Loading document vault...",
+        wheelModel = _selectedWheelModel.value.name,
+        docLabels = draftDocs.map { it.displayName },
+        docRefs = draftDocs.map { it.uriOrPath },
+      ),
+    ).getOrElse { err ->
+      _statusBanner.value = err.localizedMessage ?: "Could not create Captain Context case."
+      return null
+    }
+    if (draftDocs.isNotEmpty()) {
+      _contextDocsByChatId.update { (it - "__draft__") + (createdId to draftDocs) }
+    }
+    _selectedContextChatId.value = createdId
+    return createdId
+  }
+
+  private suspend fun syncContextDocsToFirestore(chatId: String, docs: List<CaptainContextDocument>) {
+    if (chatId.isBlank() || chatId == "__draft__") return
+    repository.updateContextChatDocs(
+      userId = currentUserId,
+      chatId = chatId,
+      docLabels = docs.map { it.displayName },
+      docRefs = docs.map { it.uriOrPath },
+    )
+  }
+
+  fun addDeviceDocsToContext(
+    chatId: String,
+    items: List<Triple<String, String, String>>,
+  ) {
+    if (items.isEmpty()) return
+    viewModelScope.launch {
+      val resolvedChatId = ensureContextChatForDocs(chatId, items.first().first) ?: return@launch
+      val host = currentPrimaryHost()
+      items.forEach { (name, uri, mime) ->
+        val stub = CaptainContextDocument(
+          id = "ctxdoc_${uri.hashCode().toUInt()}",
+          displayName = name.ifBlank { "Document" },
+          uriOrPath = uri,
+          linkType = FileLinkType.ANDROID_ATTACHMENT,
+          mimeType = mime,
+          status = ContextDocStatus.LOADING,
+          statusDetail = "Reading file...",
+        )
+        upsertContextDocInMemory(resolvedChatId, stub)
+        val loaded = attachmentReader.readContextDocument(
+          docRef = uri,
+          displayNameHint = name,
+          mimeHint = mime,
+          linkType = FileLinkType.ANDROID_ATTACHMENT,
+          host = host,
+        )
+        if (loaded.status == ContextDocStatus.READY) {
+          contextDocCache?.save(currentUserId, loaded)
+          _statusBanner.value = "Captain Context loaded ${loaded.displayName}!"
+        } else {
+          _statusBanner.value = "${loaded.displayName}: ${loaded.statusDetail}"
+        }
+        val updated = upsertContextDocInMemory(resolvedChatId, loaded)
+        syncContextDocsToFirestore(resolvedChatId, updated)
+      }
+    }
+  }
+
+  fun addDriveOrCloudDocToContext(
+    chatId: String,
+    rawUrl: String,
+    customTitle: String = "",
+  ) {
+    val cleanUrl = rawUrl.trim()
+    if (cleanUrl.isBlank()) return
+    viewModelScope.launch {
+      val hintName = customTitle.trim().ifBlank {
+        cleanUrl.substringBefore('?').substringAfterLast('/').ifBlank { "Google Drive Document" }
+      }
+      val resolvedChatId = ensureContextChatForDocs(chatId, hintName) ?: return@launch
+      val stub = CaptainContextDocument(
+        id = "ctxdoc_${cleanUrl.hashCode().toUInt()}",
+        displayName = hintName,
+        uriOrPath = cleanUrl,
+        linkType = FileLinkType.CLOUD_URL,
+        status = ContextDocStatus.LOADING,
+        statusDetail = "Fetching document...",
+        isGoogleDriveUrl = com.example.data.files.GoogleDriveDocumentFetcher.isGoogleDriveOrDocsUrl(cleanUrl),
+      )
+      upsertContextDocInMemory(resolvedChatId, stub)
+
+      val loaded = attachmentReader.readContextDocument(
+        docRef = cleanUrl,
+        displayNameHint = customTitle.trim(),
+        linkType = FileLinkType.CLOUD_URL,
+        host = currentPrimaryHost(),
+      )
+      if (loaded.status == ContextDocStatus.READY) {
+        contextDocCache?.save(currentUserId, loaded)
+        _statusBanner.value = "Loaded ${loaded.displayName} (${loaded.charCount} chars)!"
+      } else {
+        _statusBanner.value = loaded.statusDetail.ifBlank { "Could not read $hintName" }
+      }
+      val updated = upsertContextDocInMemory(resolvedChatId, loaded)
+      syncContextDocsToFirestore(resolvedChatId, updated)
+    }
+  }
+
+  fun addVaultOrHostDocToContext(
+    chatId: String,
+    linkedFile: LinkedFile,
+  ) {
+    viewModelScope.launch {
+      val resolvedChatId = ensureContextChatForDocs(chatId, linkedFile.displayName) ?: return@launch
+      val stub = CaptainContextDocument(
+        id = "ctxdoc_${linkedFile.uriOrPath.hashCode().toUInt()}",
+        displayName = linkedFile.displayName,
+        uriOrPath = linkedFile.uriOrPath,
+        linkType = linkedFile.linkTypeEnum,
+        mimeType = linkedFile.mimeOrExt,
+        status = ContextDocStatus.LOADING,
+        statusDetail = "Loading from Vault...",
+      )
+      upsertContextDocInMemory(resolvedChatId, stub)
+      val loaded = attachmentReader.readContextDocument(
+        docRef = linkedFile.uriOrPath,
+        displayNameHint = linkedFile.displayName,
+        mimeHint = linkedFile.mimeOrExt,
+        linkType = linkedFile.linkTypeEnum,
+        host = currentPrimaryHost(),
+      )
+      if (loaded.status == ContextDocStatus.READY) {
+        contextDocCache?.save(currentUserId, loaded)
+        _statusBanner.value = "Loaded ${loaded.displayName} into Captain Context!"
+      }
+      val updated = upsertContextDocInMemory(resolvedChatId, loaded)
+      syncContextDocsToFirestore(resolvedChatId, updated)
+    }
+  }
+
+  fun refreshContextDoc(chatId: String, docId: String) {
+    val chatKey = chatId.ifBlank { return }
+    val target = _contextDocsByChatId.value[chatKey].orEmpty().firstOrNull { it.id == docId } ?: return
+    viewModelScope.launch {
+      upsertContextDocInMemory(
+        chatKey,
+        target.copy(status = ContextDocStatus.LOADING, statusDetail = "Refreshing document..."),
+      )
+      val refreshed = attachmentReader.readContextDocument(
+        docRef = target.uriOrPath,
+        displayNameHint = target.displayName,
+        mimeHint = target.mimeType,
+        linkType = target.linkType,
+        host = currentPrimaryHost(),
+      )
+      if (refreshed.status == ContextDocStatus.READY) {
+        contextDocCache?.save(currentUserId, refreshed)
+        _statusBanner.value = "Refreshed ${refreshed.displayName}!"
+      } else {
+        _statusBanner.value = refreshed.statusDetail
+      }
+      val updated = upsertContextDocInMemory(chatKey, refreshed)
+      syncContextDocsToFirestore(chatKey, updated)
+    }
+  }
+
+  fun removeContextDoc(chatId: String, docId: String) {
+    val chatKey = chatId.ifBlank { "__draft__" }
+    val removed = _contextDocsByChatId.value[chatKey].orEmpty().firstOrNull { it.id == docId }
+    val remaining = _contextDocsByChatId.value[chatKey].orEmpty().filterNot { it.id == docId }
+    _contextDocsByChatId.update { it + (chatKey to remaining) }
+    if (removed != null) {
+      contextDocCache?.remove(currentUserId, removed.uriOrPath)
+    }
+    if (chatKey != "__draft__") {
+      viewModelScope.launch {
+        syncContextDocsToFirestore(chatKey, remaining)
+      }
+    }
+  }
+
+  private fun upsertContextDocInMemory(
+    chatKey: String,
+    doc: CaptainContextDocument,
+  ): List<CaptainContextDocument> {
+    var resultList: List<CaptainContextDocument> = emptyList()
+    _contextDocsByChatId.update { map ->
+      val current = map[chatKey].orEmpty()
+      val replaced = if (current.any { it.uriOrPath == doc.uriOrPath }) {
+        current.map { if (it.uriOrPath == doc.uriOrPath) doc else it }
+      } else {
+        (current + doc).take(20)
+      }
+      resultList = replaced
+      map + (chatKey to replaced)
+    }
+    return resultList
+  }
+
+  private fun extractCitedDocsFromReply(
+    replyText: String,
+    docs: List<CaptainContextDocument>,
+  ): List<String> {
+    if (docs.isEmpty()) return emptyList()
+    val explicitSources = Regex("""\[Source:\s*([^\]]+)\]""", RegexOption.IGNORE_CASE)
+      .findAll(replyText)
+      .map { it.groupValues[1].trim() }
+      .toList()
+    return docs.mapNotNull { doc ->
+      val label = doc.displayName
+      val matched = explicitSources.any { src ->
+        src.equals(label, ignoreCase = true) ||
+          src.contains(label, ignoreCase = true) ||
+          label.contains(src, ignoreCase = true)
+      } || replyText.contains(label, ignoreCase = true)
+      if (matched) label else null
+    }.distinct().take(20)
+  }
+
+  fun sendCaptainContextMessage(
+    chat: ContextChatThread?,
+    rawText: String,
+    wheelOption: WheelLlmOption,
+    activeHost: OpenClawHost?,
+    onThreadReady: (String) -> Unit = {},
+  ) {
+    if (localPrefs.value.hostPaused) {
+      _statusBanner.value = "Host queue is paused — tap Resume in Takeover before sending."
+      return
+    }
+    val trimmed = rawText.trim()
+    if (trimmed.isBlank()) return
+
+    val history = (contextMessagesState.value as? UiState.Success)?.data.orEmpty()
+    _connectionFailureBanner.value = null
+
+    viewModelScope.launch {
+      val resolvedChatId: String
+      val isDefaultTitle: Boolean
+      val initialDocs = if (chat != null && chat.id.isNotBlank()) {
+        _contextDocsByChatId.value[chat.id].orEmpty()
+      } else {
+        _contextDocsByChatId.value["__draft__"].orEmpty()
+      }
+
+      if (chat == null || chat.id.isBlank()) {
+        val initialTitle = trimmed.replace('\n', ' ').trim().take(48).ifBlank { "Context Case" }
+        val newIdRes = repository.createContextChat(
+          currentUserId,
+          ContextChatThread(
+            userId = currentUserId,
+            title = initialTitle,
+            pinned = false,
+            lastMessagePreview = trimmed.take(120),
+            wheelModel = wheelOption.name,
+            docLabels = initialDocs.map { it.displayName },
+            docRefs = initialDocs.map { it.uriOrPath },
+          ),
+        )
+        resolvedChatId = newIdRes.getOrElse { err ->
+          _statusBanner.value = err.localizedMessage ?: "Could not create Captain Context case."
+          return@launch
+        }
+        if (initialDocs.isNotEmpty()) {
+          _contextDocsByChatId.update { (it - "__draft__") + (resolvedChatId to initialDocs) }
+        }
+        _selectedContextChatId.value = resolvedChatId
+        onThreadReady(resolvedChatId)
+        isDefaultTitle = false
+      } else {
+        resolvedChatId = chat.id
+        isDefaultTitle = chat.title == "New Context Case"
+      }
+
+      if (contextJobs[resolvedChatId]?.isActive == true) {
+        _statusBanner.value = "Captain Context is already analyzing this case — Abort or open another case!"
+        return@launch
+      }
+
+      val streamJob = viewModelScope.launch {
+        _busyContextChatIds.update { it + resolvedChatId }
+        try {
+          val docsBeforeSend = _contextDocsByChatId.value[resolvedChatId].orEmpty()
+          // Ensure any LOADING docs are fetched before sending to OpenClaw
+          val preparedDocs = docsBeforeSend.map { doc ->
+            if (doc.status == ContextDocStatus.LOADING) {
+              val read = attachmentReader.readContextDocument(
+                docRef = doc.uriOrPath,
+                displayNameHint = doc.displayName,
+                mimeHint = doc.mimeType,
+                linkType = doc.linkType,
+                host = activeHost,
+                promptHint = trimmed,
+              )
+              if (read.status == ContextDocStatus.READY) {
+                contextDocCache?.save(currentUserId, read)
+              }
+              upsertContextDocInMemory(resolvedChatId, read)
+              read
+            } else {
+              doc
+            }
+          }
+
+          val docLabelsUsed = preparedDocs.filter { it.status == ContextDocStatus.READY }.map { it.displayName }
+          val autoTitle = if (isDefaultTitle) trimmed.replace('\n', ' ').trim().take(48) else null
+          repository.addContextMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            message = ContextChatMessage(
+              userId = currentUserId,
+              chatId = resolvedChatId,
+              sender = MessageSender.USER.name,
+              rawText = trimmed.take(4000),
+              modelLabel = wheelOption.fullLabel,
+              status = MessageStatus.IDLE.name,
+              citedDocs = docLabelsUsed,
+            ),
+            newTitleIfDefault = autoTitle,
+          ).onFailure { err ->
+            _statusBanner.value = err.localizedMessage ?: "Could not save message."
+            return@launch
+          }
+
+          val assistantMsgId = repository.addContextMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            message = ContextChatMessage(
+              userId = currentUserId,
+              chatId = resolvedChatId,
+              sender = MessageSender.BOT.name,
+              rawText = "Captain Context is scanning ${preparedDocs.size} document(s)...",
+              modelLabel = wheelOption.fullLabel,
+              status = MessageStatus.DISPATCHED.name,
+              citedDocs = docLabelsUsed,
+            ),
+          ).getOrElse { err ->
+            _statusBanner.value = err.localizedMessage ?: "Could not create Captain Context reply."
+            return@launch
+          }
+
+          val bridgeActive = localPrefs.value.driveBridgeEnabled && localPrefs.value.driveBridgeFolderUri.isNotBlank()
+          val effectiveHost = activeHost ?: if (bridgeActive) {
+            OpenClawHost(id = "bridge", label = "Drive Bridge", baseUrl = "")
+          } else null
+          if (effectiveHost == null || (effectiveHost.effectiveBaseUrl.isBlank() && !bridgeActive)) {
+            repository.updateContextMessage(
+              userId = currentUserId,
+              chatId = resolvedChatId,
+              messageId = assistantMsgId,
+              rawText = "OpenClaw host URL isn't configured yet. Add your LAN or Tailscale gateway URL (or enable Drive Bridge) in the Host tab.",
+              modelLabel = wheelOption.fullLabel,
+              status = MessageStatus.WARNING,
+            )
+            return@launch
+          }
+
+          contextTargets[resolvedChatId] = ActiveMessageTarget.ContextTarget(
+            resolvedChatId,
+            assistantMsgId,
+            wheelOption.fullLabel,
+          )
+          val replyRes = withContextRequestLifecycle(resolvedChatId) {
+            openClawClient.sendCaptainContextChat(
+              host = effectiveHost,
+              userId = currentUserId,
+              conversationId = resolvedChatId,
+              contextDocs = preparedDocs,
+              history = history,
+              userPrompt = trimmed,
+              wheelOption = wheelOption,
+              providerKeys = currentProviderKeys(),
+              onPartialText = { partial ->
+                _contextStreamingPreviews.update { it + (resolvedChatId to partial) }
+              },
+            )
+          }
+
+          replyRes.onSuccess { res ->
+            val cited = extractCitedDocsFromReply(res.replyText, preparedDocs)
+              .ifEmpty { docLabelsUsed }
+            repository.updateContextMessage(
+              userId = currentUserId,
+              chatId = resolvedChatId,
+              messageId = assistantMsgId,
+              rawText = res.replyText,
+              modelLabel = res.mediaModel?.takeIf { it.isNotBlank() } ?: wheelOption.fullLabel,
+              status = MessageStatus.COMPLETED,
+              citedDocs = cited,
+              mediaUrl = res.mediaUrl,
+              mediaType = res.mediaType,
+              mediaPrompt = res.mediaPrompt,
+              mediaModel = res.mediaModel,
+              mediaDurationSec = res.mediaDurationSec,
+            )
+            archiveGeneratedMediaIfPresent(res, "Captain Context", trimmed)
+          }.onFailure { err ->
+            val cleanMsg = maybeShowFastConnectBanner(err, effectiveHost) { switchedHost ->
+              sendCaptainContextMessage(chat, trimmed, wheelOption, switchedHost, onThreadReady)
+            }
+            repository.updateContextMessage(
+              userId = currentUserId,
+              chatId = resolvedChatId,
+              messageId = assistantMsgId,
+              rawText = cleanMsg,
+              modelLabel = wheelOption.fullLabel,
+              status = MessageStatus.FAILED,
+            )
+          }
+        } finally {
+          _busyContextChatIds.update { it - resolvedChatId }
+        }
+      }
+      contextJobs[resolvedChatId] = streamJob
+      streamJob.invokeOnCompletion { contextJobs.remove(resolvedChatId, streamJob) }
     }
   }
 

@@ -178,6 +178,27 @@ service cloud.firestore {
              isValidOptionalMediaFields(data);
     }
 
+    function isValidContextChat(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 80 &&
+             data.pinned is bool &&
+             data.lastMessagePreview is string && data.lastMessagePreview.size() <= 300 &&
+             data.wheelModel in ['OPENCLAW_DEFAULT', 'OPENCLAW_LOCAL', 'OPENCLAW_THIRD_PARTY'] &&
+             isValidStringList(data.docLabels, 20, 120) &&
+             isValidStringList(data.docRefs, 20, 500);
+    }
+
+    function isValidContextMessage(data, userId, chatId) {
+      return data.userId is string && data.userId == userId &&
+             data.chatId is string && data.chatId == chatId &&
+             data.sender in ['USER', 'BOT', 'SYSTEM'] &&
+             data.rawText is string && data.rawText.size() >= 1 && data.rawText.size() <= 4000 &&
+             data.modelLabel is string && data.modelLabel.size() <= 80 &&
+             data.status in ['IDLE', 'PARSING', 'DISPATCHED', 'COMPLETED', 'WARNING', 'FAILED'] &&
+             isValidStringList(data.citedDocs, 20, 120) &&
+             isValidOptionalMediaFields(data);
+    }
+
     // --- Collection Rules ---
     match /users/{userId}/bots/{botId} {
       allow list: if isOwner(userId);
@@ -527,6 +548,77 @@ service cloud.firestore {
                          isValidTimestamp(incoming().updatedAt) &&
                          incoming().diff(existing()).affectedKeys().hasOnly([
                            'rawText', 'modelLabel', 'status',
+                           'mediaUrl', 'mediaType', 'mediaPrompt',
+                           'mediaModel', 'mediaDurationSec', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(chatId) && isValidId(messageId);
+      }
+    }
+
+    match /users/{userId}/contextChats/{chatId} {
+      allow list: if isOwner(userId);
+      allow get: if isOwner(userId) && isValidId(chatId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(chatId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'title', 'pinned', 'lastMessagePreview',
+                         'wheelModel', 'docLabels', 'docRefs', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'title', 'pinned', 'lastMessagePreview',
+                         'wheelModel', 'docLabels', 'docRefs', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidContextChat(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(chatId) &&
+                       isValidContextChat(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'title', 'pinned', 'lastMessagePreview', 'wheelModel',
+                         'docLabels', 'docRefs', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(chatId);
+
+      match /messages/{messageId} {
+        allow list: if isOwner(userId) && isValidId(chatId);
+        allow get: if isOwner(userId) && isValidId(chatId) && isValidId(messageId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(chatId) &&
+                         isValidId(messageId) &&
+                         exists(/databases/$(database)/documents/users/$(userId)/contextChats/$(chatId)) &&
+                         incoming().keys().hasAll([
+                           'userId', 'chatId', 'sender', 'rawText',
+                           'modelLabel', 'status', 'citedDocs', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'chatId', 'sender', 'rawText',
+                           'modelLabel', 'status', 'citedDocs', 'mediaUrl', 'mediaType',
+                           'mediaPrompt', 'mediaModel', 'mediaDurationSec',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidContextMessage(incoming(), userId, chatId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(chatId) &&
+                         isValidId(messageId) &&
+                         isValidContextMessage(incoming(), userId, chatId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().chatId == existing().chatId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'rawText', 'modelLabel', 'status', 'citedDocs',
                            'mediaUrl', 'mediaType', 'mediaPrompt',
                            'mediaModel', 'mediaDurationSec', 'updatedAt'
                          ]);

@@ -308,6 +308,48 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "chatId", "sender", "rawText", "modelLabel", "status", "createdAt", "updatedAt"]
+    },
+    "ContextChatThread": {
+      "title": "ContextChatThread",
+      "description": "Captain Context document-grounded research thread with active document references.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "pinned": { "type": "boolean" },
+        "lastMessagePreview": { "type": "string" },
+        "wheelModel": {
+          "type": "string",
+          "enum": ["OPENCLAW_DEFAULT", "OPENCLAW_LOCAL", "OPENCLAW_THIRD_PARTY"]
+        },
+        "docLabels": { "type": "array" },
+        "docRefs": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "pinned", "lastMessagePreview", "wheelModel", "docLabels", "docRefs", "createdAt", "updatedAt"]
+    },
+    "ContextChatMessage": {
+      "title": "ContextChatMessage",
+      "description": "Message inside a Captain Context document-grounded thread.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "chatId": { "type": "string" },
+        "sender": { "type": "string", "enum": ["USER", "BOT", "SYSTEM"] },
+        "rawText": { "type": "string" },
+        "modelLabel": { "type": "string" },
+        "status": { "type": "string", "enum": ["IDLE", "PARSING", "DISPATCHED", "COMPLETED", "WARNING", "FAILED"] },
+        "citedDocs": { "type": "array" },
+        "mediaUrl": { "type": "string" },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO", "AUDIO", "DOCUMENT"] },
+        "mediaPrompt": { "type": "string" },
+        "mediaModel": { "type": "string" },
+        "mediaDurationSec": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "chatId", "sender", "rawText", "modelLabel", "status", "citedDocs", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -334,6 +376,14 @@
     "/users/{userId}/generalChats/{chatId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/GeneralChatMessage" },
       "description": "Messages inside a general Q&A chat thread."
+    },
+    "/users/{userId}/contextChats/{chatId}": {
+      "schema": { "$ref": "#/entities/ContextChatThread" },
+      "description": "Captain Context document-grounded chat threads."
+    },
+    "/users/{userId}/contextChats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ContextChatMessage" },
+      "description": "Messages inside a Captain Context chat thread."
     },
     "/users/{userId}/hosts/{hostId}": {
       "schema": { "$ref": "#/entities/OpenClawHost" },

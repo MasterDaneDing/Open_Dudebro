@@ -16,6 +16,8 @@ import android.webkit.WebViewClient
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
+import com.example.model.CaptainContextDocument
+import com.example.model.ContextDocStatus
 import com.example.model.FileLinkType
 import com.example.model.LinkedFile
 import com.example.model.MediaAttachmentPayload
@@ -68,6 +70,152 @@ class DeviceAttachmentReader(private val context: Context) {
     }
   }
 
+  suspend fun readContextDocument(
+    docRef: String,
+    displayNameHint: String = "",
+    mimeHint: String = "",
+    linkType: FileLinkType? = null,
+    host: OpenClawHost? = null,
+    promptHint: String = "",
+    httpClient: OkHttpClient? = null,
+  ): CaptainContextDocument = withContext(Dispatchers.IO) {
+    val cleanRef = docRef.trim()
+    val inferredLinkType = linkType ?: when {
+      cleanRef.startsWith("http://", ignoreCase = true) ||
+        cleanRef.startsWith("https://", ignoreCase = true) -> FileLinkType.CLOUD_URL
+      cleanRef.startsWith("content://", ignoreCase = true) -> FileLinkType.ANDROID_ATTACHMENT
+      else -> FileLinkType.HOST_PATH
+    }
+    val docId = "ctxdoc_${cleanRef.hashCode().toUInt()}"
+    val resolvedNameFallback = displayNameHint.trim().ifBlank {
+      cleanRef.substringBefore('?').substringAfterLast('/').ifBlank { "Document" }
+    }
+
+    when (inferredLinkType) {
+      FileLinkType.HOST_PATH -> {
+        CaptainContextDocument(
+          id = docId,
+          displayName = resolvedNameFallback,
+          uriOrPath = cleanRef,
+          linkType = FileLinkType.HOST_PATH,
+          mimeType = mimeHint,
+          extractedText = "[Host PC Document Reference: $cleanRef — OpenClaw can inspect this file on the host computer if needed.]",
+          status = ContextDocStatus.READY,
+          statusDetail = "Host PC reference ready",
+          isPdf = resolvedNameFallback.endsWith(".pdf", ignoreCase = true),
+          isDocx = resolvedNameFallback.endsWith(".docx", ignoreCase = true),
+        )
+      }
+      FileLinkType.CLOUD_URL -> {
+        val outcome = if (httpClient != null) {
+          GoogleDriveDocumentFetcher.fetchDocument(cleanRef, displayNameHint, httpClient)
+        } else {
+          GoogleDriveDocumentFetcher.fetchDocument(cleanRef, displayNameHint)
+        }
+        when (outcome) {
+          is CloudFetchOutcome.NeedsAccess -> {
+            CaptainContextDocument(
+              id = docId,
+              displayName = displayNameHint.ifBlank { outcome.urlInfo.defaultFileName },
+              uriOrPath = cleanRef,
+              linkType = FileLinkType.CLOUD_URL,
+              mimeType = outcome.urlInfo.defaultMimeType,
+              extractedText = "",
+              status = ContextDocStatus.NEEDS_ACCESS,
+              statusDetail = outcome.reason,
+              isGoogleDriveUrl = outcome.urlInfo.isGoogleWorkspaceOrDrive,
+              driveExportUrl = outcome.urlInfo.downloadUrl,
+            )
+          }
+          is CloudFetchOutcome.Failure -> {
+            CaptainContextDocument(
+              id = docId,
+              displayName = displayNameHint.ifBlank { outcome.urlInfo.defaultFileName },
+              uriOrPath = cleanRef,
+              linkType = FileLinkType.CLOUD_URL,
+              mimeType = outcome.urlInfo.defaultMimeType,
+              extractedText = "",
+              status = ContextDocStatus.ERROR,
+              statusDetail = outcome.reason,
+              isGoogleDriveUrl = outcome.urlInfo.isGoogleWorkspaceOrDrive,
+              driveExportUrl = outcome.urlInfo.downloadUrl,
+            )
+          }
+          is CloudFetchOutcome.Success -> {
+            val payload = extractPayloadFromBytes(
+              displayName = outcome.resolvedName,
+              uriOrPath = cleanRef,
+              mimeType = mimeHint.ifBlank { outcome.mimeType },
+              linkType = FileLinkType.CLOUD_URL,
+              bytes = outcome.bytes,
+              host = host,
+              promptHint = promptHint,
+            )
+            CaptainContextDocument(
+              id = docId,
+              displayName = payload.displayName,
+              uriOrPath = cleanRef,
+              linkType = FileLinkType.CLOUD_URL,
+              mimeType = payload.mimeType,
+              extractedText = payload.extractedContent,
+              status = ContextDocStatus.READY,
+              statusDetail = buildString {
+                if (outcome.urlInfo.isGoogleWorkspaceOrDrive) append("Google Drive • ")
+                append("${payload.extractedContent.length} chars")
+              },
+              uploadedHostId = payload.uploadedHostId,
+              isGoogleDriveUrl = outcome.urlInfo.isGoogleWorkspaceOrDrive,
+              driveExportUrl = outcome.urlInfo.downloadUrl,
+              isPdf = payload.isPdf,
+              isDocx = payload.isDocx,
+              isImage = payload.isImage,
+              imageDataUrl = payload.imageDataUrl,
+              pageImageDataUrls = payload.pageImageDataUrls,
+              fileBase64 = payload.fileBase64,
+              charCount = payload.extractedContent.length,
+            )
+          }
+        }
+      }
+      FileLinkType.ANDROID_ATTACHMENT -> {
+        val linked = LinkedFile(
+          id = docId,
+          displayName = resolvedNameFallback,
+          uriOrPath = cleanRef,
+          linkType = FileLinkType.ANDROID_ATTACHMENT.name,
+          mimeOrExt = mimeHint,
+        )
+        val payload = readDeviceUri(linked, host, promptHint)
+        val unreadable = payload.extractedContent.isBlank() &&
+          payload.imageDataUrl.isBlank() &&
+          payload.pageImageDataUrls.isEmpty() &&
+          payload.fileBase64.isBlank()
+        CaptainContextDocument(
+          id = docId,
+          displayName = payload.displayName,
+          uriOrPath = cleanRef,
+          linkType = FileLinkType.ANDROID_ATTACHMENT,
+          mimeType = payload.mimeType,
+          extractedText = payload.extractedContent,
+          status = if (unreadable) ContextDocStatus.ERROR else ContextDocStatus.READY,
+          statusDetail = if (unreadable) {
+            "Could not read device file — re-pick via Pick PDF / Docs."
+          } else {
+            "Loaded • ${payload.extractedContent.length} chars"
+          },
+          uploadedHostId = payload.uploadedHostId,
+          isPdf = payload.isPdf,
+          isDocx = payload.isDocx,
+          isImage = payload.isImage,
+          imageDataUrl = payload.imageDataUrl,
+          pageImageDataUrls = payload.pageImageDataUrls,
+          fileBase64 = payload.fileBase64,
+          charCount = payload.extractedContent.length,
+        )
+      }
+    }
+  }
+
   private suspend fun readDeviceUri(
     file: LinkedFile,
     host: OpenClawHost?,
@@ -83,142 +231,183 @@ class DeviceAttachmentReader(private val context: Context) {
 
     val mime = (file.mimeOrExt.ifBlank { context.contentResolver.getType(uri).orEmpty() })
       .lowercase(Locale.US)
-    val ext = file.displayName.substringAfterLast('.', "").lowercase(Locale.US)
+    val rawBytes = readBytesBounded(uri, maxBytes = 12 * 1024 * 1024)
+      ?: return MediaAttachmentPayload(
+        displayName = file.displayName,
+        uriOrPath = file.uriOrPath,
+        mimeType = mime,
+        linkType = file.linkTypeEnum,
+      )
 
-    if (mime.startsWith("image/") || ext in IMAGE_EXTENSIONS) {
-      val rawImgBytes = readBytesBounded(uri, maxBytes = 10 * 1024 * 1024)
-      if (rawImgBytes != null) {
-        val (dataUrl, infoLabel) = encodeImageDataUrl(rawImgBytes, mime, ext)
-        // Mirror the PDF/DOCX paths: park the original on the host too, so the model can
-        // fetch full resolution if it needs detail the downscaled inline copy loses.
-        val uploadedHostRef = tryUploadFileToOpenClaw(
-          host,
-          file.displayName,
-          mime.ifBlank { "image/jpeg" },
-          rawImgBytes,
-        )
-        val extracted = buildString {
-          append("Attached image/screenshot ($infoLabel) sent inline as base64 image_url.")
-          if (!uploadedHostRef.isNullOrBlank()) append(" Original also uploaded to host as $uploadedHostRef.")
-        }
-        return MediaAttachmentPayload(
-          displayName = file.displayName,
-          uriOrPath = file.uriOrPath,
-          mimeType = mime.ifBlank { "image/jpeg" },
-          linkType = file.linkTypeEnum,
-          extractedContent = extracted,
-          uploadedHostId = uploadedHostRef.orEmpty(),
-          isImage = true,
-          imageDataUrl = dataUrl,
-        )
+    return extractPayloadFromBytes(
+      displayName = file.displayName,
+      uriOrPath = file.uriOrPath,
+      mimeType = mime,
+      linkType = file.linkTypeEnum,
+      bytes = rawBytes,
+      host = host,
+      promptHint = promptHint,
+    )
+  }
+
+  internal suspend fun extractPayloadFromBytes(
+    displayName: String,
+    uriOrPath: String,
+    mimeType: String,
+    linkType: FileLinkType,
+    bytes: ByteArray,
+    host: OpenClawHost?,
+    @Suppress("UNUSED_PARAMETER") promptHint: String = "",
+  ): MediaAttachmentPayload {
+    val mime = mimeType.lowercase(Locale.US)
+    val ext = displayName.substringAfterLast('.', "").lowercase(Locale.US)
+
+    val looksLikePdf = mime == "application/pdf" || ext == "pdf" || isPdfMagic(bytes)
+    val looksLikeDocx = mime == DOCX_MIME || ext == "docx" || (!looksLikePdf && isDocxZipMagic(bytes))
+    val looksLikeImage = !looksLikePdf && !looksLikeDocx && (mime.startsWith("image/") || ext in IMAGE_EXTENSIONS)
+
+    if (looksLikeImage) {
+      val bounded = if (bytes.size > 10 * 1024 * 1024) bytes.copyOf(10 * 1024 * 1024) else bytes
+      val (dataUrl, infoLabel) = encodeImageDataUrl(bounded, mime, ext)
+      val uploadedHostRef = tryUploadFileToOpenClaw(
+        host,
+        displayName,
+        mime.ifBlank { "image/jpeg" },
+        bounded,
+      )
+      val extracted = buildString {
+        append("Attached image/screenshot ($infoLabel) sent inline as base64 image_url.")
+        if (!uploadedHostRef.isNullOrBlank()) append(" Original also uploaded to host as $uploadedHostRef.")
       }
+      return MediaAttachmentPayload(
+        displayName = displayName,
+        uriOrPath = uriOrPath,
+        mimeType = mime.ifBlank { "image/jpeg" },
+        linkType = linkType,
+        extractedContent = extracted,
+        uploadedHostId = uploadedHostRef.orEmpty(),
+        isImage = true,
+        imageDataUrl = dataUrl,
+      )
     }
 
-    if (mime == "application/pdf" || ext == "pdf") {
-      val pdfBytes = readBytesBounded(uri, maxBytes = 12 * 1024 * 1024)
-      if (pdfBytes != null) {
-        val rawExtracted = extractPdfText(pdfBytes)
-        val hasSelectableText = rawExtracted.isNotBlank()
-        val renderedPages = if (!hasSelectableText) {
-          renderPdfPagesAsDataUrls(pdfBytes, maxPages = 4)
-        } else {
-          emptyList()
-        }
-        val finalExtracted = when {
-          hasSelectableText -> rawExtracted
-          renderedPages.isNotEmpty() ->
-            "[Scanned/image PDF: no selectable text stream; rendered ${renderedPages.size} page image(s) for multimodal visual inspection.]"
-          else ->
-            "[Scanned or image-only PDF: no selectable embedded text stream found. Uploaded/attached raw PDF for host-side OCR.]"
-        }
-        val uploadedHostRef = tryUploadFileToOpenClaw(host, file.displayName, "application/pdf", pdfBytes)
-        val b64 = if (pdfBytes.size <= 3 * 1024 * 1024) Base64.encodeToString(pdfBytes, Base64.NO_WRAP) else ""
-        return MediaAttachmentPayload(
-          displayName = file.displayName,
-          uriOrPath = file.uriOrPath,
-          mimeType = "application/pdf",
-          linkType = file.linkTypeEnum,
-          extractedContent = finalExtracted.take(45_000),
-          uploadedHostId = uploadedHostRef.orEmpty(),
-          isPdf = true,
-          fileBase64 = b64,
-          pageImageDataUrls = renderedPages,
-        )
+    if (looksLikePdf) {
+      val rawExtracted = extractPdfText(bytes)
+      val hasSelectableText = rawExtracted.isNotBlank()
+      val renderedPages = if (!hasSelectableText) {
+        renderPdfPagesAsDataUrls(bytes, maxPages = 4)
+      } else {
+        emptyList()
       }
+      val finalExtracted = when {
+        hasSelectableText -> rawExtracted
+        renderedPages.isNotEmpty() ->
+          "[Scanned/image PDF: no selectable text stream; rendered ${renderedPages.size} page image(s) for multimodal visual inspection.]"
+        else ->
+          "[Scanned or image-only PDF: no selectable embedded text stream found. Uploaded/attached raw PDF for host-side OCR.]"
+      }
+      val uploadedHostRef = tryUploadFileToOpenClaw(host, displayName, "application/pdf", bytes)
+      val b64 = if (bytes.size <= 3 * 1024 * 1024) Base64.encodeToString(bytes, Base64.NO_WRAP) else ""
+      return MediaAttachmentPayload(
+        displayName = displayName,
+        uriOrPath = uriOrPath,
+        mimeType = "application/pdf",
+        linkType = linkType,
+        extractedContent = finalExtracted.take(45_000),
+        uploadedHostId = uploadedHostRef.orEmpty(),
+        isPdf = true,
+        fileBase64 = b64,
+        pageImageDataUrls = renderedPages,
+      )
     }
 
-    if (mime == DOCX_MIME || ext == "docx") {
-      val docxBytes = readBytesBounded(uri, maxBytes = 12 * 1024 * 1024)
-      if (docxBytes != null) {
-        val extracted = extractDocxText(docxBytes)
-        // Render the document to page images so the model sees layout, tables and chops
-        // that plain text extraction flattens away.
-        val renderedPages = try {
-          renderDocxPagesAsDataUrls(docxBytes)
-        } catch (e: CancellationException) {
-          throw e
-        } catch (e: Exception) {
-          Log.w(TAG, "DOCX render failed: ${e.message}")
-          emptyList()
-        }
-        val uploadedHostRef = tryUploadFileToOpenClaw(host, file.displayName, DOCX_MIME, docxBytes)
-        val b64 = if (docxBytes.size <= 3 * 1024 * 1024) Base64.encodeToString(docxBytes, Base64.NO_WRAP) else ""
-        return MediaAttachmentPayload(
-          displayName = file.displayName,
-          uriOrPath = file.uriOrPath,
-          mimeType = DOCX_MIME,
-          linkType = file.linkTypeEnum,
-          extractedContent = extracted.take(45_000),
-          uploadedHostId = uploadedHostRef.orEmpty(),
-          isDocx = true,
-          fileBase64 = b64,
-          pageImageDataUrls = renderedPages,
-        )
+    if (looksLikeDocx) {
+      val extracted = extractDocxText(bytes)
+      val renderedPages = try {
+        renderDocxPagesAsDataUrls(bytes)
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        Log.w(TAG, "DOCX render failed: ${e.message}")
+        emptyList()
       }
+      val uploadedHostRef = tryUploadFileToOpenClaw(host, displayName, DOCX_MIME, bytes)
+      val b64 = if (bytes.size <= 3 * 1024 * 1024) Base64.encodeToString(bytes, Base64.NO_WRAP) else ""
+      return MediaAttachmentPayload(
+        displayName = displayName,
+        uriOrPath = uriOrPath,
+        mimeType = DOCX_MIME,
+        linkType = linkType,
+        extractedContent = extracted.take(45_000),
+        uploadedHostId = uploadedHostRef.orEmpty(),
+        isDocx = true,
+        fileBase64 = b64,
+        pageImageDataUrls = renderedPages,
+      )
     }
 
     if (isPlaintextOrCode(mime, ext)) {
-      val bytes = readBytesBounded(uri, maxBytes = 512 * 1024)
-      val text = bytes?.toString(StandardCharsets.UTF_8).orEmpty()
+      val textSlice = if (bytes.size > 512 * 1024) bytes.copyOf(512 * 1024) else bytes
+      val text = textSlice.toString(StandardCharsets.UTF_8)
         .replace("\u0000", "")
         .take(45_000)
       return MediaAttachmentPayload(
-        displayName = file.displayName,
-        uriOrPath = file.uriOrPath,
+        displayName = displayName,
+        uriOrPath = uriOrPath,
         mimeType = mime.ifBlank { "text/plain" },
-        linkType = file.linkTypeEnum,
+        linkType = linkType,
         extractedContent = text,
         isPdf = false,
       )
     }
 
-    // Other binary files: upload raw bytes to host if reachable AND keep base64 fallback for small files
-    val rawBytes = readBytesBounded(uri, maxBytes = 8 * 1024 * 1024)
-    val uploadedHostRef = if (rawBytes != null) {
-      tryUploadFileToOpenClaw(
-        host = host,
-        filename = file.displayName,
-        mimeType = mime.ifBlank { "application/octet-stream" },
-        bytes = rawBytes,
-      )
-    } else null
-    val fallbackB64 = if (rawBytes != null && rawBytes.size <= 2 * 1024 * 1024) {
-      Base64.encodeToString(rawBytes, Base64.NO_WRAP)
+    val boundedRaw = if (bytes.size > 8 * 1024 * 1024) bytes.copyOf(8 * 1024 * 1024) else bytes
+    val uploadedHostRef = tryUploadFileToOpenClaw(
+      host = host,
+      filename = displayName,
+      mimeType = mime.ifBlank { "application/octet-stream" },
+      bytes = boundedRaw,
+    )
+    val fallbackB64 = if (boundedRaw.size <= 2 * 1024 * 1024) {
+      Base64.encodeToString(boundedRaw, Base64.NO_WRAP)
     } else ""
 
     return MediaAttachmentPayload(
-      displayName = file.displayName,
-      uriOrPath = file.uriOrPath,
+      displayName = displayName,
+      uriOrPath = uriOrPath,
       mimeType = mime,
-      linkType = file.linkTypeEnum,
+      linkType = linkType,
       uploadedHostId = uploadedHostRef.orEmpty(),
       extractedContent = if (uploadedHostRef.isNullOrBlank()) {
-        "Attached file (${file.displayName}, ${rawBytes?.size ?: 0} bytes)"
+        "Attached file ($displayName, ${boundedRaw.size} bytes)"
       } else {
         "Uploaded to host as $uploadedHostRef"
       },
       fileBase64 = fallbackB64,
     )
+  }
+
+  private fun isPdfMagic(bytes: ByteArray): Boolean {
+    if (bytes.size < 5) return false
+    val head = String(bytes, 0, minOf(bytes.size, 32), StandardCharsets.ISO_8859_1)
+    return head.contains("%PDF-")
+  }
+
+  private fun isDocxZipMagic(bytes: ByteArray): Boolean {
+    if (bytes.size < 4 || bytes[0] != 'P'.code.toByte() || bytes[1] != 'K'.code.toByte()) return false
+    return try {
+      ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
+        var entry = zis.nextEntry
+        while (entry != null) {
+          if (entry.name.equals("word/document.xml", ignoreCase = true)) return true
+          zis.closeEntry()
+          entry = zis.nextEntry
+        }
+      }
+      false
+    } catch (_: Exception) {
+      false
+    }
   }
 
   private fun encodeImageDataUrl(rawBytes: ByteArray, mime: String, ext: String): Pair<String, String> {

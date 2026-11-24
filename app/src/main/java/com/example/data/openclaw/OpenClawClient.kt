@@ -10,8 +10,12 @@ import com.example.model.BotMessage
 import com.example.model.CafeEntryKind
 import com.example.model.CafeSpeakerRole
 import com.example.model.CafeTranscriptEntry
+import com.example.model.CaptainContextDocument
 import com.example.model.ChatRoom
 import com.example.model.CompanionBot
+import com.example.model.ContextChatMessage
+import com.example.model.ContextDocStatus
+import com.example.model.FileLinkType
 import com.example.model.GeneralChatMessage
 import com.example.model.GeneratedMediaType
 import com.example.model.MediaAttachmentPayload
@@ -879,6 +883,207 @@ class OpenClawClient(
     } catch (e: Exception) {
       val elapsed = System.currentTimeMillis() - startMs
       Log.w(TAG, "General chat OpenClaw dispatch failed: ${e.message}", e)
+      Result.failure(formatNetworkThrowable(e, cleanBase, elapsed))
+    }
+  }
+
+  /**
+   * Builds the strict grounding system prompt for Captain Context so every reply is anchored
+   * strictly in the user's loaded PDFs, documents, and Google Drive files.
+   */
+  fun buildCaptainContextSystemPrompt(docs: List<CaptainContextDocument>): String {
+    val readyNames = docs.filter { it.status == ContextDocStatus.READY }.map { it.displayName }
+    return buildString {
+      appendLine("You are Captain Context — a sharp, helpful comic-book superhero whose sole superpower is total recall over the user's loaded documents.")
+      appendLine("=== STRICT DOCUMENT GROUNDING RULES ===")
+      appendLine("1. Base your answers EXCLUSIVELY on the loaded Document Vault provided below (text extracts, attached page images, or host-path references).")
+      appendLine("2. Whenever you state a fact, quote a figure, summarize a clause, or trace a detail, cite the exact file inline using [Source: <filename>].")
+      appendLine("3. NEVER invent facts, policy numbers, dates, quotes, or assumptions that are not present in the loaded documents.")
+      appendLine("4. If the answer is NOT found in the loaded documents—or if a document is marked NEEDS_ACCESS or ERROR—state that clearly and honestly, name which document(s) were checked, and suggest what document or sharing setting is needed.")
+      appendLine("5. Only inspect a Host PC Path on the host filesystem if a document entry is explicitly marked HOST_PATH.")
+      if (readyNames.isNotEmpty()) {
+        appendLine("Loaded Documents (${readyNames.size}): ${readyNames.joinToString(", ")}")
+      } else {
+        appendLine("Loaded Documents: None ready yet.")
+      }
+      append(MEDIA_SYSTEM_INSTRUCTION)
+    }
+  }
+
+  /**
+   * Fairly budgets document text across all READY context documents and explicitly flags
+   * any inaccessible / failed Google Drive links so the model stays 100% honest.
+   */
+  fun buildCaptainContextPromptDeck(
+    docs: List<CaptainContextDocument>,
+    maxTotalChars: Int = 38_000,
+  ): String {
+    if (docs.isEmpty()) {
+      return "[CONTEXT VAULT STATUS: EMPTY — No documents are currently loaded.]"
+    }
+    val readyDocs = docs.filter { it.status == ContextDocStatus.READY }
+    val perDocBudget = if (readyDocs.isNotEmpty()) {
+      maxOf(1_800, maxTotalChars / readyDocs.size)
+    } else {
+      maxTotalChars
+    }
+
+    return buildString {
+      appendLine("=== CAPTAIN CONTEXT DOCUMENT VAULT (${docs.size} item(s)) ===")
+      docs.forEachIndexed { idx, doc ->
+        val num = idx + 1
+        val typeTag = when {
+          doc.isGoogleDriveUrl -> "GOOGLE_DRIVE"
+          doc.isPdf -> "PDF"
+          doc.isDocx -> "DOCX"
+          doc.isImage -> "IMAGE"
+          doc.linkType == FileLinkType.HOST_PATH -> "HOST_PATH"
+          else -> doc.linkType.name
+        }
+        appendLine("[DOCUMENT #$num | Source: ${doc.displayName} | Type: $typeTag | Ref: ${doc.uriOrPath}]")
+        when (doc.status) {
+          ContextDocStatus.READY -> {
+            val raw = doc.extractedText.trim()
+            if (raw.isNotEmpty()) {
+              val snippet = if (raw.length > perDocBudget) {
+                raw.take(perDocBudget) + "\n...[truncated after $perDocBudget chars of ${raw.length}; ask for specific sections if needed]"
+              } else {
+                raw
+              }
+              appendLine(snippet)
+            }
+            if (doc.imageDataUrl.isNotBlank()) {
+              appendLine("(Attached inline image: ${doc.displayName})")
+            }
+            if (doc.pageImageDataUrls.isNotEmpty()) {
+              appendLine("(Attached ${doc.pageImageDataUrls.size} rendered scanned PDF page image(s) from ${doc.displayName})")
+            }
+          }
+          ContextDocStatus.LOADING -> {
+            appendLine("[STATUS: Still reading/downloading ${doc.displayName}.]")
+          }
+          ContextDocStatus.NEEDS_ACCESS -> {
+            appendLine("[STATUS: NEEDS_ACCESS — ${doc.statusDetail.ifBlank { "Private Google Drive link requires 'Anyone with the link' sharing or Android Drive file picker." }}]")
+          }
+          ContextDocStatus.ERROR -> {
+            appendLine("[STATUS: ERROR — ${doc.statusDetail.ifBlank { "Could not read document." }}]")
+          }
+        }
+        appendLine("[END DOCUMENT #$num]")
+        appendLine()
+      }
+      append("=== END CAPTAIN CONTEXT DOCUMENT VAULT ===")
+    }.trim()
+  }
+
+  /**
+   * Dispatches a document-grounded turn for Captain Context through the OpenClaw `/v1/chat/completions`
+   * SSE stream (`model: "openclaw/apk"`, isolated `user: "conv:ctx_<chatId>"`), injecting the active
+   * Document Vault deck + multimodal attachments on every turn so multi-turn Q&A never forgets sources.
+   */
+  suspend fun sendCaptainContextChat(
+    host: OpenClawHost,
+    userId: String,
+    conversationId: String = "default",
+    contextDocs: List<CaptainContextDocument>,
+    history: List<ContextChatMessage>,
+    userPrompt: String,
+    wheelOption: WheelLlmOption,
+    providerKeys: LocalProviderKeys = LocalProviderKeys(),
+    onPartialText: (String) -> Unit = {},
+  ): Result<OpenClawDispatchResult> = withContext(Dispatchers.IO) {
+    val cleanBase = host.effectiveBaseUrl
+    if (cleanBase.isBlank() && !(providerKeys.bridgeEnabled && providerKeys.bridgeFolderUri.isNotBlank())) {
+      return@withContext Result.failure(OpenClawFormattedException("OpenClaw host URL is not configured."))
+    }
+    val llm = resolveWheelLlm(wheelOption, host, providerKeys)
+    val wireModel = resolveWireModel(APK_AGENT_ID, cleanBase)
+    val backendModelLabel = resolveXOpenClawModelHeader(llm) ?: wireModel
+    val threadSlug = conversationId.ifBlank { userId.ifBlank { "default" } }
+    val userSessionId = sanitizeUserSessionId("conv:ctx_$threadSlug")
+    val endpoint = "$cleanBase/v1/chat/completions"
+    val startMs = System.currentTimeMillis()
+
+    try {
+      val systemPrompt = buildCaptainContextSystemPrompt(contextDocs)
+      val contextDeck = buildCaptainContextPromptDeck(contextDocs)
+      val payloads = contextDocs
+        .filter { it.status == ContextDocStatus.READY }
+        .map { it.toMediaAttachmentPayload() }
+
+      val enrichedPrompt = buildString {
+        appendLine(contextDeck)
+        appendLine()
+        appendLine("[USER QUESTION DRIVEN BY CONTEXT ABOVE]")
+        append(userPrompt.trim())
+      }
+
+      val messagesArray = JSONArray().apply {
+        put(JSONObject().put("role", "system").put("content", systemPrompt))
+        history.takeLast(12).forEach { msg ->
+          val txt = msg.rawText.trim()
+          if (txt.isNotBlank() &&
+            msg.statusEnum != com.example.model.MessageStatus.PARSING &&
+            msg.statusEnum != com.example.model.MessageStatus.DISPATCHED
+          ) {
+            val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
+            put(JSONObject().put("role", role).put("content", txt.take(3000)))
+          }
+        }
+        put(JSONObject().put("role", "user").put("content", buildUserMessageContent(enrichedPrompt, payloads)))
+      }
+
+      if (providerKeys.bridgeEnabled && providerKeys.bridgeFolderUri.isNotBlank() && driveBridgeManager != null) {
+        return@withContext driveBridgeManager.dispatchTaskAndAwaitResult(
+          folderUriOrPath = providerKeys.bridgeFolderUri,
+          host = host,
+          wireModel = wireModel,
+          backendModel = backendModelLabel,
+          sessionKey = userSessionId,
+          agentId = MEDIA_ROUTE_AGENT_ID,
+          deviceId = providerKeys.deviceId,
+          userPrompt = userPrompt,
+          messagesArray = messagesArray,
+          refinedInstruction = null,
+          onPartialText = onPartialText,
+        )
+      }
+
+      val payload = JSONObject().apply {
+        put("model", wireModel)
+        put("stream", true)
+        put("messages", messagesArray)
+        put("user", userSessionId)
+      }
+      val req = Request.Builder()
+        .url(endpoint)
+        .post(payload.toString().toRequestBody(jsonMediaType))
+        .addHeader("Accept", "text/event-stream, application/json")
+        .applyWheelHeaders(
+          host = host,
+          llm = llm,
+          providerKeys = providerKeys,
+        )
+        .build()
+
+      executeChatCompletionsWithSseFallback(
+        req = req,
+        cleanBase = cleanBase,
+        refinedInstruction = null,
+        host = host,
+        fallbackModel = backendModelLabel,
+        fallbackPrompt = userPrompt,
+        sessionKey = userSessionId,
+        agentId = MEDIA_ROUTE_AGENT_ID,
+        deviceId = providerKeys.deviceId,
+        callTrackingKey = userSessionId,
+        onPartialText = onPartialText,
+      )
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      val elapsed = System.currentTimeMillis() - startMs
+      Log.w(TAG, "Captain Context OpenClaw dispatch failed: ${e.message}", e)
       Result.failure(formatNetworkThrowable(e, cleanBase, elapsed))
     }
   }

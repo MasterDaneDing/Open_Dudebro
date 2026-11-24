@@ -923,6 +923,126 @@ data class GeneralChatMessage(
   }
 }
 
+enum class ContextDocStatus(val label: String) {
+  LOADING("Reading..."),
+  READY("Loaded"),
+  NEEDS_ACCESS("Needs Access"),
+  ERROR("Error"),
+  ;
+}
+
+data class CaptainContextDocument(
+  val id: String,
+  val displayName: String,
+  val uriOrPath: String,
+  val linkType: FileLinkType,
+  val mimeType: String = "",
+  val extractedText: String = "",
+  val status: ContextDocStatus = ContextDocStatus.READY,
+  val statusDetail: String = "",
+  val uploadedHostId: String = "",
+  val isGoogleDriveUrl: Boolean = false,
+  val driveExportUrl: String = "",
+  val isPdf: Boolean = false,
+  val isDocx: Boolean = false,
+  val isImage: Boolean = false,
+  val imageDataUrl: String = "",
+  val pageImageDataUrls: List<String> = emptyList(),
+  val fileBase64: String = "",
+  val charCount: Int = extractedText.length,
+  val updatedEpochMs: Long = System.currentTimeMillis(),
+) {
+  fun toMediaAttachmentPayload(): MediaAttachmentPayload = MediaAttachmentPayload(
+    displayName = displayName,
+    uriOrPath = uriOrPath,
+    mimeType = mimeType,
+    linkType = linkType,
+    extractedContent = extractedText,
+    uploadedHostId = uploadedHostId,
+    isPdf = isPdf,
+    isDocx = isDocx,
+    isImage = isImage,
+    imageDataUrl = imageDataUrl,
+    fileBase64 = fileBase64,
+    pageImageDataUrls = pageImageDataUrls,
+  )
+}
+
+@Keep
+@IgnoreExtraProperties
+data class ContextChatThread(
+  @DocumentId val id: String = "",
+  val userId: String = "",
+  val title: String = "New Context Case",
+  val pinned: Boolean = false,
+  val lastMessagePreview: String = "",
+  val wheelModel: String = WheelLlmOption.OPENCLAW_DEFAULT.name,
+  val docLabels: List<String> = emptyList(),
+  val docRefs: List<String> = emptyList(),
+  @ServerTimestamp val createdAt: Timestamp? = null,
+  @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+  val wheelModelEnum: WheelLlmOption get() = WheelLlmOption.safeValueOf(wheelModel)
+
+  fun toCreateMap(ownerId: String): Map<String, Any> = mapOf(
+    "userId" to ownerId,
+    "title" to title.trim().take(80).ifBlank { "New Context Case" },
+    "pinned" to pinned,
+    "lastMessagePreview" to lastMessagePreview.trim().take(300),
+    "wheelModel" to wheelModelEnum.name,
+    "docLabels" to docLabels.map { it.trim().take(120) }.filter { it.isNotEmpty() }.take(20),
+    "docRefs" to docRefs.map { it.trim().take(500) }.filter { it.isNotEmpty() }.take(20),
+    "createdAt" to FieldValue.serverTimestamp(),
+    "updatedAt" to FieldValue.serverTimestamp(),
+  )
+}
+
+@Keep
+@IgnoreExtraProperties
+data class ContextChatMessage(
+  @DocumentId val id: String = "",
+  val userId: String = "",
+  val chatId: String = "",
+  val sender: String = MessageSender.USER.name,
+  val rawText: String = "",
+  val modelLabel: String = "",
+  val status: String = MessageStatus.IDLE.name,
+  val citedDocs: List<String> = emptyList(),
+  val mediaUrl: String? = null,
+  val mediaType: String? = null,
+  val mediaPrompt: String? = null,
+  val mediaModel: String? = null,
+  val mediaDurationSec: Int? = null,
+  @ServerTimestamp val createdAt: Timestamp? = null,
+  @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+  val senderEnum: MessageSender get() = MessageSender.safeValueOf(sender)
+  val statusEnum: MessageStatus get() = MessageStatus.safeValueOf(status)
+  val hasMedia: Boolean get() = !mediaUrl.isNullOrBlank()
+  val mediaTypeEnum: GeneratedMediaType get() = GeneratedMediaType.safeValueOf(mediaType)
+
+  fun toCreateMap(ownerId: String, targetChatId: String): Map<String, Any> {
+    val base = mutableMapOf<String, Any?>(
+      "userId" to ownerId,
+      "chatId" to targetChatId,
+      "sender" to senderEnum.name,
+      "rawText" to rawText.trim().take(4000).ifBlank { "..." },
+      "modelLabel" to modelLabel.trim().take(80),
+      "status" to statusEnum.name,
+      "citedDocs" to citedDocs.map { it.trim().take(120) }.filter { it.isNotEmpty() }.take(20),
+      "mediaUrl" to mediaUrl?.trim()?.take(1500)?.takeIf { it.isNotEmpty() },
+      "mediaType" to mediaType?.takeIf { !mediaUrl.isNullOrBlank() }?.let { GeneratedMediaType.safeValueOf(it).name },
+      "mediaPrompt" to mediaPrompt?.trim()?.take(1000)?.takeIf { it.isNotEmpty() },
+      "mediaModel" to mediaModel?.trim()?.take(120)?.takeIf { it.isNotEmpty() },
+      "mediaDurationSec" to mediaDurationSec?.coerceIn(0, 600),
+      "createdAt" to FieldValue.serverTimestamp(),
+      "updatedAt" to FieldValue.serverTimestamp(),
+    )
+    @Suppress("UNCHECKED_CAST")
+    return base.filterValues { it != null } as Map<String, Any>
+  }
+}
+
 fun normalizeHex(raw: String, fallback: String): String {
   val cleaned = raw.trim()
   return if (Regex("^#[0-9A-Fa-f]{6}$").matches(cleaned)) cleaned.uppercase() else fallback
