@@ -559,7 +559,7 @@ class DeviceAttachmentReader(private val context: Context) {
     }
   }
 
-  private fun isUploadEndpointReachable(baseUrl: String, timeoutMs: Int = 1_500): Boolean {
+  private fun isUploadEndpointReachable(baseUrl: String, timeoutMs: Int = 10_000): Boolean {
     return try {
       val uri = java.net.URI(baseUrl)
       val host = uri.host?.takeIf { it.isNotBlank() } ?: return false
@@ -585,7 +585,9 @@ class DeviceAttachmentReader(private val context: Context) {
   ): String? {
     val cleanBase = host?.effectiveBaseUrl?.trim()?.trimEnd('/').orEmpty()
     if (cleanBase.isBlank()) return null
-    if (!isUploadEndpointReachable(cleanBase)) return null
+    if (!isUploadEndpointReachable(cleanBase)) {
+      Log.w(TAG, "Upload endpoint probe failed for $cleanBase; attempting best-effort upload")
+    }
 
     val endpoints = listOf(
       "$cleanBase/v1/files",

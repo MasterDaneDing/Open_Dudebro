@@ -1310,4 +1310,55 @@ class OpenClawIntegrationTest {
       lanServer.stop(0)
     }
   }
+
+  @Test
+  fun slowButReachableHost_probeTimesOut_stillAttemptsRequestAndSucceeds() = runTest {
+    assertTrue(OpenClawClient.FAST_PROBE_ENABLED)
+    assertEquals(10_000, OpenClawClient.FAST_TCP_PROBE_TIMEOUT_MS)
+
+    val requestHits = AtomicInteger(0)
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/chat/completions") { ex ->
+      requestHits.incrementAndGet()
+      ex.requestBody.readBytes()
+      val sse = (
+        "data: {\"id\":\"slow1\",\"model\":\"openclaw/apk\",\"choices\":[{\"delta\":{\"content\":\"Connected after cold start!\"}}]}\n\n" +
+          "data: [DONE]\n\n"
+        ).toByteArray(StandardCharsets.UTF_8)
+      ex.responseHeaders.add("Content-Type", "text/event-stream")
+      ex.sendResponseHeaders(200, sse.size.toLong())
+      ex.responseBody.use { it.write(sse) }
+    }
+    server.start()
+
+    try {
+      val host = OpenClawHost(
+        id = "h-slow",
+        tailscaleUrl = "http://127.0.0.1:${server.address.port}",
+        connectionMode = com.example.model.HostConnectionMode.TAILSCALE.name,
+        gatewayToken = "tok-slow",
+      )
+      val client = OpenClawClient()
+      // Simulate pre-flight probe timing out on cold mobile-data handshake while socket is actually reachable
+      client.tcpProbeOverride = { _, timeoutMs ->
+        assertEquals(10_000, timeoutMs)
+        java.net.SocketTimeoutException("connect timed out")
+      }
+
+      val result = client.sendGeneralChat(
+        host = host,
+        userId = "u1",
+        conversationId = "slow-thread",
+        history = emptyList(),
+        userPrompt = "hello over 5g",
+        wheelOption = WheelLlmOption.OPENCLAW_DEFAULT,
+      )
+
+      assertTrue("Expected OkHttp request to still run and succeed, got: ${result.exceptionOrNull()}", result.isSuccess)
+      assertEquals(1, requestHits.get())
+      assertEquals("Connected after cold start!", result.getOrThrow().replyText)
+    } finally {
+      server.stop(0)
+    }
+  }
 }
