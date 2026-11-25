@@ -512,6 +512,38 @@ class ClawPalRepository(
     }
   }
 
+  fun newBotMessageId(userId: String, botId: String): String =
+    db.collection("users").document(userId)
+      .collection("bots").document(botId)
+      .collection("messages").document().id
+
+  suspend fun addBotMessagePair(
+    userId: String,
+    botId: String,
+    userMessage: BotMessage,
+    assistantMessageId: String,
+    assistantMessage: BotMessage,
+  ): Result<Unit> {
+    val docPath = "users/$userId/bots/$botId/messages/$assistantMessageId"
+    return try {
+      val uid = requireUserId(userId)
+      require(botId.isNotBlank() && assistantMessageId.isNotBlank()) { "IDs must not be blank" }
+      val msgsCol = db.collection("users").document(uid)
+        .collection("bots").document(botId)
+        .collection("messages")
+      val batch = db.batch()
+      batch.set(msgsCol.document(), userMessage.toCreateMap(uid, botId))
+      batch.set(msgsCol.document(assistantMessageId), assistantMessage.toCreateMap(uid, botId))
+      batch.commit().await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.CREATE, docPath)
+      Result.failure(e)
+    }
+  }
+
   suspend fun addMessage(userId: String, botId: String, message: BotMessage): Result<String> {
     var docPath = "users/$userId/bots/$botId/messages"
     return try {
@@ -853,6 +885,54 @@ class ClawPalRepository(
     }
   }
 
+  fun newGeneralChatId(userId: String): String =
+    db.collection("users").document(userId).collection("generalChats").document().id
+
+  fun newGeneralMessageId(userId: String, chatId: String): String =
+    db.collection("users").document(userId)
+      .collection("generalChats").document(chatId)
+      .collection("messages").document().id
+
+  suspend fun addGeneralMessagePair(
+    userId: String,
+    chatId: String,
+    createThread: GeneralChatThread? = null,
+    userMessage: GeneralChatMessage,
+    assistantMessageId: String,
+    assistantMessage: GeneralChatMessage,
+    newTitleIfDefault: String? = null,
+  ): Result<Unit> {
+    val docPath = "users/$userId/generalChats/$chatId/messages/$assistantMessageId"
+    return try {
+      val uid = requireUserId(userId)
+      require(chatId.isNotBlank() && assistantMessageId.isNotBlank()) { "IDs must not be blank" }
+      val chatDoc = db.collection("users").document(uid).collection("generalChats").document(chatId)
+      val msgsCol = chatDoc.collection("messages")
+      val batch = db.batch()
+      if (createThread != null) {
+        batch.set(chatDoc, createThread.toCreateMap(uid))
+      } else {
+        val updates = mutableMapOf<String, Any>(
+          "lastMessagePreview" to userMessage.rawText.replace('\n', ' ').trim().take(300),
+          "updatedAt" to FieldValue.serverTimestamp(),
+        )
+        if (!newTitleIfDefault.isNullOrBlank()) {
+          updates["title"] = newTitleIfDefault.trim().take(80)
+        }
+        batch.update(chatDoc, updates)
+      }
+      batch.set(msgsCol.document(), userMessage.toCreateMap(uid, chatId))
+      batch.set(msgsCol.document(assistantMessageId), assistantMessage.toCreateMap(uid, chatId))
+      batch.commit().await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.CREATE, docPath)
+      Result.failure(e)
+    }
+  }
+
   suspend fun addGeneralMessage(
     userId: String,
     chatId: String,
@@ -1030,6 +1110,54 @@ class ClawPalRepository(
       throw e
     } catch (e: Exception) {
       handleFirestoreError(e, OperationType.DELETE, docPath)
+      Result.failure(e)
+    }
+  }
+
+  fun newContextChatId(userId: String): String =
+    db.collection("users").document(userId).collection("contextChats").document().id
+
+  fun newContextMessageId(userId: String, chatId: String): String =
+    db.collection("users").document(userId)
+      .collection("contextChats").document(chatId)
+      .collection("messages").document().id
+
+  suspend fun addContextMessagePair(
+    userId: String,
+    chatId: String,
+    createThread: ContextChatThread? = null,
+    userMessage: ContextChatMessage,
+    assistantMessageId: String,
+    assistantMessage: ContextChatMessage,
+    newTitleIfDefault: String? = null,
+  ): Result<Unit> {
+    val docPath = "users/$userId/contextChats/$chatId/messages/$assistantMessageId"
+    return try {
+      val uid = requireUserId(userId)
+      require(chatId.isNotBlank() && assistantMessageId.isNotBlank()) { "IDs must not be blank" }
+      val chatDoc = db.collection("users").document(uid).collection("contextChats").document(chatId)
+      val msgsCol = chatDoc.collection("messages")
+      val batch = db.batch()
+      if (createThread != null) {
+        batch.set(chatDoc, createThread.toCreateMap(uid))
+      } else {
+        val updates = mutableMapOf<String, Any>(
+          "lastMessagePreview" to userMessage.rawText.replace('\n', ' ').trim().take(300),
+          "updatedAt" to FieldValue.serverTimestamp(),
+        )
+        if (!newTitleIfDefault.isNullOrBlank()) {
+          updates["title"] = newTitleIfDefault.trim().take(80)
+        }
+        batch.update(chatDoc, updates)
+      }
+      batch.set(msgsCol.document(), userMessage.toCreateMap(uid, chatId))
+      batch.set(msgsCol.document(assistantMessageId), assistantMessage.toCreateMap(uid, chatId))
+      batch.commit().await()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      handleFirestoreError(e, OperationType.CREATE, docPath)
       Result.failure(e)
     }
   }

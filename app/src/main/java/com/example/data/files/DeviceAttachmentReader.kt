@@ -70,6 +70,48 @@ class DeviceAttachmentReader(private val context: Context) {
     }
   }
 
+  /**
+   * Decodes up to [maxImages] downsampled RGB bitmaps from prepared attachment/page data URLs
+   * so Gemini 3.8 Flash can inspect attached photos, screenshots, and scanned pages directly.
+   */
+  suspend fun decodeBitmapsForGemini(
+    payloads: List<MediaAttachmentPayload>,
+    maxImages: Int = 4,
+    maxDim: Int = MAX_IMAGE_DIM,
+  ): List<Bitmap> = withContext(Dispatchers.IO) {
+    if (payloads.isEmpty()) return@withContext emptyList()
+    val dataUrls = payloads.flatMap { payload ->
+      buildList {
+        if (payload.imageDataUrl.isNotBlank()) add(payload.imageDataUrl)
+        addAll(payload.pageImageDataUrls)
+      }
+    }.take(maxImages)
+
+    dataUrls.mapNotNull { dataUrl ->
+      val commaIdx = dataUrl.indexOf(',')
+      val b64 = if (commaIdx >= 0) dataUrl.substring(commaIdx + 1) else dataUrl
+      runCatching {
+        val raw = Base64.decode(b64, Base64.DEFAULT)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (longest / sample > maxDim * 2) {
+          sample *= 2
+        }
+        val decoded = BitmapFactory.decodeByteArray(
+          raw,
+          0,
+          raw.size,
+          BitmapFactory.Options().apply { inSampleSize = sample },
+        ) ?: return@mapNotNull null
+        val scaled = scaleToMaxDim(decoded, maxDim)
+        if (scaled !== decoded) decoded.recycle()
+        scaled
+      }.getOrNull()
+    }
+  }
+
   suspend fun readContextDocument(
     docRef: String,
     displayNameHint: String = "",
@@ -517,6 +559,24 @@ class DeviceAttachmentReader(private val context: Context) {
     }
   }
 
+  private fun isUploadEndpointReachable(baseUrl: String, timeoutMs: Int = 1_500): Boolean {
+    return try {
+      val uri = java.net.URI(baseUrl)
+      val host = uri.host?.takeIf { it.isNotBlank() } ?: return false
+      val port = when {
+        uri.port > 0 -> uri.port
+        uri.scheme.equals("https", ignoreCase = true) -> 443
+        else -> 80
+      }
+      java.net.Socket().use { socket ->
+        socket.connect(java.net.InetSocketAddress(host, port), timeoutMs)
+      }
+      true
+    } catch (_: Exception) {
+      false
+    }
+  }
+
   private fun tryUploadFileToOpenClaw(
     host: OpenClawHost?,
     filename: String,
@@ -525,6 +585,7 @@ class DeviceAttachmentReader(private val context: Context) {
   ): String? {
     val cleanBase = host?.effectiveBaseUrl?.trim()?.trimEnd('/').orEmpty()
     if (cleanBase.isBlank()) return null
+    if (!isUploadEndpointReachable(cleanBase)) return null
 
     val endpoints = listOf(
       "$cleanBase/v1/files",
@@ -568,11 +629,13 @@ class DeviceAttachmentReader(private val context: Context) {
         }
       } catch (e: CancellationException) {
         throw e
-      } catch (e: java.net.ConnectException) {
+      } catch (_: java.net.SocketTimeoutException) {
         break
-      } catch (e: java.net.NoRouteToHostException) {
+      } catch (_: java.net.ConnectException) {
         break
-      } catch (e: java.net.UnknownHostException) {
+      } catch (_: java.net.NoRouteToHostException) {
+        break
+      } catch (_: java.net.UnknownHostException) {
         break
       } catch (_: Exception) {
         // Fallback to inline extracted text

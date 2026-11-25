@@ -222,8 +222,10 @@ class OpenClawClient(
           host.defaultLlmProviderEnum
         }
       }
+      WheelLlmOption.GEMINI_FLASH -> OpenClawLlmProvider.GOOGLE
     }
     val modelId = when {
+      wheel == WheelLlmOption.GEMINI_FLASH -> "google/gemini-3.8-flash"
       wheel == WheelLlmOption.OPENCLAW_DEFAULT && host.defaultLlmModel.isNotBlank() ->
         host.defaultLlmModel.trim()
       wheel == WheelLlmOption.OPENCLAW_LOCAL &&
@@ -423,6 +425,12 @@ class OpenClawClient(
     var lastStatus = 0
     for ((base, isFallback) in basesToTry) {
       val modelsUrl = "$base/v1/models"
+      val probeErr = probeTcpReachable(base, FAST_TCP_PROBE_TIMEOUT_MS)
+      if (probeErr != null) {
+        val elapsed = System.currentTimeMillis() - start
+        lastErr = formatNetworkThrowable(probeErr, base, elapsed).message
+        continue
+      }
       try {
         val reqBuilder = Request.Builder().url(modelsUrl).get()
           .addHeader("x-openclaw-device-id", deviceId.trim().ifBlank { MediaSaveHelper.DEFAULT_DEVICE_ID })
@@ -1107,6 +1115,33 @@ class OpenClawClient(
     var triedFallbackHost = false
     var serverRetriesLeft = 1
 
+    // Fast pre-flight TCP reachability check (~2.2s max) so a dead/blackholed private LAN IP
+    // over 5G fails over or surfaces immediately instead of blocking 65s on OkHttp connectTimeout.
+    val preflightStartMs = System.currentTimeMillis()
+    val primaryTcpErr = probeTcpReachable(activeBase, FAST_TCP_PROBE_TIMEOUT_MS)
+    if (primaryTcpErr != null) {
+      val fallbackBase = host.fallbackBaseUrl
+      if (fallbackBase.isNotBlank() && probeTcpReachable(fallbackBase, FAST_TCP_PROBE_TIMEOUT_MS) == null) {
+        triedFallbackHost = true
+        val oldUrl = activeReq.url.toString()
+        val newUrl = if (oldUrl.startsWith(activeBase, ignoreCase = true)) {
+          fallbackBase + oldUrl.substring(activeBase.length)
+        } else {
+          "$fallbackBase/v1/chat/completions"
+        }
+        activeBase = fallbackBase
+        activeHost = host.copy(
+          baseUrl = fallbackBase,
+          lanUrl = fallbackBase,
+          tailscaleUrl = host.effectiveTailscaleUrl,
+        )
+        activeReq = activeReq.newBuilder().url(newUrl).build()
+      } else {
+        val elapsed = System.currentTimeMillis() - preflightStartMs
+        return Result.failure(formatNetworkThrowable(primaryTcpErr, activeBase, elapsed))
+      }
+    }
+
     while (true) {
       val attemptStartMs = System.currentTimeMillis()
       val call = client.newCall(activeReq)
@@ -1301,7 +1336,9 @@ class OpenClawClient(
 
         // Section 1: Automatic LAN -> Tailscale (or secondary) failover if primary host is unreachable
         val fallbackBase = host.fallbackBaseUrl
-        if (isConnectUnreachable && !triedFallbackHost && fallbackBase.isNotBlank()) {
+        if (isConnectUnreachable && !triedFallbackHost && fallbackBase.isNotBlank() &&
+          probeTcpReachable(fallbackBase, FAST_TCP_PROBE_TIMEOUT_MS) == null
+        ) {
           triedFallbackHost = true
           val oldUrl = activeReq.url.toString()
           val newUrl = if (oldUrl.startsWith(activeBase, ignoreCase = true)) {
@@ -2414,11 +2451,30 @@ class OpenClawClient(
     return clean.endsWith(".pdf") || clean.endsWith(".docx") || clean.endsWith(".doc")
   }
 
+  private fun probeTcpReachable(baseUrl: String, timeoutMs: Int = FAST_TCP_PROBE_TIMEOUT_MS): Exception? {
+    return try {
+      val uri = java.net.URI(baseUrl)
+      val host = uri.host?.takeIf { it.isNotBlank() } ?: return UnknownHostException(baseUrl)
+      val port = when {
+        uri.port > 0 -> uri.port
+        uri.scheme.equals("https", ignoreCase = true) -> 443
+        else -> 80
+      }
+      Socket().use { socket ->
+        socket.connect(java.net.InetSocketAddress(host, port), timeoutMs)
+      }
+      null
+    } catch (e: Exception) {
+      e
+    }
+  }
+
   companion object {
     private const val TAG = "OpenClawClient"
     const val APK_AGENT_ID = "apk"
     const val APK_WIRE_MODEL = "openclaw/apk"
     const val MEDIA_ROUTE_AGENT_ID = "main"
+    const val FAST_TCP_PROBE_TIMEOUT_MS = 2_200
     const val SSE_CONNECT_TIMEOUT_SECONDS = 60L
     const val SSE_READ_TIMEOUT_SECONDS = 180L
 

@@ -230,16 +230,20 @@ private fun WhimsicalDockTile(
     label = "tile_scale_${destination.route}",
   )
 
-  val infinite = rememberInfiniteTransition(label = "tile_pulse_${destination.route}")
-  val busyAlpha by infinite.animateFloat(
-    initialValue = 0.45f,
-    targetValue = 1.0f,
-    animationSpec = infiniteRepeatable(
-      animation = tween(durationMillis = 550),
-      repeatMode = RepeatMode.Reverse,
-    ),
-    label = "busy_badge_alpha",
-  )
+  val busyAlpha = if (isBusy) {
+    val infinite = rememberInfiniteTransition(label = "tile_pulse_${destination.route}")
+    infinite.animateFloat(
+      initialValue = 0.45f,
+      targetValue = 1.0f,
+      animationSpec = infiniteRepeatable(
+        animation = tween(durationMillis = 550),
+        repeatMode = RepeatMode.Reverse,
+      ),
+      label = "busy_badge_alpha",
+    ).value
+  } else {
+    1.0f
+  }
 
   val expression = when {
     isBusy -> BotExpression.WORKING
@@ -292,6 +296,7 @@ private fun WhimsicalDockTile(
           destination = destination,
           expression = expression,
           size = avatarSize,
+          animate = selected || isBusy,
         )
         Text(
           text = destination.label,
@@ -341,6 +346,7 @@ private fun NavTileCharacterAvatar(
   destination: WhimsicalNavDestination,
   expression: BotExpression,
   size: Dp,
+  animate: Boolean,
 ) {
   when (destination) {
     WhimsicalNavDestination.BOT_DUDES -> BotVectorAvatar(
@@ -351,7 +357,7 @@ private fun NavTileCharacterAvatar(
       accentColor = Color(0xFFFF2E93),
       expression = expression,
       size = size,
-      animate = true,
+      animate = animate,
     )
     WhimsicalNavDestination.GENERAL -> BotVectorAvatar(
       archetype = BotArchetype.GLASSES_FELLOW,
@@ -361,12 +367,12 @@ private fun NavTileCharacterAvatar(
       accentColor = Color(0xFFFF6D00),
       expression = expression,
       size = size,
-      animate = true,
+      animate = animate,
     )
     WhimsicalNavDestination.CAPTAIN_CONTEXT -> CaptainContextAvatar(
       expression = expression,
       size = size,
-      animate = true,
+      animate = animate,
       showCapeAndScroll = false,
     )
     WhimsicalNavDestination.TAKEOVER -> BotVectorAvatar(
@@ -377,7 +383,7 @@ private fun NavTileCharacterAvatar(
       accentColor = Color(0xFFFFC93C),
       expression = expression,
       size = size,
-      animate = true,
+      animate = animate,
     )
     WhimsicalNavDestination.FILES -> BotVectorAvatar(
       archetype = BotArchetype.GOBLIN,
@@ -387,7 +393,7 @@ private fun NavTileCharacterAvatar(
       accentColor = Color(0xFFFF8A65),
       expression = expression,
       size = size,
-      animate = true,
+      animate = animate,
     )
     WhimsicalNavDestination.HOST -> BotVectorAvatar(
       archetype = BotArchetype.PROFESSOR,
@@ -397,7 +403,7 @@ private fun NavTileCharacterAvatar(
       accentColor = Color(0xFF5C6BC0),
       expression = expression,
       size = size,
-      animate = true,
+      animate = animate,
     )
   }
 }

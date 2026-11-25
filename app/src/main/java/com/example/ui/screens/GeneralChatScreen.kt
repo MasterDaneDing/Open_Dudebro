@@ -35,12 +35,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -68,19 +70,22 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -91,6 +96,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.shape.CircleShape
 import coil.compose.AsyncImage
 import com.example.R
@@ -853,33 +859,64 @@ private fun GeneralChatConversationPane(
   modifier: Modifier = Modifier,
 ) {
   val listState = rememberLazyListState()
-  LaunchedEffect(messages.size) {
-    if (messages.isNotEmpty()) {
-      listState.animateScrollToItem(messages.lastIndex)
+  val scope = rememberCoroutineScope()
+  var pinnedToBottom by remember(activeThread?.id) { mutableStateOf(true) }
+  var unreadBelow by remember(activeThread?.id) { mutableIntStateOf(0) }
+  var didInitialScroll by remember(activeThread?.id) { mutableStateOf(false) }
+
+  LaunchedEffect(listState, activeThread?.id) {
+    snapshotFlow {
+      val info = listState.layoutInfo
+      val last = info.visibleItemsInfo.lastOrNull()
+      last != null && last.index >= info.totalItemsCount - 1
+    }.collect { atBottom ->
+      pinnedToBottom = atBottom
+      if (atBottom) {
+        unreadBelow = 0
+      } else {
+        val info = listState.layoutInfo
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+        unreadBelow = (info.totalItemsCount - 1 - lastVisible).coerceIn(0, 99)
+      }
     }
   }
 
-  // Vibrant Neon Orange backdrop with Cha Chaan Teng atmosphere gently underneath
+  LaunchedEffect(activeThread?.id, messages.size) {
+    if (messages.isEmpty()) return@LaunchedEffect
+    if (!didInitialScroll) {
+      listState.scrollToItem(messages.lastIndex)
+      didInitialScroll = true
+      unreadBelow = 0
+    } else if (pinnedToBottom) {
+      listState.animateScrollToItem(messages.lastIndex)
+      unreadBelow = 0
+    }
+  }
+
+  // Vibrant Neon Orange backdrop with Cha Chaan Teng atmosphere scrim (no offscreen alpha layer)
   Box(
     modifier = modifier
       .fillMaxSize()
-      .background(
-        Brush.verticalGradient(
-          colors = listOf(
-            Color(0xFFFF6D00),
-            Color(0xFFFF8F00),
-            Color(0xFFFF3D00),
-          )
-        )
-      ),
+      .background(Color(0xFFFF6D00)),
   ) {
     Image(
       painter = painterResource(id = R.drawable.img_cha_chaan_teng),
       contentDescription = null,
       contentScale = ContentScale.Crop,
+      modifier = Modifier.fillMaxSize(),
+    )
+    Box(
       modifier = Modifier
         .fillMaxSize()
-        .alpha(0.30f),
+        .background(
+          Brush.verticalGradient(
+            colors = listOf(
+              Color(0xB8FF6D00),
+              Color(0xCCFF8F00),
+              Color(0xC8FF3D00),
+            )
+          )
+        ),
     )
 
     Column(
@@ -887,13 +924,13 @@ private fun GeneralChatConversationPane(
         .fillMaxSize()
         .padding(horizontal = 12.dp),
     ) {
-      // Slim, clean top bar with small corner Settings icon
+      // Slim, clean top bar giving title generous width without truncating to 3 chars
       Row(
         modifier = Modifier
           .fillMaxWidth()
           .padding(top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
       ) {
         if (showBackArrow) {
           IconButton(
@@ -915,7 +952,9 @@ private fun GeneralChatConversationPane(
           color = Color.White,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
-          modifier = Modifier.weight(1f),
+          modifier = Modifier
+            .weight(1f)
+            .padding(end = 4.dp),
         )
 
         if (activeHost != null) {
@@ -923,16 +962,18 @@ private fun GeneralChatConversationPane(
             onClick = { onToggleHostConnectionMode(activeHost) },
             shape = RoundedCornerShape(50),
             color = Color(0xCC5600BA),
-            border = BorderStroke(1.2.dp, Color(0xFFFFD180)),
-            modifier = Modifier.testTag("general_connection_mode_pill"),
+            border = BorderStroke(1.dp, Color(0xFFFFD180)),
+            modifier = Modifier
+              .defaultMinSize(minHeight = 36.dp)
+              .testTag("general_connection_mode_pill"),
           ) {
             Text(
               text = activeHost.connectionModeEnum.shortPill,
-              style = MaterialTheme.typography.labelSmall,
+              style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
               fontWeight = FontWeight.Bold,
               color = Color.White,
               maxLines = 1,
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+              modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
             )
           }
         }
@@ -946,6 +987,7 @@ private fun GeneralChatConversationPane(
               imageVector = if (activeThread.pinned) Icons.Rounded.PushPin else Icons.Outlined.PushPin,
               contentDescription = if (activeThread.pinned) "Unpin chat" else "Pin chat",
               tint = if (activeThread.pinned) Color(0xFFFFEB3B) else Color.White,
+              modifier = Modifier.size(20.dp),
             )
           }
         }
@@ -1173,6 +1215,34 @@ private fun GeneralChatConversationPane(
                   }
                 }
               }
+              if (unreadBelow > 0) {
+                FilledIconButton(
+                  onClick = {
+                    scope.launch { listState.animateScrollToItem(messages.lastIndex) }
+                    unreadBelow = 0
+                  },
+                  colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = Color(0xFF6A00F4),
+                    contentColor = Color.White,
+                  ),
+                  modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 12.dp)
+                    .testTag("general_jump_to_latest_button"),
+                ) {
+                  Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                  ) {
+                    Icon(Icons.Rounded.ArrowDownward, contentDescription = "Jump to latest", Modifier.size(16.dp))
+                    Text(
+                      text = if (unreadBelow >= 99) "99+" else unreadBelow.toString(),
+                      style = MaterialTheme.typography.labelSmall,
+                    )
+                  }
+                }
+              }
             }
           }
         }
@@ -1343,42 +1413,50 @@ private fun GeneralChatConversationPane(
             )
           }
 
-          OutlinedTextField(
-            value = composerText,
-            onValueChange = onComposerChange,
-            placeholder = {
+          Box(
+            contentAlignment = Alignment.CenterStart,
+            modifier = Modifier
+              .weight(1f)
+              .defaultMinSize(minHeight = 44.dp)
+              .clip(RoundedCornerShape(18.dp))
+              .background(Color(0xFFFFF4E6))
+              .padding(horizontal = 12.dp, vertical = 10.dp),
+          ) {
+            if (composerText.isEmpty()) {
               Text(
-                text = "Ask ${selectedWheelModel.wheelLabel} a question...",
+                text = "Ask ${selectedWheelModel.wheelLabel}...",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFF8C4A27),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
               )
-            },
-            colors = OutlinedTextFieldDefaults.colors(
-              focusedTextColor = Color(0xFF2E0D00),
-              unfocusedTextColor = Color(0xFF2E0D00),
-              focusedBorderColor = Color(0xFFFF6D00),
-              unfocusedBorderColor = Color(0x66FF6D00),
-            ),
-            maxLines = 4,
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier
-              .weight(1f)
-              .testTag("general_chat_input"),
-          )
-          Spacer(Modifier.width(4.dp))
+            }
+            BasicTextField(
+              value = composerText,
+              onValueChange = onComposerChange,
+              textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color(0xFF2E0D00)),
+              cursorBrush = SolidColor(Color(0xFFFF6D00)),
+              maxLines = 4,
+              modifier = Modifier
+                .fillMaxWidth()
+                .testTag("general_chat_input"),
+            )
+          }
+          Spacer(Modifier.width(2.dp))
           com.example.ui.components.VoiceInputButton(
             onPartial = onComposerChange,
             onResult = onComposerChange,
+            idleTint = Color(0xFF8C4A27),
           )
-          Spacer(Modifier.width(4.dp))
+          Spacer(Modifier.width(2.dp))
           FilledIconButton(
             onClick = onSend,
             enabled = (composerText.isNotBlank() || pendingAttachments.isNotEmpty()) && !isBusy,
             colors = IconButtonDefaults.filledIconButtonColors(
               containerColor = Color(0xFFFF5500),
               contentColor = Color.White,
+              disabledContainerColor = Color(0x44FF5500),
+              disabledContentColor = Color(0xAA8C4A27),
             ),
             modifier = Modifier
               .size(48.dp)

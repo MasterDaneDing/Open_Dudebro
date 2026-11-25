@@ -251,6 +251,7 @@ enum class WheelLlmOption(
   OPENCLAW_DEFAULT("Gateway", "OpenClaw Default", OpenClawLlmProvider.OPENCLAW_AUTO),
   OPENCLAW_LOCAL("Local LLM", "OpenClaw Local", OpenClawLlmProvider.LOCAL_LLM),
   OPENCLAW_THIRD_PARTY("3rd Party", "OpenClaw 3rd Party", OpenClawLlmProvider.VENICE_AI),
+  GEMINI_FLASH("Gemini 3.8", "Gemini 3.8 Flash (Vision)", OpenClawLlmProvider.GOOGLE),
   ;
 
   companion object {
@@ -559,8 +560,8 @@ data class OpenClawHost(
 
   val effectiveBaseUrl: String
     get() = when (connectionModeEnum) {
-      HostConnectionMode.TAILSCALE -> effectiveTailscaleUrl.ifBlank { effectiveLanUrl }
-      HostConnectionMode.LAN -> effectiveLanUrl.ifBlank { effectiveTailscaleUrl }
+      HostConnectionMode.TAILSCALE -> effectiveTailscaleUrl
+      HostConnectionMode.LAN -> effectiveLanUrl
     }.trim().trimEnd('/')
 
   /**

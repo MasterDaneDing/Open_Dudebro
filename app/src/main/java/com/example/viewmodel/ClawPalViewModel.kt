@@ -44,6 +44,7 @@ import com.example.model.GeneratedMediaType
 import com.example.model.HostConnectionMode
 import com.example.model.HostStatus
 import com.example.model.LinkedFile
+import com.example.model.MediaAttachmentPayload
 import com.example.model.MessageSender
 import com.example.model.MessageStatus
 import com.example.model.OpenClawHost
@@ -793,7 +794,11 @@ class ClawPalViewModel(
     val cleanError = OpenClawClient.cleanRawErrorText(err.localizedMessage, 0, host.effectiveBaseUrl)
     val isFastFail = (err as? OpenClawFormattedException)?.isFastConnectFailure == true
     if (isFastFail) {
-      val failedMode = host.connectionModeEnum
+      val failedMode = when {
+        host.effectiveLanUrl.isNotBlank() && cleanError.contains(host.effectiveLanUrl, ignoreCase = true) -> HostConnectionMode.LAN
+        host.effectiveTailscaleUrl.isNotBlank() && cleanError.contains(host.effectiveTailscaleUrl, ignoreCase = true) -> HostConnectionMode.TAILSCALE
+        else -> host.connectionModeEnum
+      }
       val altMode = if (failedMode == HostConnectionMode.LAN) HostConnectionMode.TAILSCALE else HostConnectionMode.LAN
       val hasAlt = if (altMode == HostConnectionMode.TAILSCALE) {
         host.effectiveTailscaleUrl.isNotBlank()
@@ -902,6 +907,8 @@ class ClawPalViewModel(
       setBotExpression(bot.id, BotExpression.THINKING)
 
       try {
+        val isGeminiDirect = wheelOverride == WheelLlmOption.GEMINI_FLASH
+        val botMsgId = repository.newBotMessageId(currentUserId, bot.id)
         val userMsg = BotMessage(
           userId = currentUserId,
           botId = bot.id,
@@ -912,39 +919,106 @@ class ClawPalViewModel(
           attachedFiles = attachedLabels,
           linkedPaths = linkedPathLabels,
         )
-        repository.addMessage(currentUserId, bot.id, userMsg)
-          .onFailure {
-            setBotExpression(bot.id, BotExpression.SORRY)
-            _statusBanner.value = it.localizedMessage ?: "Could not save message."
-            return@launch
-          }
-
-        val botMsgId = repository.addMessage(
-          currentUserId,
-          bot.id,
-          BotMessage(
+        val initialBotMsg = BotMessage(
+          userId = currentUserId,
+          botId = bot.id,
+          sender = MessageSender.BOT.name,
+          rawText = if (isGeminiDirect) "Asking Gemini 3.8 Flash..." else "Thinking / running tools on host...",
+          expression = BotExpression.THINKING.name,
+          status = MessageStatus.PARSING.name,
+          attachedFiles = attachedLabels,
+          linkedPaths = linkedPathLabels,
+        )
+        val batchJob = viewModelScope.launch {
+          repository.addBotMessagePair(
             userId = currentUserId,
             botId = bot.id,
-            sender = MessageSender.BOT.name,
-            rawText = "Thinking / running tools on host...",
-            expression = BotExpression.THINKING.name,
-            status = MessageStatus.PARSING.name,
-            attachedFiles = attachedLabels,
-            linkedPaths = linkedPathLabels,
-          ),
-        ).getOrElse { err ->
-          setBotExpression(bot.id, BotExpression.SORRY)
-          _statusBanner.value = err.localizedMessage ?: "Failed to create bot response."
+            userMessage = userMsg,
+            assistantMessageId = botMsgId,
+            assistantMessage = initialBotMsg,
+          )
+        }
+
+        val attachmentPayloads = if (attachmentsSnapshot.isNotEmpty()) {
+          attachmentReader.preparePayloads(
+            attachmentsSnapshot,
+            if (isGeminiDirect) null else activeHost,
+            trimmed,
+          )
+        } else {
+          emptyList()
+        }
+        val imageBitmaps = if (attachmentPayloads.any { it.isImage || it.pageImageDataUrls.isNotEmpty() }) {
+          attachmentReader.decodeBitmapsForGemini(attachmentPayloads)
+        } else {
+          emptyList()
+        }
+
+        if (isGeminiDirect) {
+          setBotExpression(bot.id, BotExpression.WORKING)
+          botTargets[bot.id] = ActiveMessageTarget.BotTarget(bot.id, botMsgId, null, "Gemini 3.8 Flash", emptyList())
+          val historyPairs = botHistory.takeLast(8).map {
+            (if (it.senderEnum == MessageSender.USER) "User" else bot.name) to it.rawText
+          }
+          val directive = buildString {
+            appendLine("You are ${bot.name} (${bot.roleTitle}), a playful yet helpful companion bot.")
+            appendLine("Mission: ${bot.displayMission}")
+            if (bot.systemPersona.isNotBlank()) appendLine("Persona: ${bot.systemPersona}")
+            val textAttachments = attachmentPayloads.filter { it.extractedContent.isNotBlank() }
+            if (textAttachments.isNotEmpty()) {
+              appendLine("Attached document excerpts:")
+              textAttachments.take(4).forEach { p ->
+                appendLine("--- ${p.displayName} ---\n${p.extractedContent.take(3500)}")
+              }
+            }
+          }
+          val geminiRes = withBotRequestLifecycle(bot.id) {
+            refinerService.streamGeminiChat(
+              userPrompt = trimmed,
+              history = historyPairs,
+              imageBitmaps = imageBitmaps,
+              systemDirective = directive,
+              onPartialText = { partial ->
+                _botStreamingPreviews.update { it + (bot.id to partial) }
+              },
+            )
+          }
+          batchJob.join()
+          geminiRes.onSuccess { replyText ->
+            setBotExpression(bot.id, BotExpression.UH_HUH)
+            repository.updateMessageExecution(
+              userId = currentUserId,
+              botId = bot.id,
+              messageId = botMsgId,
+              rawText = replyText,
+              parsedInstruction = null,
+              instructionGoal = "Gemini 3.8 Flash",
+              instructionSteps = emptyList(),
+              expression = BotExpression.UH_HUH,
+              status = MessageStatus.COMPLETED,
+              takeoverSuggested = false,
+            )
+            repository.updateBotPreview(currentUserId, bot.id, replyText)
+          }.onFailure { err ->
+            setBotExpression(bot.id, BotExpression.SORRY)
+            repository.updateMessageExecution(
+              userId = currentUserId,
+              botId = bot.id,
+              messageId = botMsgId,
+              rawText = "Gemini 3.8 Flash failed: ${err.localizedMessage ?: "Unknown error"}",
+              parsedInstruction = null,
+              instructionGoal = "Gemini 3.8 Flash failed",
+              instructionSteps = emptyList(),
+              expression = BotExpression.SORRY,
+              status = MessageStatus.FAILED,
+              takeoverSuggested = false,
+            )
+          }
           return@launch
         }
 
         val mode = activeHost?.aiModeEnum ?: AiRoutingMode.HYBRID_GEMINI_OPENCLAW
         val providerKeys = currentProviderKeys()
-        val attachmentPayloads = if (attachmentsSnapshot.isNotEmpty()) {
-          attachmentReader.preparePayloads(attachmentsSnapshot, activeHost, trimmed)
-        } else {
-          emptyList()
-        }
 
         if (mode == AiRoutingMode.OPENCLAW_ONLY && activeHost != null) {
           setBotExpression(bot.id, BotExpression.WORKING)
@@ -966,6 +1040,7 @@ class ClawPalViewModel(
               },
             )
           }
+          batchJob.join()
           dispatchRes.onSuccess { res ->
             setBotExpression(bot.id, res.expression)
             repository.updateMessageExecution(
@@ -1008,15 +1083,17 @@ class ClawPalViewModel(
           return@launch
         }
 
-        // Step 1: Parse casual chat into clear OpenClaw instruction via Gemini (Firebase AI Logic)
+        // Step 1: Parse casual chat into clear OpenClaw instruction via Gemini 3.8 Flash (with image vision)
         val parseResult = refinerService.parseCasualRequest(
           bot = bot,
           casualMessage = trimmed,
           attachedFiles = attachedLabels,
           linkedPaths = linkedPathLabels,
+          imageBitmaps = imageBitmaps,
         )
 
         parseResult.onFailure { err ->
+          batchJob.join()
           setBotExpression(bot.id, BotExpression.SORRY)
           repository.updateMessageExecution(
             userId = currentUserId,
@@ -1036,6 +1113,7 @@ class ClawPalViewModel(
         val parsed = parseResult.getOrThrow()
 
         if (mode == AiRoutingMode.GEMINI_PARSER_PREVIEW || activeHost == null) {
+          batchJob.join()
           val expr = if (parsed.needsHostTakeover) BotExpression.ALERT else parsed.recommendedExpression
           setBotExpression(bot.id, expr)
           repository.updateMessageExecution(
@@ -1054,20 +1132,23 @@ class ClawPalViewModel(
           return@launch
         }
 
-        // Step 2 (HYBRID_GEMINI_OPENCLAW): Update card with parsed instruction, then dispatch to OpenClaw
+        // Step 2 (HYBRID_GEMINI_OPENCLAW): Wait for initial batch commit, fire OpenClaw immediately alongside status update
+        batchJob.join()
         setBotExpression(bot.id, BotExpression.WORKING)
-        repository.updateMessageExecution(
-          userId = currentUserId,
-          botId = bot.id,
-          messageId = botMsgId,
-          rawText = "${parsed.friendlyBotReply}\nSending instructions to ${activeHost.label}...",
-          parsedInstruction = parsed.clearInstruction,
-          instructionGoal = parsed.goal,
-          instructionSteps = parsed.steps,
-          expression = BotExpression.WORKING,
-          status = MessageStatus.DISPATCHED,
-          takeoverSuggested = parsed.needsHostTakeover,
-        )
+        viewModelScope.launch {
+          repository.updateMessageExecution(
+            userId = currentUserId,
+            botId = bot.id,
+            messageId = botMsgId,
+            rawText = "${parsed.friendlyBotReply}\nSending instructions to ${activeHost.label}...",
+            parsedInstruction = parsed.clearInstruction,
+            instructionGoal = parsed.goal,
+            instructionSteps = parsed.steps,
+            expression = BotExpression.WORKING,
+            status = MessageStatus.DISPATCHED,
+            takeoverSuggested = parsed.needsHostTakeover,
+          )
+        }
 
         botTargets[bot.id] = ActiveMessageTarget.BotTarget(bot.id, botMsgId, parsed.clearInstruction, parsed.goal, parsed.steps)
         val dispatchResult = withBotRequestLifecycle(bot.id) {
@@ -1155,7 +1236,8 @@ class ClawPalViewModel(
       if (attachmentsSnapshot.isNotEmpty()) "Analyze the attached file(s) in background." else ""
     }
     if (trimmed.isBlank() || bot.id.isBlank()) return
-    if (activeHost == null || activeHost.effectiveBaseUrl.isBlank()) {
+    val useGeminiVision = wheelOverride == WheelLlmOption.GEMINI_FLASH
+    if (!useGeminiVision && (activeHost == null || activeHost.effectiveBaseUrl.isBlank())) {
       _statusBanner.value = "Configure an OpenClaw host in Host Settings to spawn background sub-agents."
       return
     }
@@ -1165,7 +1247,7 @@ class ClawPalViewModel(
     val parentSessionKey = bot.effectivePrimarySessionKey
     val subSessionKey = bot.effectiveSpawnSessionKey(taskId)
     val providerKeys = currentProviderKeys()
-    val llm = openClawClient.resolveEffectiveLlm(bot, activeHost, wheelOverride, providerKeys)
+    val llm = openClawClient.resolveEffectiveLlm(bot, activeHost ?: OpenClawHost(), wheelOverride, providerKeys)
     val modelLabel = llm.modelId.ifBlank { llm.provider.displayName }
 
     val initialTask = BackgroundAgentTask(
@@ -1202,10 +1284,51 @@ class ClawPalViewModel(
         } else {
           emptyList()
         }
-        val res = if (wakeLockHelper != null) {
+        val res = if (useGeminiVision) {
+          val imageBitmaps = if (attachmentPayloads.isNotEmpty()) {
+            attachmentReader.decodeBitmapsForGemini(attachmentPayloads)
+          } else {
+            emptyList()
+          }
+          val directive = buildString {
+            appendLine("You are ${bot.name} running an isolated background task ($subSessionKey).")
+            appendLine("Mission: ${bot.displayMission}")
+            if (bot.systemPersona.isNotBlank()) appendLine("Persona: ${bot.systemPersona}")
+            val textAttachments = attachmentPayloads.filter { it.extractedContent.isNotBlank() }
+            if (textAttachments.isNotEmpty()) {
+              appendLine("Attached document excerpts:")
+              textAttachments.take(4).forEach { p ->
+                appendLine("--- ${p.displayName} ---\n${p.extractedContent.take(3500)}")
+              }
+            }
+          }
+          val geminiCall: suspend () -> Result<com.example.data.openclaw.OpenClawDispatchResult> = {
+            refinerService.streamGeminiChat(
+              userPrompt = trimmed,
+              history = emptyList(),
+              imageBitmaps = imageBitmaps,
+              systemDirective = directive,
+              onPartialText = { partial ->
+                _backgroundTasks.update { list ->
+                  list.map { item ->
+                    if (item.id == taskId) item.copy(previewText = partial.take(240)) else item
+                  }
+                }
+              },
+            ).map { replyText ->
+              com.example.data.openclaw.OpenClawDispatchResult(
+                replyText = replyText,
+                parsedInstruction = null,
+                expression = BotExpression.UH_HUH,
+                takeoverSuggested = false,
+              )
+            }
+          }
+          if (wakeLockHelper != null) wakeLockHelper.withPartialWakeLock { geminiCall() } else geminiCall()
+        } else if (wakeLockHelper != null) {
           wakeLockHelper.withPartialWakeLock {
             openClawClient.spawnBackgroundTask(
-              host = activeHost,
+              host = activeHost!!,
               bot = bot,
               taskId = taskId,
               prompt = trimmed,
@@ -1223,7 +1346,7 @@ class ClawPalViewModel(
           }
         } else {
           openClawClient.spawnBackgroundTask(
-            host = activeHost,
+            host = activeHost!!,
             bot = bot,
             taskId = taskId,
             prompt = trimmed,
@@ -1273,7 +1396,11 @@ class ClawPalViewModel(
           archiveGeneratedMediaIfPresent(reply, "${bot.name} (Sub-Agent)", trimmed)
           _statusBanner.value = "${bot.name}'s background sub-agent finished!"
         }.onFailure { err ->
-          val clean = OpenClawClient.cleanRawErrorText(err.localizedMessage, 0, activeHost.effectiveBaseUrl)
+          val clean = OpenClawClient.cleanRawErrorText(
+            err.localizedMessage,
+            0,
+            activeHost?.effectiveBaseUrl ?: "Gemini 3.8 Flash",
+          )
           _backgroundTasks.update { list ->
             list.map { item ->
               if (item.id == taskId) {
@@ -2208,52 +2335,52 @@ class ClawPalViewModel(
     _pendingAttachments.value = emptyList()
     _connectionFailureBanner.value = null
 
-    viewModelScope.launch {
-      val resolvedChatId: String
-      val isDefaultTitle: Boolean
+    val isNewThread = chat == null || chat.id.isBlank()
+    val resolvedChatId = if (isNewThread) {
+      repository.newGeneralChatId(currentUserId)
+    } else {
+      chat!!.id
+    }
+    val isDefaultTitle = !isNewThread && chat?.title == "New General Chat"
 
-      if (chat == null || chat.id.isBlank()) {
-        val initialTitle = trimmed.replace('\n', ' ').trim().take(48).ifBlank { "General Chat" }
-        val newIdRes = repository.createGeneralChat(
-          currentUserId,
+    if (generalJobs[resolvedChatId]?.isActive == true) {
+      _statusBanner.value = "This General Chat already has a reply streaming — abort or start a new chat!"
+      return
+    }
+
+    if (isNewThread) {
+      _selectedGeneralChatId.value = resolvedChatId
+      onThreadReady(resolvedChatId)
+    }
+
+    val streamJob = viewModelScope.launch {
+      _busyGeneralChatIds.update { it + resolvedChatId }
+      try {
+        val isGeminiDirect = wheelOption == WheelLlmOption.GEMINI_FLASH
+        val attachSummary = if (attachmentsSnapshot.isNotEmpty()) {
+          "\n\n[Attached: ${attachmentsSnapshot.joinToString(", ") { it.displayName }}]"
+        } else ""
+        val userDisplayText = "$trimmed$attachSummary".take(4000)
+
+        val autoTitle = if (isDefaultTitle) trimmed.replace('\n', ' ').trim().take(48) else null
+        val assistantMsgId = repository.newGeneralMessageId(currentUserId, resolvedChatId)
+        val createThreadObj = if (isNewThread) {
           GeneralChatThread(
+            id = resolvedChatId,
             userId = currentUserId,
-            title = initialTitle,
+            title = trimmed.replace('\n', ' ').trim().take(48).ifBlank { "General Chat" },
             pinned = false,
             lastMessagePreview = trimmed.take(120),
             wheelModel = wheelOption.name,
-          ),
-        )
-        resolvedChatId = newIdRes.getOrElse { err ->
-          _statusBanner.value = err.localizedMessage ?: "Could not create chat."
-          return@launch
-        }
-        _selectedGeneralChatId.value = resolvedChatId
-        onThreadReady(resolvedChatId)
-        isDefaultTitle = false
-      } else {
-        resolvedChatId = chat.id
-        isDefaultTitle = chat.title == "New General Chat"
-      }
+          )
+        } else null
 
-      if (generalJobs[resolvedChatId]?.isActive == true) {
-        _statusBanner.value = "This General Chat already has a reply streaming — abort or start a new chat!"
-        return@launch
-      }
-
-      val streamJob = viewModelScope.launch {
-        _busyGeneralChatIds.update { it + resolvedChatId }
-        try {
-          val attachSummary = if (attachmentsSnapshot.isNotEmpty()) {
-            "\n\n[Attached: ${attachmentsSnapshot.joinToString(", ") { it.displayName }}]"
-          } else ""
-          val userDisplayText = "$trimmed$attachSummary".take(4000)
-
-          val autoTitle = if (isDefaultTitle) trimmed.replace('\n', ' ').trim().take(48) else null
-          repository.addGeneralMessage(
+        val batchJob = viewModelScope.launch {
+          repository.addGeneralMessagePair(
             userId = currentUserId,
             chatId = resolvedChatId,
-            message = GeneralChatMessage(
+            createThread = createThreadObj,
+            userMessage = GeneralChatMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               sender = MessageSender.USER.name,
@@ -2261,102 +2388,153 @@ class ClawPalViewModel(
               modelLabel = wheelOption.fullLabel,
               status = MessageStatus.IDLE.name,
             ),
-            newTitleIfDefault = autoTitle,
-          ).onFailure { err ->
-            _statusBanner.value = err.localizedMessage ?: "Could not save message."
-            return@launch
-          }
-
-          val assistantMsgId = repository.addGeneralMessage(
-            userId = currentUserId,
-            chatId = resolvedChatId,
-            message = GeneralChatMessage(
+            assistantMessageId = assistantMsgId,
+            assistantMessage = GeneralChatMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               sender = MessageSender.BOT.name,
-              rawText = "Thinking / running tools on host...",
+              rawText = if (isGeminiDirect) "Asking Gemini 3.8 Flash..." else "Thinking / running tools on host...",
               modelLabel = wheelOption.fullLabel,
               status = MessageStatus.DISPATCHED.name,
             ),
-          ).getOrElse { err ->
-            _statusBanner.value = err.localizedMessage ?: "Could not create reply."
-            return@launch
-          }
+            newTitleIfDefault = autoTitle,
+          )
+        }
 
-          val bridgeActive = localPrefs.value.driveBridgeEnabled && localPrefs.value.driveBridgeFolderUri.isNotBlank()
-          val effectiveHost = activeHost ?: if (bridgeActive) {
-            OpenClawHost(id = "bridge", label = "Drive Bridge", baseUrl = "")
-          } else null
-          if (effectiveHost == null || (effectiveHost.effectiveBaseUrl.isBlank() && !bridgeActive)) {
-            repository.updateGeneralMessage(
-              userId = currentUserId,
-              chatId = resolvedChatId,
-              messageId = assistantMsgId,
-              rawText = "OpenClaw host URL isn't configured yet. Add your LAN or Tailscale gateway URL (or enable Drive Bridge) in the Host tab.",
-              modelLabel = wheelOption.fullLabel,
-              status = MessageStatus.WARNING,
-            )
-            return@launch
-          }
-
+        if (isGeminiDirect) {
           val attachmentPayloads = if (attachmentsSnapshot.isNotEmpty()) {
-            attachmentReader.preparePayloads(attachmentsSnapshot, effectiveHost, trimmed)
+            attachmentReader.preparePayloads(attachmentsSnapshot, null, trimmed)
           } else {
             emptyList()
           }
-
+          val imageBitmaps = if (attachmentPayloads.any { it.isImage || it.pageImageDataUrls.isNotEmpty() }) {
+            attachmentReader.decodeBitmapsForGemini(attachmentPayloads)
+          } else {
+            emptyList()
+          }
+          val historyPairs = history.takeLast(10).map {
+            (if (it.senderEnum == MessageSender.USER) "User" else "Assistant") to it.rawText
+          }
+          val directive = buildString {
+            appendLine("You are a helpful, clear AI assistant powered by Gemini 3.8 Flash.")
+            val textAttachments = attachmentPayloads.filter { it.extractedContent.isNotBlank() }
+            if (textAttachments.isNotEmpty()) {
+              appendLine("Attached document excerpts:")
+              textAttachments.take(4).forEach { p ->
+                appendLine("--- ${p.displayName} ---\n${p.extractedContent.take(4000)}")
+              }
+            }
+          }
           generalTargets[resolvedChatId] = ActiveMessageTarget.GeneralTarget(resolvedChatId, assistantMsgId, wheelOption.fullLabel)
-          val replyRes = withGeneralRequestLifecycle(resolvedChatId) {
-            openClawClient.sendGeneralChat(
-              host = effectiveHost,
-              userId = currentUserId,
-              conversationId = resolvedChatId,
-              history = history,
+          val geminiRes = withGeneralRequestLifecycle(resolvedChatId) {
+            refinerService.streamGeminiChat(
               userPrompt = trimmed,
-              wheelOption = wheelOption,
-              providerKeys = currentProviderKeys(),
-              attachmentPayloads = attachmentPayloads,
+              history = historyPairs,
+              imageBitmaps = imageBitmaps,
+              systemDirective = directive,
               onPartialText = { partial ->
                 _generalStreamingPreviews.update { it + (resolvedChatId to partial) }
               },
             )
           }
-
-          replyRes.onSuccess { res ->
+          batchJob.join()
+          geminiRes.onSuccess { replyText ->
             repository.updateGeneralMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               messageId = assistantMsgId,
-              rawText = res.replyText,
-              modelLabel = res.mediaModel?.takeIf { it.isNotBlank() } ?: wheelOption.fullLabel,
+              rawText = replyText,
+              modelLabel = wheelOption.fullLabel,
               status = MessageStatus.COMPLETED,
-              mediaUrl = res.mediaUrl,
-              mediaType = res.mediaType,
-              mediaPrompt = res.mediaPrompt,
-              mediaModel = res.mediaModel,
-              mediaDurationSec = res.mediaDurationSec,
             )
-            archiveGeneratedMediaIfPresent(res, "General (${wheelOption.wheelLabel})", trimmed)
           }.onFailure { err ->
-            val cleanMsg = maybeShowFastConnectBanner(err, effectiveHost) { switchedHost ->
-              sendGeneralMessage(chat, trimmed, wheelOption, switchedHost, onThreadReady)
-            }
             repository.updateGeneralMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               messageId = assistantMsgId,
-              rawText = cleanMsg,
+              rawText = "Gemini 3.8 Flash error: ${err.localizedMessage ?: "Unknown error"}",
               modelLabel = wheelOption.fullLabel,
               status = MessageStatus.FAILED,
             )
           }
-        } finally {
-          _busyGeneralChatIds.update { it - resolvedChatId }
+          return@launch
         }
+
+        val bridgeActive = localPrefs.value.driveBridgeEnabled && localPrefs.value.driveBridgeFolderUri.isNotBlank()
+        val effectiveHost = activeHost ?: if (bridgeActive) {
+          OpenClawHost(id = "bridge", label = "Drive Bridge", baseUrl = "")
+        } else null
+        if (effectiveHost == null || (effectiveHost.effectiveBaseUrl.isBlank() && !bridgeActive)) {
+          batchJob.join()
+          repository.updateGeneralMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            messageId = assistantMsgId,
+            rawText = "OpenClaw host URL isn't configured yet. Add your LAN or Tailscale gateway URL (or enable Drive Bridge) in the Host tab.",
+            modelLabel = wheelOption.fullLabel,
+            status = MessageStatus.WARNING,
+          )
+          return@launch
+        }
+
+        val attachmentPayloads = if (attachmentsSnapshot.isNotEmpty()) {
+          attachmentReader.preparePayloads(attachmentsSnapshot, effectiveHost, trimmed)
+        } else {
+          emptyList()
+        }
+
+        generalTargets[resolvedChatId] = ActiveMessageTarget.GeneralTarget(resolvedChatId, assistantMsgId, wheelOption.fullLabel)
+        val replyRes = withGeneralRequestLifecycle(resolvedChatId) {
+          openClawClient.sendGeneralChat(
+            host = effectiveHost,
+            userId = currentUserId,
+            conversationId = resolvedChatId,
+            history = history,
+            userPrompt = trimmed,
+            wheelOption = wheelOption,
+            providerKeys = currentProviderKeys(),
+            attachmentPayloads = attachmentPayloads,
+            onPartialText = { partial ->
+              _generalStreamingPreviews.update { it + (resolvedChatId to partial) }
+            },
+          )
+        }
+
+        batchJob.join()
+        replyRes.onSuccess { res ->
+          repository.updateGeneralMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            messageId = assistantMsgId,
+            rawText = res.replyText,
+            modelLabel = res.mediaModel?.takeIf { it.isNotBlank() } ?: wheelOption.fullLabel,
+            status = MessageStatus.COMPLETED,
+            mediaUrl = res.mediaUrl,
+            mediaType = res.mediaType,
+            mediaPrompt = res.mediaPrompt,
+            mediaModel = res.mediaModel,
+            mediaDurationSec = res.mediaDurationSec,
+          )
+          archiveGeneratedMediaIfPresent(res, "General (${wheelOption.wheelLabel})", trimmed)
+        }.onFailure { err ->
+          val cleanMsg = maybeShowFastConnectBanner(err, effectiveHost) { switchedHost ->
+            sendGeneralMessage(chat, trimmed, wheelOption, switchedHost, onThreadReady)
+          }
+          repository.updateGeneralMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            messageId = assistantMsgId,
+            rawText = cleanMsg,
+            modelLabel = wheelOption.fullLabel,
+            status = MessageStatus.FAILED,
+          )
+        }
+      } finally {
+        _busyGeneralChatIds.update { it - resolvedChatId }
       }
-      generalJobs[resolvedChatId] = streamJob
-      streamJob.invokeOnCompletion { generalJobs.remove(resolvedChatId, streamJob) }
     }
+    generalJobs[resolvedChatId] = streamJob
+    streamJob.invokeOnCompletion { generalJobs.remove(resolvedChatId, streamJob) }
   }
 
   private fun hydrateDocsForThread(thread: ContextChatThread) {
@@ -2718,80 +2896,79 @@ class ClawPalViewModel(
     val history = (contextMessagesState.value as? UiState.Success)?.data.orEmpty()
     _connectionFailureBanner.value = null
 
-    viewModelScope.launch {
-      val resolvedChatId: String
-      val isDefaultTitle: Boolean
-      val initialDocs = if (chat != null && chat.id.isNotBlank()) {
-        _contextDocsByChatId.value[chat.id].orEmpty()
-      } else {
-        _contextDocsByChatId.value["__draft__"].orEmpty()
-      }
+    val isNewThread = chat == null || chat.id.isBlank()
+    val resolvedChatId = if (isNewThread) {
+      repository.newContextChatId(currentUserId)
+    } else {
+      chat!!.id
+    }
+    val isDefaultTitle = !isNewThread && chat?.title == "New Context Case"
+    val initialDocs = if (!isNewThread) {
+      _contextDocsByChatId.value[resolvedChatId].orEmpty()
+    } else {
+      _contextDocsByChatId.value["__draft__"].orEmpty()
+    }
 
-      if (chat == null || chat.id.isBlank()) {
-        val initialTitle = trimmed.replace('\n', ' ').trim().take(48).ifBlank { "Context Case" }
-        val newIdRes = repository.createContextChat(
-          currentUserId,
+    if (contextJobs[resolvedChatId]?.isActive == true) {
+      _statusBanner.value = "Captain Context is already analyzing this case — Abort or open another case!"
+      return
+    }
+
+    if (isNewThread) {
+      if (initialDocs.isNotEmpty()) {
+        _contextDocsByChatId.update { (it - "__draft__") + (resolvedChatId to initialDocs) }
+      }
+      _selectedContextChatId.value = resolvedChatId
+      onThreadReady(resolvedChatId)
+    }
+
+    val streamJob = viewModelScope.launch {
+      _busyContextChatIds.update { it + resolvedChatId }
+      try {
+        val isGeminiDirect = wheelOption == WheelLlmOption.GEMINI_FLASH
+        val docsBeforeSend = _contextDocsByChatId.value[resolvedChatId].orEmpty()
+        val preparedDocs = docsBeforeSend.map { doc ->
+          if (doc.status == ContextDocStatus.LOADING) {
+            val read = attachmentReader.readContextDocument(
+              docRef = doc.uriOrPath,
+              displayNameHint = doc.displayName,
+              mimeHint = doc.mimeType,
+              linkType = doc.linkType,
+              host = if (isGeminiDirect) null else activeHost,
+              promptHint = trimmed,
+            )
+            if (read.status == ContextDocStatus.READY) {
+              contextDocCache?.save(currentUserId, read)
+            }
+            upsertContextDocInMemory(resolvedChatId, read)
+            read
+          } else {
+            doc
+          }
+        }
+
+        val docLabelsUsed = preparedDocs.filter { it.status == ContextDocStatus.READY }.map { it.displayName }
+        val autoTitle = if (isDefaultTitle) trimmed.replace('\n', ' ').trim().take(48) else null
+        val assistantMsgId = repository.newContextMessageId(currentUserId, resolvedChatId)
+        val createThreadObj = if (isNewThread) {
           ContextChatThread(
+            id = resolvedChatId,
             userId = currentUserId,
-            title = initialTitle,
+            title = trimmed.replace('\n', ' ').trim().take(48).ifBlank { "Context Case" },
             pinned = false,
             lastMessagePreview = trimmed.take(120),
             wheelModel = wheelOption.name,
             docLabels = initialDocs.map { it.displayName },
             docRefs = initialDocs.map { it.uriOrPath },
-          ),
-        )
-        resolvedChatId = newIdRes.getOrElse { err ->
-          _statusBanner.value = err.localizedMessage ?: "Could not create Captain Context case."
-          return@launch
-        }
-        if (initialDocs.isNotEmpty()) {
-          _contextDocsByChatId.update { (it - "__draft__") + (resolvedChatId to initialDocs) }
-        }
-        _selectedContextChatId.value = resolvedChatId
-        onThreadReady(resolvedChatId)
-        isDefaultTitle = false
-      } else {
-        resolvedChatId = chat.id
-        isDefaultTitle = chat.title == "New Context Case"
-      }
+          )
+        } else null
 
-      if (contextJobs[resolvedChatId]?.isActive == true) {
-        _statusBanner.value = "Captain Context is already analyzing this case — Abort or open another case!"
-        return@launch
-      }
-
-      val streamJob = viewModelScope.launch {
-        _busyContextChatIds.update { it + resolvedChatId }
-        try {
-          val docsBeforeSend = _contextDocsByChatId.value[resolvedChatId].orEmpty()
-          // Ensure any LOADING docs are fetched before sending to OpenClaw
-          val preparedDocs = docsBeforeSend.map { doc ->
-            if (doc.status == ContextDocStatus.LOADING) {
-              val read = attachmentReader.readContextDocument(
-                docRef = doc.uriOrPath,
-                displayNameHint = doc.displayName,
-                mimeHint = doc.mimeType,
-                linkType = doc.linkType,
-                host = activeHost,
-                promptHint = trimmed,
-              )
-              if (read.status == ContextDocStatus.READY) {
-                contextDocCache?.save(currentUserId, read)
-              }
-              upsertContextDocInMemory(resolvedChatId, read)
-              read
-            } else {
-              doc
-            }
-          }
-
-          val docLabelsUsed = preparedDocs.filter { it.status == ContextDocStatus.READY }.map { it.displayName }
-          val autoTitle = if (isDefaultTitle) trimmed.replace('\n', ' ').trim().take(48) else null
-          repository.addContextMessage(
+        val batchJob = viewModelScope.launch {
+          repository.addContextMessagePair(
             userId = currentUserId,
             chatId = resolvedChatId,
-            message = ContextChatMessage(
+            createThread = createThreadObj,
+            userMessage = ContextChatMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               sender = MessageSender.USER.name,
@@ -2800,104 +2977,181 @@ class ClawPalViewModel(
               status = MessageStatus.IDLE.name,
               citedDocs = docLabelsUsed,
             ),
-            newTitleIfDefault = autoTitle,
-          ).onFailure { err ->
-            _statusBanner.value = err.localizedMessage ?: "Could not save message."
-            return@launch
-          }
-
-          val assistantMsgId = repository.addContextMessage(
-            userId = currentUserId,
-            chatId = resolvedChatId,
-            message = ContextChatMessage(
+            assistantMessageId = assistantMsgId,
+            assistantMessage = ContextChatMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               sender = MessageSender.BOT.name,
-              rawText = "Captain Context is scanning ${preparedDocs.size} document(s)...",
+              rawText = if (isGeminiDirect) {
+                "Captain Context (Gemini 3.8 Flash) is inspecting ${preparedDocs.size} source(s)..."
+              } else {
+                "Captain Context is scanning ${preparedDocs.size} document(s)..."
+              },
               modelLabel = wheelOption.fullLabel,
               status = MessageStatus.DISPATCHED.name,
               citedDocs = docLabelsUsed,
             ),
-          ).getOrElse { err ->
-            _statusBanner.value = err.localizedMessage ?: "Could not create Captain Context reply."
-            return@launch
-          }
+            newTitleIfDefault = autoTitle,
+          )
+        }
 
-          val bridgeActive = localPrefs.value.driveBridgeEnabled && localPrefs.value.driveBridgeFolderUri.isNotBlank()
-          val effectiveHost = activeHost ?: if (bridgeActive) {
-            OpenClawHost(id = "bridge", label = "Drive Bridge", baseUrl = "")
-          } else null
-          if (effectiveHost == null || (effectiveHost.effectiveBaseUrl.isBlank() && !bridgeActive)) {
-            repository.updateContextMessage(
-              userId = currentUserId,
-              chatId = resolvedChatId,
-              messageId = assistantMsgId,
-              rawText = "OpenClaw host URL isn't configured yet. Add your LAN or Tailscale gateway URL (or enable Drive Bridge) in the Host tab.",
-              modelLabel = wheelOption.fullLabel,
-              status = MessageStatus.WARNING,
-            )
-            return@launch
+        if (isGeminiDirect) {
+          val visualPayloads = preparedDocs
+            .filter { it.isImage || it.imageDataUrl.isNotBlank() || it.pageImageDataUrls.isNotEmpty() }
+            .map { doc ->
+              MediaAttachmentPayload(
+                displayName = doc.displayName,
+                uriOrPath = doc.uriOrPath,
+                mimeType = doc.mimeType,
+                linkType = doc.linkType,
+                isImage = doc.isImage,
+                imageDataUrl = doc.imageDataUrl,
+                pageImageDataUrls = doc.pageImageDataUrls,
+              )
+            }
+          val imageBitmaps = if (visualPayloads.isNotEmpty()) {
+            attachmentReader.decodeBitmapsForGemini(visualPayloads)
+          } else {
+            emptyList()
           }
-
+          val historyPairs = history.takeLast(8).map {
+            (if (it.senderEnum == MessageSender.USER) "User" else "Captain Context") to it.rawText
+          }
+          val vaultPrompt = buildString {
+            appendLine("You are CAPTAIN CONTEXT, a crisp document-grounded superhero assistant.")
+            appendLine("CRITICAL: Ground every factual answer ONLY in the Vault documents and attached page/image visuals below. Cite filenames inline as [Source: <filename>]. If something is missing from the documents, state that clearly instead of guessing.")
+            if (preparedDocs.isEmpty()) {
+              appendLine("No documents are currently loaded in the Vault.")
+            } else {
+              appendLine("Loaded Document Vault:")
+              preparedDocs.forEach { doc ->
+                appendLine("=== ${doc.displayName} (${doc.status.name}) ===")
+                if (doc.status == ContextDocStatus.READY && doc.extractedText.isNotBlank()) {
+                  appendLine(doc.extractedText.take(12000))
+                } else if (doc.status != ContextDocStatus.READY) {
+                  appendLine("[Status: ${doc.status.name} — ${doc.statusDetail}]")
+                }
+              }
+            }
+          }
           contextTargets[resolvedChatId] = ActiveMessageTarget.ContextTarget(
             resolvedChatId,
             assistantMsgId,
             wheelOption.fullLabel,
           )
-          val replyRes = withContextRequestLifecycle(resolvedChatId) {
-            openClawClient.sendCaptainContextChat(
-              host = effectiveHost,
-              userId = currentUserId,
-              conversationId = resolvedChatId,
-              contextDocs = preparedDocs,
-              history = history,
+          val geminiRes = withContextRequestLifecycle(resolvedChatId) {
+            refinerService.streamGeminiChat(
               userPrompt = trimmed,
-              wheelOption = wheelOption,
-              providerKeys = currentProviderKeys(),
+              history = historyPairs,
+              imageBitmaps = imageBitmaps,
+              systemDirective = vaultPrompt,
               onPartialText = { partial ->
                 _contextStreamingPreviews.update { it + (resolvedChatId to partial) }
               },
             )
           }
-
-          replyRes.onSuccess { res ->
-            val cited = extractCitedDocsFromReply(res.replyText, preparedDocs)
+          batchJob.join()
+          geminiRes.onSuccess { replyText ->
+            val cited = extractCitedDocsFromReply(replyText, preparedDocs)
               .ifEmpty { docLabelsUsed }
             repository.updateContextMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               messageId = assistantMsgId,
-              rawText = res.replyText,
-              modelLabel = res.mediaModel?.takeIf { it.isNotBlank() } ?: wheelOption.fullLabel,
+              rawText = replyText,
+              modelLabel = wheelOption.fullLabel,
               status = MessageStatus.COMPLETED,
               citedDocs = cited,
-              mediaUrl = res.mediaUrl,
-              mediaType = res.mediaType,
-              mediaPrompt = res.mediaPrompt,
-              mediaModel = res.mediaModel,
-              mediaDurationSec = res.mediaDurationSec,
             )
-            archiveGeneratedMediaIfPresent(res, "Captain Context", trimmed)
           }.onFailure { err ->
-            val cleanMsg = maybeShowFastConnectBanner(err, effectiveHost) { switchedHost ->
-              sendCaptainContextMessage(chat, trimmed, wheelOption, switchedHost, onThreadReady)
-            }
             repository.updateContextMessage(
               userId = currentUserId,
               chatId = resolvedChatId,
               messageId = assistantMsgId,
-              rawText = cleanMsg,
+              rawText = "Gemini 3.8 Flash error: ${err.localizedMessage ?: "Unknown error"}",
               modelLabel = wheelOption.fullLabel,
               status = MessageStatus.FAILED,
             )
           }
-        } finally {
-          _busyContextChatIds.update { it - resolvedChatId }
+          return@launch
         }
+
+        val bridgeActive = localPrefs.value.driveBridgeEnabled && localPrefs.value.driveBridgeFolderUri.isNotBlank()
+        val effectiveHost = activeHost ?: if (bridgeActive) {
+          OpenClawHost(id = "bridge", label = "Drive Bridge", baseUrl = "")
+        } else null
+        if (effectiveHost == null || (effectiveHost.effectiveBaseUrl.isBlank() && !bridgeActive)) {
+          batchJob.join()
+          repository.updateContextMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            messageId = assistantMsgId,
+            rawText = "OpenClaw host URL isn't configured yet. Add your LAN or Tailscale gateway URL (or enable Drive Bridge) in the Host tab.",
+            modelLabel = wheelOption.fullLabel,
+            status = MessageStatus.WARNING,
+          )
+          return@launch
+        }
+
+        contextTargets[resolvedChatId] = ActiveMessageTarget.ContextTarget(
+          resolvedChatId,
+          assistantMsgId,
+          wheelOption.fullLabel,
+        )
+        val replyRes = withContextRequestLifecycle(resolvedChatId) {
+          openClawClient.sendCaptainContextChat(
+            host = effectiveHost,
+            userId = currentUserId,
+            conversationId = resolvedChatId,
+            contextDocs = preparedDocs,
+            history = history,
+            userPrompt = trimmed,
+            wheelOption = wheelOption,
+            providerKeys = currentProviderKeys(),
+            onPartialText = { partial ->
+              _contextStreamingPreviews.update { it + (resolvedChatId to partial) }
+            },
+          )
+        }
+
+        batchJob.join()
+        replyRes.onSuccess { res ->
+          val cited = extractCitedDocsFromReply(res.replyText, preparedDocs)
+            .ifEmpty { docLabelsUsed }
+          repository.updateContextMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            messageId = assistantMsgId,
+            rawText = res.replyText,
+            modelLabel = res.mediaModel?.takeIf { it.isNotBlank() } ?: wheelOption.fullLabel,
+            status = MessageStatus.COMPLETED,
+            citedDocs = cited,
+            mediaUrl = res.mediaUrl,
+            mediaType = res.mediaType,
+            mediaPrompt = res.mediaPrompt,
+            mediaModel = res.mediaModel,
+            mediaDurationSec = res.mediaDurationSec,
+          )
+          archiveGeneratedMediaIfPresent(res, "Captain Context", trimmed)
+        }.onFailure { err ->
+          val cleanMsg = maybeShowFastConnectBanner(err, effectiveHost) { switchedHost ->
+            sendCaptainContextMessage(chat, trimmed, wheelOption, switchedHost, onThreadReady)
+          }
+          repository.updateContextMessage(
+            userId = currentUserId,
+            chatId = resolvedChatId,
+            messageId = assistantMsgId,
+            rawText = cleanMsg,
+            modelLabel = wheelOption.fullLabel,
+            status = MessageStatus.FAILED,
+          )
+        }
+      } finally {
+        _busyContextChatIds.update { it - resolvedChatId }
       }
-      contextJobs[resolvedChatId] = streamJob
-      streamJob.invokeOnCompletion { contextJobs.remove(resolvedChatId, streamJob) }
     }
+    contextJobs[resolvedChatId] = streamJob
+    streamJob.invokeOnCompletion { contextJobs.remove(resolvedChatId, streamJob) }
   }
 
   private suspend fun archiveGeneratedMediaIfPresent(

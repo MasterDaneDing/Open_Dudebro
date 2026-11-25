@@ -298,14 +298,8 @@ private fun AuthenticatedWorkspace(
   val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
   val busyBotIds by viewModel.busyBotIds.collectAsStateWithLifecycle()
   val isSelectedBotBusy by viewModel.isSelectedBotBusy.collectAsStateWithLifecycle()
-  val selectedBotElapsedSec by viewModel.selectedBotElapsedSec.collectAsStateWithLifecycle()
-  val selectedBotStreamingPreview by viewModel.selectedBotStreamingPreview.collectAsStateWithLifecycle()
   val isSelectedGeneralBusy by viewModel.isSelectedGeneralBusy.collectAsStateWithLifecycle()
-  val generalElapsedSec by viewModel.generalElapsedSec.collectAsStateWithLifecycle()
-  val generalStreamingPreview by viewModel.generalStreamingPreview.collectAsStateWithLifecycle()
   val isSelectedContextBusy by viewModel.isSelectedContextBusy.collectAsStateWithLifecycle()
-  val contextElapsedSec by viewModel.contextElapsedSec.collectAsStateWithLifecycle()
-  val contextStreamingPreview by viewModel.contextStreamingPreview.collectAsStateWithLifecycle()
   val backgroundTasks by viewModel.backgroundTasks.collectAsStateWithLifecycle()
   val cafeSessions by viewModel.cafeSessions.collectAsStateWithLifecycle()
   val isRoomBusy by viewModel.isRoomBusy.collectAsStateWithLifecycle()
@@ -382,49 +376,9 @@ private fun AuthenticatedWorkspace(
       .fillMaxSize()
       .then(
         when {
-          isNeonPinkRoute -> {
-            Modifier
-              .background(
-                Brush.verticalGradient(
-                  colors = listOf(
-                    Color(0xFFFF1A8C),
-                    Color(0xFFFF3DA8),
-                    Color(0xFFE6007A),
-                  )
-                )
-              )
-              .background(
-                Brush.radialGradient(
-                  colors = listOf(
-                    Color(0x55FF9CE6),
-                    Color.Transparent,
-                  ),
-                  center = Offset(540f, 380f),
-                  radius = 850f,
-                )
-              )
-          }
-          isGeneralRoute -> {
-            Modifier.background(
-              Brush.verticalGradient(
-                colors = listOf(
-                  Color(0xFF6A00F4),
-                  Color(0xFFFF6D00),
-                )
-              )
-            )
-          }
-          isContextRoute -> {
-            Modifier.background(
-              Brush.verticalGradient(
-                colors = listOf(
-                  Color(0xFF152778),
-                  Color(0xFF2744B8),
-                  Color(0xFF0E1B54),
-                )
-              )
-            )
-          }
+          isNeonPinkRoute -> Modifier.background(Color(0xFFE6007A))
+          isGeneralRoute -> Modifier.background(Color(0xFFFF6D00))
+          isContextRoute -> Modifier.background(Color(0xFF101A52))
           isFilesRoute || isSettingsRoute -> {
             Modifier.background(
               Brush.verticalGradient(
@@ -511,6 +465,8 @@ private fun AuthenticatedWorkspace(
             }
 
             composable(ROUTE_GENERAL) {
+              val generalElapsedSec by viewModel.generalElapsedSec.collectAsStateWithLifecycle()
+              val generalStreamingPreview by viewModel.generalStreamingPreview.collectAsStateWithLifecycle()
               GeneralChatScreen(
                 generalChatsState = generalChatsState,
                 selectedChatId = selectedGeneralChatId,
@@ -557,6 +513,8 @@ private fun AuthenticatedWorkspace(
             }
 
             composable(ROUTE_CONTEXT) {
+              val contextElapsedSec by viewModel.contextElapsedSec.collectAsStateWithLifecycle()
+              val contextStreamingPreview by viewModel.contextStreamingPreview.collectAsStateWithLifecycle()
               CaptainContextScreen(
                 contextChatsState = contextChatsState,
                 selectedChatId = selectedContextChatId,
@@ -596,6 +554,8 @@ private fun AuthenticatedWorkspace(
             }
 
             composable(ROUTE_CHAT) {
+              val selectedBotElapsedSec by viewModel.selectedBotElapsedSec.collectAsStateWithLifecycle()
+              val selectedBotStreamingPreview by viewModel.selectedBotStreamingPreview.collectAsStateWithLifecycle()
               ChatWorkspaceScreen(
                 botsState = botsState,
                 selectedBotId = selectedBotId,

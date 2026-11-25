@@ -1,5 +1,6 @@
 package com.example.data.ai
 
+import android.graphics.Bitmap
 import android.util.Log
 import com.example.model.BotExpression
 import com.example.model.BotFunctionPreset
@@ -9,6 +10,7 @@ import com.example.model.RoomMessage
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
+import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -74,6 +76,12 @@ class PromptRefinerService {
         responseMimeType = "application/json"
         responseSchema = instructionSchema
       },
+    )
+  }
+
+  private val visionChatModel by lazy {
+    Firebase.ai.generativeModel(
+      modelName = "gemini-3.8-flash",
     )
   }
 
@@ -149,6 +157,7 @@ class PromptRefinerService {
     casualMessage: String,
     attachedFiles: List<String>,
     linkedPaths: List<String>,
+    imageBitmaps: List<Bitmap> = emptyList(),
   ): Result<ParsedInstructionResult> {
     return try {
       val prompt = buildString {
@@ -165,13 +174,21 @@ class PromptRefinerService {
         if (linkedPaths.isNotEmpty()) {
           appendLine("Linked host paths/URLs: ${linkedPaths.joinToString(", ")}")
         }
+        if (imageBitmaps.isNotEmpty()) {
+          appendLine("The user attached ${imageBitmaps.size} image(s) for visual inspection. Incorporate what you observe in the image(s) into clearInstruction and friendlyBotReply.")
+        }
         appendLine()
         appendLine("User's casual message:")
         appendLine(casualMessage)
       }
 
+      val requestContent = content {
+        imageBitmaps.take(4).forEach { bmp -> image(bmp) }
+        text(prompt)
+      }
+
       val response = withTimeout(60_000L) {
-        model.generateContent(prompt)
+        model.generateContent(requestContent)
       }
       val jsonText = response.text?.takeIf { it.isNotBlank() }
         ?: return Result.failure(IllegalStateException("Gemini returned an empty response."))
@@ -205,6 +222,70 @@ class PromptRefinerService {
       throw e
     } catch (e: Exception) {
       Log.e(TAG, "Prompt refinement failed", e)
+      Result.failure(e)
+    }
+  }
+
+  /**
+   * Streams a direct multimodal response from Gemini 3.8 Flash (`Firebase.ai`) accepting text,
+   * conversation history, optional document/system context, and up to 4 attached images/pages.
+   */
+  suspend fun streamGeminiChat(
+    userPrompt: String,
+    history: List<Pair<String, String>> = emptyList(),
+    imageBitmaps: List<Bitmap> = emptyList(),
+    systemDirective: String? = null,
+    onPartialText: (String) -> Unit = {},
+  ): Result<String> {
+    return try {
+      val fullPrompt = buildString {
+        if (!systemDirective.isNullOrBlank()) {
+          appendLine(systemDirective.trim())
+          appendLine()
+        }
+        if (history.isNotEmpty()) {
+          appendLine("Recent conversation:")
+          history.takeLast(10).forEach { (role, text) ->
+            if (text.isNotBlank()) {
+              appendLine("[$role]: ${text.take(2000)}")
+            }
+          }
+          appendLine()
+        }
+        if (imageBitmaps.isNotEmpty()) {
+          appendLine("[${imageBitmaps.size} image(s) attached — inspect visual details carefully.]")
+        }
+        append(userPrompt.trim())
+      }
+
+      val requestContent = content(role = "user") {
+        imageBitmaps.take(4).forEach { bmp -> image(bmp) }
+        text(fullPrompt)
+      }
+
+      val sb = StringBuilder()
+      withTimeout(90_000L) {
+        visionChatModel.generateContentStream(requestContent).collect { chunk ->
+          val piece = chunk.text.orEmpty()
+          if (piece.isNotEmpty()) {
+            sb.append(piece)
+            onPartialText(sb.toString())
+          }
+        }
+      }
+      val finalText = sb.toString().trim()
+      if (finalText.isBlank()) {
+        Result.failure(IllegalStateException("Gemini 3.8 Flash returned an empty response."))
+      } else {
+        Result.success(finalText)
+      }
+    } catch (e: TimeoutCancellationException) {
+      Log.e(TAG, "Gemini 3.8 Flash stream timed out", e)
+      Result.failure(IllegalStateException("Gemini 3.8 Flash timed out after 90s. Please retry.", e))
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      Log.e(TAG, "Gemini 3.8 Flash multimodal chat failed", e)
       Result.failure(e)
     }
   }

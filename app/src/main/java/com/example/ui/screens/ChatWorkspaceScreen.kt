@@ -40,6 +40,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -89,12 +90,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -283,9 +284,14 @@ fun ChatWorkspaceScreen(
       }
     }
   }
-  LaunchedEffect(messages.size) {
+  var didInitialScroll by remember(selectedBotId) { mutableStateOf(false) }
+  LaunchedEffect(selectedBotId, messages.size) {
     if (messages.isEmpty()) return@LaunchedEffect
-    if (pinnedToBottom) {
+    if (!didInitialScroll) {
+      listState.scrollToItem(messages.lastIndex)
+      didInitialScroll = true
+      unreadBelow = 0
+    } else if (pinnedToBottom) {
       listState.animateScrollToItem(messages.lastIndex)
       unreadBelow = 0
     }
@@ -317,38 +323,31 @@ fun ChatWorkspaceScreen(
   Box(
     modifier = Modifier
       .fillMaxSize()
-      .background(
-        Brush.verticalGradient(
-          colors = listOf(
-            Color(0xFFFF1A8C),
-            Color(0xFFFF3DA8),
-            Color(0xFFE6007A),
-          )
-        )
-      ),
+      .background(Color(0xFFE6007A)),
   ) {
     Image(
       painter = painterResource(id = R.drawable.img_cha_chaan_teng),
       contentDescription = null,
       contentScale = ContentScale.Crop,
+      modifier = Modifier.fillMaxSize(),
+    )
+    Box(
       modifier = Modifier
         .fillMaxSize()
-        .alpha(0.24f),
+        .background(
+          Brush.verticalGradient(
+            colors = listOf(
+              Color(0xC2FF1A8C),
+              Color(0xCCFF3DA8),
+              Color(0xCCE6007A),
+            )
+          )
+        ),
     )
 
     Column(
       modifier = Modifier
         .fillMaxSize()
-        .background(
-          Brush.radialGradient(
-            colors = listOf(
-              Color(0x44FF9CE6),
-              Color.Transparent,
-            ),
-            center = Offset(540f, 380f),
-            radius = 850f,
-          )
-        )
         .padding(horizontal = 12.dp),
     ) {
     // 1. Back + Bot Crew Strip (+ Add Bot / - Remove Bot)
@@ -853,13 +852,19 @@ fun ChatWorkspaceScreen(
           )
         }
 
-        OutlinedTextField(
-          value = composerText,
-          onValueChange = { composerText = it },
-          placeholder = {
+        Box(
+          contentAlignment = Alignment.CenterStart,
+          modifier = Modifier
+            .weight(1f)
+            .defaultMinSize(minHeight = 44.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFF5D00C9))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+          if (composerText.isEmpty()) {
             Text(
               text = if (spawnInBackground || isBusy) {
-                "Spawn isolated sub-agent for ${activeBot?.name ?: "bot"}..."
+                "Spawn sub-agent for ${activeBot?.name ?: "bot"}..."
               } else {
                 "Task ${activeBot?.name ?: "bot"} (${selectedWheelModel.wheelLabel})..."
               },
@@ -868,28 +873,25 @@ fun ChatWorkspaceScreen(
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
-          },
-          colors = OutlinedTextFieldDefaults.colors(
-            focusedTextColor = Color.White,
-            unfocusedTextColor = Color.White,
-            focusedContainerColor = Color(0xFF5D00C9),
-            unfocusedContainerColor = Color(0xFF5D00C9),
-            focusedBorderColor = Color(0xFFFF9CE6),
-            unfocusedBorderColor = Color(0x99E2A4FF),
-            cursorColor = Color(0xFFFF9CE6),
-          ),
-          maxLines = 4,
-          shape = RoundedCornerShape(18.dp),
-          modifier = Modifier
-            .weight(1f)
-            .testTag("casual_chat_input"),
-        )
+          }
+          BasicTextField(
+            value = composerText,
+            onValueChange = { composerText = it },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color.White),
+            cursorBrush = SolidColor(Color(0xFFFF9CE6)),
+            maxLines = 4,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("casual_chat_input"),
+          )
+        }
 
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(4.dp))
 
         com.example.ui.components.VoiceInputButton(
           onPartial = { composerText = it },
           onResult = { composerText = it },
+          idleTint = Color.White,
           onError = { /* soft-fail; user can still type */ },
         )
 
@@ -1537,7 +1539,7 @@ private fun InteractiveChatHeadStage(
       bot = bot,
       expression = expression,
       size = headSize,
-      animate = true,
+      animate = isBusy || expression != BotExpression.HAPPY,
     )
   }
 }
@@ -1741,7 +1743,7 @@ private fun MessageBubbleItem(
           bot = bot,
           expression = message.expressionEnum,
           size = 116.dp,
-          animate = true,
+          animate = isLiveStreaming,
         )
       }
     }

@@ -42,6 +42,7 @@ fun VoiceInputButton(
   onPartial: (String) -> Unit,
   onResult: (String) -> Unit,
   modifier: Modifier = Modifier,
+  idleTint: Color = Color.White,
   onError: (String) -> Unit = {},
 ) {
   val context = LocalContext.current
@@ -50,37 +51,47 @@ fun VoiceInputButton(
   val errorCb by rememberUpdatedState(onError)
 
   var listening by remember { mutableStateOf(false) }
-  val recognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
+  var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
 
   val permissionLauncher = rememberLauncherForActivityResult(
     ActivityResultContracts.RequestPermission()
   ) { granted ->
-    if (!granted) errorCb("Microphone permission denied") else Unit
+    if (!granted) errorCb("Microphone permission denied")
   }
 
   DisposableEffect(Unit) {
-    recognizer.setRecognitionListener(object : RecognitionListener {
-      override fun onReadyForSpeech(params: Bundle?) { listening = true }
-      override fun onBeginningOfSpeech() {}
-      override fun onRmsChanged(rmsdB: Float) {}
-      override fun onBufferReceived(buffer: ByteArray?) {}
-      override fun onEndOfSpeech() { listening = false }
-      override fun onError(error: Int) {
-        listening = false
-        if (error != SpeechRecognizer.ERROR_NO_MATCH) errorCb("Voice error ($error)")
-      }
-      override fun onResults(results: Bundle?) {
-        listening = false
-        results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-          ?.firstOrNull()?.takeIf { it.isNotBlank() }?.let(resultCb)
-      }
-      override fun onPartialResults(partialResults: Bundle?) {
-        partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-          ?.firstOrNull()?.takeIf { it.isNotBlank() }?.let(partialCb)
-      }
-      override fun onEvent(eventType: Int, params: Bundle?) {}
-    })
-    onDispose { recognizer.destroy() }
+    onDispose {
+      recognizer?.destroy()
+      recognizer = null
+    }
+  }
+
+  fun ensureRecognizer(): SpeechRecognizer {
+    recognizer?.let { return it }
+    return SpeechRecognizer.createSpeechRecognizer(context).apply {
+      setRecognitionListener(object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) { listening = true }
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() { listening = false }
+        override fun onError(error: Int) {
+          listening = false
+          if (error != SpeechRecognizer.ERROR_NO_MATCH) errorCb("Voice error ($error)")
+        }
+        override fun onResults(results: Bundle?) {
+          listening = false
+          results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            ?.firstOrNull()?.takeIf { it.isNotBlank() }?.let(resultCb)
+        }
+        override fun onPartialResults(partialResults: Bundle?) {
+          partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            ?.firstOrNull()?.takeIf { it.isNotBlank() }?.let(partialCb)
+        }
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+      })
+      recognizer = this
+    }
   }
 
   fun start() {
@@ -100,13 +111,13 @@ fun VoiceInputButton(
       putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
     }
     listening = true
-    recognizer.startListening(intent)
+    ensureRecognizer().startListening(intent)
   }
 
   IconButton(
     onClick = {
       if (listening) {
-        recognizer.stopListening()
+        recognizer?.stopListening()
         listening = false
       } else {
         start()
@@ -121,7 +132,7 @@ fun VoiceInputButton(
     Icon(
       imageVector = if (listening) Icons.Rounded.MicOff else Icons.Rounded.Mic,
       contentDescription = if (listening) "Stop voice input" else "Start voice input",
-      tint = if (listening) Color.White else MaterialTheme.colorScheme.onSurface,
+      tint = if (listening) Color.White else idleTint,
     )
   }
 }

@@ -56,8 +56,10 @@ fun LlmRotaryWheelSelector(
   val options = WheelLlmOption.entries
   val selectedIdx = options.indexOf(selectedOption).coerceAtLeast(0)
 
+  val stepAngle = 360f / options.size.coerceAtLeast(1)
+
   val wheelAngle by animateFloatAsState(
-    targetValue = selectedIdx * 120f,
+    targetValue = selectedIdx * stepAngle,
     animationSpec = spring(dampingRatio = 0.48f, stiffness = 360f),
     label = "llm_rotary_wheel_angle",
   )
@@ -126,15 +128,17 @@ fun LlmRotaryWheelSelector(
                 Color(0xFFFF6D00),
                 Color(0xFFFF3DA8),
                 Color(0xFF4EE3B5),
+                Color(0xFF4285F4),
               )
-              for (i in 0 until 3) {
-                val angleRad = Math.toRadians((i * 120.0) - 90.0)
+              for (i in options.indices) {
+                val spokeColor = spokeColors[i % spokeColors.size]
+                val angleRad = Math.toRadians((i * stepAngle.toDouble()) - 90.0)
                 val end = Offset(
                   x = center.x + (radius * 0.74f * cos(angleRad)).toFloat(),
                   y = center.y + (radius * 0.74f * sin(angleRad)).toFloat(),
                 )
                 drawLine(
-                  color = spokeColors[i],
+                  color = spokeColor,
                   start = center,
                   end = end,
                   strokeWidth = 3.8f,
@@ -146,7 +150,7 @@ fun LlmRotaryWheelSelector(
                   center = end,
                 )
                 drawCircle(
-                  color = spokeColors[i],
+                  color = spokeColor,
                   radius = 3.0f,
                   center = end,
                 )
@@ -221,7 +225,7 @@ fun LlmRotaryWheelSelector(
               contentAlignment = Alignment.Center,
               modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 6.dp),
+                .padding(horizontal = 3.dp, vertical = 6.dp),
             ) {
               Text(
                 text = option.wheelLabel,
@@ -231,6 +235,7 @@ fun LlmRotaryWheelSelector(
                 textAlign = TextAlign.Center,
                 maxLines = 1,
                 softWrap = false,
+                overflow = TextOverflow.Ellipsis,
               )
             }
           }

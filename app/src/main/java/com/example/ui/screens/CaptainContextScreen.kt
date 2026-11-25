@@ -32,11 +32,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.PushPin
@@ -49,18 +51,18 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,6 +70,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -75,6 +78,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.files.MediaSaveHelper
 import com.example.model.BotExpression
 import com.example.model.CaptainContextDocument
@@ -480,9 +484,37 @@ private fun CaptainContextConversationPane(
   modifier: Modifier = Modifier,
 ) {
   val listState = rememberLazyListState()
-  LaunchedEffect(messages.size) {
-    if (messages.isNotEmpty()) {
+  val scope = rememberCoroutineScope()
+  var pinnedToBottom by remember(activeThread?.id) { mutableStateOf(true) }
+  var unreadBelow by remember(activeThread?.id) { mutableIntStateOf(0) }
+  var didInitialScroll by remember(activeThread?.id) { mutableStateOf(false) }
+
+  LaunchedEffect(listState, activeThread?.id) {
+    snapshotFlow {
+      val info = listState.layoutInfo
+      val last = info.visibleItemsInfo.lastOrNull()
+      last != null && last.index >= info.totalItemsCount - 1
+    }.collect { atBottom ->
+      pinnedToBottom = atBottom
+      if (atBottom) {
+        unreadBelow = 0
+      } else {
+        val info = listState.layoutInfo
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+        unreadBelow = (info.totalItemsCount - 1 - lastVisible).coerceIn(0, 99)
+      }
+    }
+  }
+
+  LaunchedEffect(activeThread?.id, messages.size) {
+    if (messages.isEmpty()) return@LaunchedEffect
+    if (!didInitialScroll) {
+      listState.scrollToItem(messages.lastIndex)
+      didInitialScroll = true
+      unreadBelow = 0
+    } else if (pinnedToBottom) {
       listState.animateScrollToItem(messages.lastIndex)
+      unreadBelow = 0
     }
   }
 
@@ -545,7 +577,7 @@ private fun CaptainContextConversationPane(
         CaptainContextAvatar(
           expression = heroMood,
           size = 44.dp,
-          animate = true,
+          animate = isBusy,
           showCapeAndScroll = true,
         )
 
@@ -664,7 +696,7 @@ private fun CaptainContextConversationPane(
                 CaptainContextAvatar(
                   expression = heroMood,
                   size = 110.dp,
-                  animate = true,
+                  animate = isBusy,
                   showCapeAndScroll = true,
                 )
                 Spacer(Modifier.height(6.dp))
@@ -882,6 +914,34 @@ private fun CaptainContextConversationPane(
                   }
                 }
               }
+              if (unreadBelow > 0) {
+                FilledIconButton(
+                  onClick = {
+                    scope.launch { listState.animateScrollToItem(messages.lastIndex) }
+                    unreadBelow = 0
+                  },
+                  colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = HeroRoyalBlue,
+                    contentColor = Color.White,
+                  ),
+                  modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 12.dp)
+                    .testTag("context_jump_to_latest_button"),
+                ) {
+                  Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                  ) {
+                    Icon(Icons.Rounded.ArrowDownward, contentDescription = "Jump to latest", Modifier.size(16.dp))
+                    Text(
+                      text = if (unreadBelow >= 99) "99+" else unreadBelow.toString(),
+                      style = MaterialTheme.typography.labelSmall,
+                    )
+                  }
+                }
+              }
             }
           }
         }
@@ -964,42 +1024,50 @@ private fun CaptainContextConversationPane(
             )
           }
 
-          OutlinedTextField(
-            value = composerText,
-            onValueChange = onComposerChange,
-            placeholder = {
+          Box(
+            contentAlignment = Alignment.CenterStart,
+            modifier = Modifier
+              .weight(1f)
+              .defaultMinSize(minHeight = 44.dp)
+              .clip(RoundedCornerShape(18.dp))
+              .background(Color(0xFFEFF4FF))
+              .padding(horizontal = 12.dp, vertical = 10.dp),
+          ) {
+            if (composerText.isEmpty()) {
               Text(
-                text = if (activeDocs.isEmpty()) "Load docs above or ask Captain Context..." else "Ask about your loaded docs...",
+                text = if (activeDocs.isEmpty()) "Load docs or ask Captain Context..." else "Ask about your docs...",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFF3949AB),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
               )
-            },
-            colors = OutlinedTextFieldDefaults.colors(
-              focusedTextColor = HeroComicInk,
-              unfocusedTextColor = HeroComicInk,
-              focusedBorderColor = HeroRoyalBlue,
-              unfocusedBorderColor = Color(0x661E5BFF),
-            ),
-            maxLines = 4,
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier
-              .weight(1f)
-              .testTag("context_chat_input"),
-          )
-          Spacer(Modifier.width(4.dp))
+            }
+            BasicTextField(
+              value = composerText,
+              onValueChange = onComposerChange,
+              textStyle = MaterialTheme.typography.bodyMedium.copy(color = HeroComicInk),
+              cursorBrush = SolidColor(HeroRoyalBlue),
+              maxLines = 4,
+              modifier = Modifier
+                .fillMaxWidth()
+                .testTag("context_chat_input"),
+            )
+          }
+          Spacer(Modifier.width(2.dp))
           VoiceInputButton(
             onPartial = onComposerChange,
             onResult = onComposerChange,
+            idleTint = HeroRoyalBlue,
           )
-          Spacer(Modifier.width(4.dp))
+          Spacer(Modifier.width(2.dp))
           FilledIconButton(
             onClick = onSend,
             enabled = composerText.isNotBlank() && !isBusy,
             colors = IconButtonDefaults.filledIconButtonColors(
               containerColor = HeroRoyalBlue,
               contentColor = Color.White,
+              disabledContainerColor = Color(0x441E5BFF),
+              disabledContentColor = Color(0xAA3949AB),
             ),
             modifier = Modifier
               .size(48.dp)

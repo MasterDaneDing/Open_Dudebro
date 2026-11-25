@@ -1257,4 +1257,57 @@ class OpenClawIntegrationTest {
       tempFilesDir.deleteRecursively()
     }
   }
+
+  @Test
+  fun tailscaleMode_neverFallsBackToLan_failsFast_andResolvesGeminiFlashWheel() = runTest {
+    val deadTailscalePort = findClosedLocalPort()
+    val workingLanHits = AtomicInteger(0)
+    val lanServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    lanServer.createContext("/v1/chat/completions") { ex ->
+      workingLanHits.incrementAndGet()
+      val err = """{"error":{"message":"should not reach LAN in Tailscale mode"}}""".toByteArray(StandardCharsets.UTF_8)
+      ex.sendResponseHeaders(500, err.size.toLong())
+      ex.responseBody.use { it.write(err) }
+    }
+    lanServer.start()
+
+    try {
+      val hostTailscale = OpenClawHost(
+        id = "h-ts-only",
+        lanUrl = "http://127.0.0.1:${lanServer.address.port}",
+        tailscaleUrl = "http://127.0.0.1:$deadTailscalePort",
+        connectionMode = com.example.model.HostConnectionMode.TAILSCALE.name,
+        gatewayToken = "tok-ts",
+      )
+      // Strict routing: Tailscale mode only targets tailscaleUrl and does NOT fall back to lanUrl
+      assertEquals("http://127.0.0.1:$deadTailscalePort", hostTailscale.effectiveBaseUrl)
+      assertEquals("", hostTailscale.fallbackBaseUrl)
+
+      val client = OpenClawClient()
+      val startMs = System.currentTimeMillis()
+      val failure = client.sendGeneralChat(
+        host = hostTailscale,
+        userId = "u1",
+        conversationId = "ts-thread",
+        history = emptyList(),
+        userPrompt = "hello",
+        wheelOption = WheelLlmOption.OPENCLAW_DEFAULT,
+      ).exceptionOrNull()
+      val elapsedMs = System.currentTimeMillis() - startMs
+
+      assertNotNull(failure)
+      assertTrue("Expected fast failure (< 5000ms), took ${elapsedMs}ms", elapsedMs < 5000L)
+      assertEquals("Tailscale failure must never hit LAN server", 0, workingLanHits.get())
+      val errMsg = failure!!.message.orEmpty()
+      assertTrue("Expected Tailscale port in error message, got: $errMsg", errMsg.contains(deadTailscalePort.toString()))
+      assertFalse("LAN port must not appear in Tailscale error, got: $errMsg", errMsg.contains(lanServer.address.port.toString()))
+
+      // Gemini 3.8 Flash wheel option resolves cleanly
+      val geminiCfg = client.resolveWheelLlm(WheelLlmOption.GEMINI_FLASH, hostTailscale)
+      assertEquals(OpenClawLlmProvider.GOOGLE, geminiCfg.provider)
+      assertEquals("google/gemini-3.8-flash", geminiCfg.modelId)
+    } finally {
+      lanServer.stop(0)
+    }
+  }
 }

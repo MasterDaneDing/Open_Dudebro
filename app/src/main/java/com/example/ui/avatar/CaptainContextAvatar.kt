@@ -61,35 +61,6 @@ fun CaptainContextAvatar(
   animate: Boolean = true,
   showCapeAndScroll: Boolean = true,
 ) {
-  val infinite = rememberInfiniteTransition(label = "captain_context_idle")
-  val bobPhase by infinite.animateFloat(
-    initialValue = 0f,
-    targetValue = (2f * PI).toFloat(),
-    animationSpec = infiniteRepeatable(
-      animation = tween(durationMillis = 2100, easing = LinearEasing),
-      repeatMode = RepeatMode.Restart,
-    ),
-    label = "hero_bob",
-  )
-  val blinkCycle by infinite.animateFloat(
-    initialValue = 0f,
-    targetValue = 1f,
-    animationSpec = infiniteRepeatable(
-      animation = tween(durationMillis = 3500, easing = LinearEasing),
-      repeatMode = RepeatMode.Restart,
-    ),
-    label = "hero_blink",
-  )
-  val sparkPulse by infinite.animateFloat(
-    initialValue = 0.78f,
-    targetValue = 1.16f,
-    animationSpec = infiniteRepeatable(
-      animation = tween(durationMillis = 680, easing = FastOutSlowInEasing),
-      repeatMode = RepeatMode.Reverse,
-    ),
-    label = "hero_spark",
-  )
-
   val bounceTarget = when (expression) {
     BotExpression.UH_HUH -> 1.08f
     BotExpression.WORKING -> 1.04f
@@ -98,21 +69,62 @@ fun CaptainContextAvatar(
     BotExpression.SORRY -> 0.96f
     else -> 1f
   }
-  val exprScale by animateFloatAsState(
-    targetValue = bounceTarget,
-    animationSpec = spring(dampingRatio = 0.48f, stiffness = 320f),
-    label = "hero_expr_scale",
-  )
 
-  val reactionPulse = remember { Animatable(1f) }
-  LaunchedEffect(expression) {
-    if (animate) {
+  val bobPhase: Float
+  val blinkCycle: Float
+  val sparkPulse: Float
+  val exprScale: Float
+  val reactionScale: Float
+
+  if (animate) {
+    val infinite = rememberInfiniteTransition(label = "captain_context_idle")
+    bobPhase = infinite.animateFloat(
+      initialValue = 0f,
+      targetValue = (2f * PI).toFloat(),
+      animationSpec = infiniteRepeatable(
+        animation = tween(durationMillis = 2100, easing = LinearEasing),
+        repeatMode = RepeatMode.Restart,
+      ),
+      label = "hero_bob",
+    ).value
+    blinkCycle = infinite.animateFloat(
+      initialValue = 0f,
+      targetValue = 1f,
+      animationSpec = infiniteRepeatable(
+        animation = tween(durationMillis = 3500, easing = LinearEasing),
+        repeatMode = RepeatMode.Restart,
+      ),
+      label = "hero_blink",
+    ).value
+    sparkPulse = infinite.animateFloat(
+      initialValue = 0.78f,
+      targetValue = 1.16f,
+      animationSpec = infiniteRepeatable(
+        animation = tween(durationMillis = 680, easing = FastOutSlowInEasing),
+        repeatMode = RepeatMode.Reverse,
+      ),
+      label = "hero_spark",
+    ).value
+    exprScale = animateFloatAsState(
+      targetValue = bounceTarget,
+      animationSpec = spring(dampingRatio = 0.48f, stiffness = 320f),
+      label = "hero_expr_scale",
+    ).value
+    val reactionPulse = remember { Animatable(1f) }
+    LaunchedEffect(expression) {
       reactionPulse.snapTo(1.14f)
       reactionPulse.animateTo(
         targetValue = 1f,
         animationSpec = spring(dampingRatio = 0.45f, stiffness = 340f),
       )
     }
+    reactionScale = reactionPulse.value
+  } else {
+    bobPhase = 0f
+    blinkCycle = 0f
+    sparkPulse = 1f
+    exprScale = bounceTarget
+    reactionScale = 1f
   }
 
   val isBlinking = animate && blinkCycle > 0.93f &&
@@ -143,7 +155,7 @@ fun CaptainContextAvatar(
         BotExpression.ALERT -> if (animate) sin(bobPhase * 3f) * 5f else 0f
         BotExpression.HAPPY -> if (animate) sin(bobPhase) * 3f else 0f
       }
-      val combinedScale = exprScale * reactionPulse.value
+      val combinedScale = exprScale * reactionScale
       val inkW = 4.6f * s
 
       translate(

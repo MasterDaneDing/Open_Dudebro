@@ -812,12 +812,12 @@ private fun BotInboxRow(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      // Animated blinking bot avatar right on the landing page
+      // Animate avatar only while bot is actively working
       BotVectorAvatar(
         bot = bot,
         expression = if (isBusy) BotExpression.WORKING else BotExpression.HAPPY,
         size = 54.dp,
-        animate = true,
+        animate = isBusy,
       )
 
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -902,11 +902,11 @@ private fun ChatRoomInboxRow(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      // Multi-head animated blinking Chat Room icon
+      // Static multi-head Chat Room icon to avoid 144Hz idle redraws
       MultiBotRoomIcon(
         bots = participants,
         size = 54.dp,
-        animate = true,
+        animate = false,
       )
 
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
