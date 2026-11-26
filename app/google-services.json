@@ -22,6 +22,14 @@
           }
         },
         {
+          "client_id": "747555208840-g5jebl7rea4ie88p8jhf7ud8km7fvfkc.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aistudio.clawpal.mxbkqr",
+            "certificate_hash": "36c742001134ed024e36c718328e64ef9e22e0b3"
+          }
+        },
+        {
           "client_id": "747555208840-6sue7up65j2hs4m4jnn7kgib7ep0vveu.apps.googleusercontent.com",
           "client_type": 3
         }
