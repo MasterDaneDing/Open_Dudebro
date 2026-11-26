@@ -1,5 +1,7 @@
 package com.example.viewmodel
 
+import android.os.SystemClock
+
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -230,7 +232,6 @@ class ClawPalViewModel(
 
   // Concurrent per-Bot Dude lanes (isolated execution so one bot never blocks another)
   private val botJobs = ConcurrentHashMap<String, Job>()
-  private val botElapsedJobs = ConcurrentHashMap<String, Job>()
   private val botTargets = ConcurrentHashMap<String, ActiveMessageTarget.BotTarget>()
   private val _busyBotIds = MutableStateFlow<Set<String>>(emptySet())
   val busyBotIds: StateFlow<Set<String>> = _busyBotIds.asStateFlow()
@@ -257,7 +258,6 @@ class ClawPalViewModel(
 
   // Concurrent per-General-Chat lanes
   private val generalJobs = ConcurrentHashMap<String, Job>()
-  private val generalElapsedJobs = ConcurrentHashMap<String, Job>()
   private val generalTargets = ConcurrentHashMap<String, ActiveMessageTarget.GeneralTarget>()
   private val _busyGeneralChatIds = MutableStateFlow<Set<String>>(emptySet())
   private val _generalStreamingPreviews = MutableStateFlow<Map<String, String>>(emptyMap())
@@ -277,7 +277,6 @@ class ClawPalViewModel(
 
   // Concurrent per-Captain-Context-Case lanes + Document Vault state
   private val contextJobs = ConcurrentHashMap<String, Job>()
-  private val contextElapsedJobs = ConcurrentHashMap<String, Job>()
   private val contextTargets = ConcurrentHashMap<String, ActiveMessageTarget.ContextTarget>()
   private val _busyContextChatIds = MutableStateFlow<Set<String>>(emptySet())
   private val _contextStreamingPreviews = MutableStateFlow<Map<String, String>>(emptyMap())
@@ -304,7 +303,6 @@ class ClawPalViewModel(
   private val _backgroundTasks = MutableStateFlow<List<BackgroundAgentTask>>(emptyList())
   val backgroundTasks: StateFlow<List<BackgroundAgentTask>> = _backgroundTasks.asStateFlow()
   private val backgroundTaskJobs = ConcurrentHashMap<String, Job>()
-  private val backgroundTaskElapsedJobs = ConcurrentHashMap<String, Job>()
 
   // Cafe Mode A2A Orchestrator
   val cafeOrchestrator = CafeOrchestrator()
@@ -652,7 +650,7 @@ class ClawPalViewModel(
     val task = _backgroundTasks.value.firstOrNull { it.id == taskId } ?: return
     openClawClient.abortSession(task.subSessionKey)
     backgroundTaskJobs.remove(taskId)?.cancel()
-    backgroundTaskElapsedJobs.remove(taskId)?.cancel()
+    stopElapsed(ElapsedLane.BACKGROUND, taskId)
     _backgroundTasks.update { list ->
       list.map { item ->
         if (item.id == taskId && item.status == BackgroundTaskStatus.RUNNING) {
@@ -700,38 +698,93 @@ class ClawPalViewModel(
     _statusBanner.value = "Active requests aborted."
   }
 
-  private fun startBotElapsedTimer(botId: String) {
-    botElapsedJobs.remove(botId)?.cancel()
-    _botElapsedSecs.update { it + (botId to 0) }
-    _botStreamingPreviews.update { it - botId }
-    botElapsedJobs[botId] = viewModelScope.launch {
-      while (true) {
-        delay(1000L)
-        _botElapsedSecs.update { map -> map + (botId to ((map[botId] ?: 0) + 1)) }
+  // ---- Shared elapsed-seconds ticker -------------------------------------------------------------
+  // One coroutine serves every busy lane (bot / general / context / background sub-agent) and exits as
+  // soon as nothing is running, instead of one `while(true){delay(1000)}` job per lane. Seconds are
+  // derived from the lane's start timestamp, so a late/coalesced tick never drifts the counter.
+  private enum class ElapsedLane { BOT, GENERAL, CONTEXT, BACKGROUND }
+
+  private val elapsedStarts = ConcurrentHashMap<Pair<ElapsedLane, String>, Long>()
+  private val elapsedTickerLock = Any()
+  private var elapsedTickerJob: Job? = null
+
+  private fun startElapsed(lane: ElapsedLane, id: String) {
+    elapsedStarts[lane to id] = SystemClock.elapsedRealtime()
+    synchronized(elapsedTickerLock) {
+      if (elapsedTickerJob?.isActive == true) return
+      elapsedTickerJob = viewModelScope.launch {
+        while (elapsedStarts.isNotEmpty()) {
+          delay(1000L)
+          tickElapsed()
+        }
       }
     }
   }
 
+  private fun stopElapsed(lane: ElapsedLane, id: String) {
+    elapsedStarts.remove(lane to id)
+  }
+
+  private fun tickElapsed() {
+    val now = SystemClock.elapsedRealtime()
+    val bot = HashMap<String, Int>()
+    val general = HashMap<String, Int>()
+    val context = HashMap<String, Int>()
+    val background = HashMap<String, Int>()
+    elapsedStarts.forEach { (key, startedAt) ->
+      val secs = ((now - startedAt) / 1000L).toInt()
+      when (key.first) {
+        ElapsedLane.BOT -> bot[key.second] = secs
+        ElapsedLane.GENERAL -> general[key.second] = secs
+        ElapsedLane.CONTEXT -> context[key.second] = secs
+        ElapsedLane.BACKGROUND -> background[key.second] = secs
+      }
+    }
+    // Only touch flows whose lanes are live; untouched maps keep identity, so no needless emissions.
+    if (bot.isNotEmpty()) _botElapsedSecs.update { it + bot }
+    if (general.isNotEmpty()) _generalElapsedSecs.update { it + general }
+    if (context.isNotEmpty()) _contextElapsedSecs.update { it + context }
+    if (background.isNotEmpty()) {
+      _backgroundTasks.update { list ->
+        list.map { item ->
+          val secs = background[item.id]
+          if (secs != null && item.status == BackgroundTaskStatus.RUNNING && item.elapsedSec != secs) {
+            item.copy(elapsedSec = secs)
+          } else item
+        }
+      }
+    }
+  }
+
+  override fun onCleared() {
+    // viewModelScope already cancels coroutines; also drop in-flight HTTP calls and held wake locks
+    // so leaving the app doesn't keep a socket streaming tokens nobody will see.
+    elapsedStarts.clear()
+    runCatching { openClawClient.abortActiveRequest() }
+    runCatching { wakeLockHelper?.forceReleaseAll() }
+    super.onCleared()
+  }
+
+  private fun startBotElapsedTimer(botId: String) {
+    _botElapsedSecs.update { it + (botId to 0) }
+    _botStreamingPreviews.update { it - botId }
+    startElapsed(ElapsedLane.BOT, botId)
+  }
+
   private fun stopBotElapsedTimer(botId: String) {
-    botElapsedJobs.remove(botId)?.cancel()
+    stopElapsed(ElapsedLane.BOT, botId)
     _botElapsedSecs.update { it - botId }
     _botStreamingPreviews.update { it - botId }
   }
 
   private fun startGeneralElapsedTimer(chatId: String) {
-    generalElapsedJobs.remove(chatId)?.cancel()
     _generalElapsedSecs.update { it + (chatId to 0) }
     _generalStreamingPreviews.update { it - chatId }
-    generalElapsedJobs[chatId] = viewModelScope.launch {
-      while (true) {
-        delay(1000L)
-        _generalElapsedSecs.update { map -> map + (chatId to ((map[chatId] ?: 0) + 1)) }
-      }
-    }
+    startElapsed(ElapsedLane.GENERAL, chatId)
   }
 
   private fun stopGeneralElapsedTimer(chatId: String) {
-    generalElapsedJobs.remove(chatId)?.cancel()
+    stopElapsed(ElapsedLane.GENERAL, chatId)
     _generalElapsedSecs.update { it - chatId }
     _generalStreamingPreviews.update { it - chatId }
   }
@@ -765,19 +818,13 @@ class ClawPalViewModel(
   }
 
   private fun startContextElapsedTimer(chatId: String) {
-    contextElapsedJobs.remove(chatId)?.cancel()
     _contextElapsedSecs.update { it + (chatId to 0) }
     _contextStreamingPreviews.update { it - chatId }
-    contextElapsedJobs[chatId] = viewModelScope.launch {
-      while (true) {
-        delay(1000L)
-        _contextElapsedSecs.update { map -> map + (chatId to ((map[chatId] ?: 0) + 1)) }
-      }
-    }
+    startElapsed(ElapsedLane.CONTEXT, chatId)
   }
 
   private fun stopContextElapsedTimer(chatId: String) {
-    contextElapsedJobs.remove(chatId)?.cancel()
+    stopElapsed(ElapsedLane.CONTEXT, chatId)
     _contextElapsedSecs.update { it - chatId }
     _contextStreamingPreviews.update { it - chatId }
   }
@@ -1273,19 +1320,7 @@ class ClawPalViewModel(
     _backgroundTasks.update { (listOf(initialTask) + it).take(12) }
     _statusBanner.value = "Spawned background sub-agent for ${bot.name} ($modelLabel)"
 
-    val timerJob = viewModelScope.launch {
-      while (true) {
-        delay(1000L)
-        _backgroundTasks.update { list ->
-          list.map { item ->
-            if (item.id == taskId && item.status == BackgroundTaskStatus.RUNNING) {
-              item.copy(elapsedSec = item.elapsedSec + 1)
-            } else item
-          }
-        }
-      }
-    }
-    backgroundTaskElapsedJobs[taskId] = timerJob
+    startElapsed(ElapsedLane.BACKGROUND, taskId)
 
     val job = viewModelScope.launch {
       try {
@@ -1421,7 +1456,7 @@ class ClawPalViewModel(
           _statusBanner.value = "${bot.name} sub-agent failed: $clean"
         }
       } finally {
-        backgroundTaskElapsedJobs.remove(taskId)?.cancel()
+        stopElapsed(ElapsedLane.BACKGROUND, taskId)
       }
     }
     backgroundTaskJobs[taskId] = job
@@ -3033,15 +3068,8 @@ class ClawPalViewModel(
             if (preparedDocs.isEmpty()) {
               appendLine("No documents are currently loaded in the Vault.")
             } else {
-              appendLine("Loaded Document Vault:")
-              preparedDocs.forEach { doc ->
-                appendLine("=== ${doc.displayName} (${doc.status.name}) ===")
-                if (doc.status == ContextDocStatus.READY && doc.extractedText.isNotBlank()) {
-                  appendLine(doc.extractedText.take(12000))
-                } else if (doc.status != ContextDocStatus.READY) {
-                  appendLine("[Status: ${doc.status.name} — ${doc.statusDetail}]")
-                }
-              }
+              // Same capped/deduped deck as the OpenClaw path (was 12k chars x every doc, unbounded).
+              appendLine(openClawClient.buildCaptainContextPromptDeck(preparedDocs))
             }
           }
           contextTargets[resolvedChatId] = ActiveMessageTarget.ContextTarget(

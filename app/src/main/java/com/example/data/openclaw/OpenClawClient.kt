@@ -713,16 +713,20 @@ class OpenClawClient(
 
       val messagesArray = JSONArray().apply {
         put(JSONObject().put("role", "system").put("content", systemPrompt))
-        history.takeLast(8).forEach { msg ->
-          val text = msg.rawText.trim()
-          if (text.isNotBlank() &&
-            msg.statusEnum != com.example.model.MessageStatus.PARSING &&
-            msg.statusEnum != com.example.model.MessageStatus.DISPATCHED
-          ) {
-            val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
-            put(JSONObject().put("role", role).put("content", text.take(2500)))
+        // Filter first, then take the window, so placeholders/error banners neither eat slots nor get
+        // replayed as if the bot had said them. Inline base64 images are stripped (pure token waste).
+        history
+          .filter { msg ->
+            msg.rawText.isNotBlank() &&
+              msg.statusEnum != com.example.model.MessageStatus.PARSING &&
+              msg.statusEnum != com.example.model.MessageStatus.DISPATCHED &&
+              msg.statusEnum != com.example.model.MessageStatus.FAILED
           }
-        }
+          .takeLast(BOT_HISTORY_TURNS)
+          .forEach { msg ->
+            val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
+            put(JSONObject().put("role", role).put("content", compactHistoryText(msg.rawText, BOT_HISTORY_CHARS)))
+          }
         put(JSONObject().put("role", "user").put("content", buildUserMessageContent(contentText, attachmentPayloads)))
       }
 
@@ -933,7 +937,7 @@ class OpenClawClient(
           .takeLast(GENERAL_HISTORY_TURNS)
           .forEach { msg ->
             val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
-            put(JSONObject().put("role", role).put("content", msg.rawText.trim().take(GENERAL_HISTORY_CHARS)))
+            put(JSONObject().put("role", role).put("content", compactHistoryText(msg.rawText, GENERAL_HISTORY_CHARS)))
           }
         put(JSONObject().put("role", "user").put("content", buildUserMessageContent(enrichedPrompt, attachmentPayloads)))
       }
@@ -1020,21 +1024,29 @@ class OpenClawClient(
    */
   fun buildCaptainContextPromptDeck(
     docs: List<CaptainContextDocument>,
-    maxTotalChars: Int = 38_000,
+    maxTotalChars: Int = CONTEXT_DECK_MAX_CHARS,
+    maxTextDocs: Int = CONTEXT_DECK_MAX_TEXT_DOCS,
   ): String {
     if (docs.isEmpty()) {
       return "[CONTEXT VAULT STATUS: EMPTY — No documents are currently loaded.]"
     }
-    val readyDocs = docs.filter { it.status == ContextDocStatus.READY }
-    val perDocBudget = if (readyDocs.isNotEmpty()) {
-      maxOf(1_800, maxTotalChars / readyDocs.size)
-    } else {
-      maxTotalChars
+    // Same file added twice (re-picked, or same Drive link) must not be paid for twice.
+    val uniqueDocs = dedupeContextDocs(docs)
+    val cleanedText = HashMap<String, String>(uniqueDocs.size)
+    val textDocs = uniqueDocs.filter { doc ->
+      doc.status == ContextDocStatus.READY &&
+        compactDocText(doc.extractedText).also { cleanedText[docKey(doc)] = it }.isNotEmpty()
     }
+    // Hard cap the number of docs whose text is inlined; the rest are still listed by name so the
+    // model can say "that file is loaded but wasn't inlined - ask about it specifically".
+    val inlined = textDocs.take(maxTextDocs.coerceAtLeast(1))
+    val inlinedKeys = inlined.mapTo(HashSet()) { docKey(it) }
+    val budgets = fairShareBudgets(inlined.map { cleanedText[docKey(it)].orEmpty().length }, maxTotalChars)
+    val budgetByKey = inlined.mapIndexed { i, d -> docKey(d) to budgets[i] }.toMap()
 
     return buildString {
-      appendLine("=== CAPTAIN CONTEXT DOCUMENT VAULT (${docs.size} item(s)) ===")
-      docs.forEachIndexed { idx, doc ->
+      appendLine("=== CAPTAIN CONTEXT DOCUMENT VAULT (${uniqueDocs.size} item(s)) ===")
+      uniqueDocs.forEachIndexed { idx, doc ->
         val num = idx + 1
         val typeTag = when {
           doc.isGoogleDriveUrl -> "GOOGLE_DRIVE"
@@ -1047,14 +1059,20 @@ class OpenClawClient(
         appendLine("[DOCUMENT #$num | Source: ${doc.displayName} | Type: $typeTag | Ref: ${doc.uriOrPath}]")
         when (doc.status) {
           ContextDocStatus.READY -> {
-            val raw = doc.extractedText.trim()
+            val key = docKey(doc)
+            val raw = cleanedText[key].orEmpty()
             if (raw.isNotEmpty()) {
-              val snippet = if (raw.length > perDocBudget) {
-                raw.take(perDocBudget) + "\n...[truncated after $perDocBudget chars of ${raw.length}; ask for specific sections if needed]"
+              if (key in inlinedKeys) {
+                val budget = budgetByKey[key] ?: 0
+                val snippet = if (raw.length > budget) {
+                  raw.take(budget) + "\n...[truncated after $budget chars of ${raw.length}; ask for specific sections if needed]"
+                } else {
+                  raw
+                }
+                appendLine(snippet)
               } else {
-                raw
+                appendLine("[Text not inlined this turn (vault holds ${textDocs.size} text docs; first $maxTextDocs inlined). Ask about ${doc.displayName} specifically.]")
               }
-              appendLine(snippet)
             }
             if (doc.imageDataUrl.isNotBlank()) {
               appendLine("(Attached inline image: ${doc.displayName})")
@@ -1078,6 +1096,51 @@ class OpenClawClient(
       }
       append("=== END CAPTAIN CONTEXT DOCUMENT VAULT ===")
     }.trim()
+  }
+
+  private fun docKey(doc: CaptainContextDocument): String =
+    doc.uriOrPath.trim().ifBlank { doc.id.ifBlank { doc.displayName } }.lowercase(Locale.US)
+
+  /** Drops repeat entries of the same source (same ref, or same name + identical text), keeping the first. */
+  internal fun dedupeContextDocs(docs: List<CaptainContextDocument>): List<CaptainContextDocument> {
+    val seenRefs = HashSet<String>()
+    val seenContent = HashSet<String>()
+    return docs.filter { doc ->
+      val refOk = seenRefs.add(docKey(doc))
+      val contentSig = if (doc.status == ContextDocStatus.READY && doc.extractedText.isNotBlank()) {
+        doc.displayName.lowercase(Locale.US) + "|" + doc.extractedText.length + "|" + doc.extractedText.hashCode()
+      } else null
+      val contentOk = contentSig == null || seenContent.add(contentSig)
+      refOk && contentOk
+    }
+  }
+
+  /**
+   * Splits [total] across docs so short docs keep all their text and the unused share flows to longer
+   * docs (water-filling). The sum of the returned budgets never exceeds [total].
+   */
+  internal fun fairShareBudgets(lengths: List<Int>, total: Int): List<Int> {
+    if (lengths.isEmpty()) return emptyList()
+    val budgets = IntArray(lengths.size)
+    var remaining = total.coerceAtLeast(0)
+    var open = lengths.indices.sortedBy { lengths[it] }
+    while (open.isNotEmpty() && remaining > 0) {
+      val share = remaining / open.size
+      if (share == 0) break
+      val (fits, rest) = open.partition { lengths[it] - budgets[it] <= share }
+      if (fits.isEmpty()) {
+        rest.forEach { budgets[it] += share }
+        remaining -= share * rest.size
+        break
+      }
+      fits.forEach {
+        val need = lengths[it] - budgets[it]
+        budgets[it] += need
+        remaining -= need
+      }
+      open = rest
+    }
+    return budgets.toList()
   }
 
   /**
@@ -1111,7 +1174,7 @@ class OpenClawClient(
     try {
       val systemPrompt = buildCaptainContextSystemPrompt(contextDocs)
       val contextDeck = buildCaptainContextPromptDeck(contextDocs)
-      val payloads = contextDocs
+      val payloads = dedupeContextDocs(contextDocs)
         .filter { it.status == ContextDocStatus.READY }
         .map { it.toMediaAttachmentPayload() }
 
@@ -1124,16 +1187,20 @@ class OpenClawClient(
 
       val messagesArray = JSONArray().apply {
         put(JSONObject().put("role", "system").put("content", systemPrompt))
-        history.takeLast(12).forEach { msg ->
-          val txt = msg.rawText.trim()
-          if (txt.isNotBlank() &&
-            msg.statusEnum != com.example.model.MessageStatus.PARSING &&
-            msg.statusEnum != com.example.model.MessageStatus.DISPATCHED
-          ) {
-            val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
-            put(JSONObject().put("role", role).put("content", txt.take(3000)))
+        // The full Document Vault deck rides on the latest user turn, so older turns only need to carry
+        // the thread of the conversation, not the documents again.
+        history
+          .filter { msg ->
+            msg.rawText.isNotBlank() &&
+              msg.statusEnum != com.example.model.MessageStatus.PARSING &&
+              msg.statusEnum != com.example.model.MessageStatus.DISPATCHED &&
+              msg.statusEnum != com.example.model.MessageStatus.FAILED
           }
-        }
+          .takeLast(CONTEXT_HISTORY_TURNS)
+          .forEach { msg ->
+            val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
+            put(JSONObject().put("role", role).put("content", compactHistoryText(msg.rawText, CONTEXT_HISTORY_CHARS)))
+          }
         put(JSONObject().put("role", "user").put("content", buildUserMessageContent(enrichedPrompt, payloads)))
       }
 
@@ -1577,7 +1644,7 @@ class OpenClawClient(
         put(JSONObject().put("role", "system").put("content", systemPrompt))
         recentHistory.takeLast(8).forEach { msg ->
           val role = if (msg.senderTypeEnum == MessageSender.USER) "user" else "assistant"
-          put(JSONObject().put("role", role).put("content", "[${msg.senderBotName}]: ${msg.rawText}"))
+          put(JSONObject().put("role", role).put("content", "[${msg.senderBotName}]: ${compactHistoryText(msg.rawText, CAFE_ENTRY_CHARS)}"))
         }
         put(JSONObject().put("role", "user").put("content", userPrompt))
       }
@@ -1693,7 +1760,7 @@ class OpenClawClient(
               val targetTag = entry.replyToBotName?.let { " -> @$it" } ?: ""
               "[${entry.speakerName}$targetTag]: ${entry.content}"
             }
-            put(JSONObject().put("role", role).put("content", formatted.take(3000)))
+            put(JSONObject().put("role", role).put("content", compactHistoryText(formatted, CAFE_ENTRY_CHARS)))
           }
           val last = window.last()
           val lastWasSelf = last.role == CafeSpeakerRole.BOT &&
@@ -1770,8 +1837,8 @@ class OpenClawClient(
       ).map { parsed ->
         // Strip leading "[BotName]: " if an LLM echoes the attribution prefix
         val prefixPattern = Regex("^\\[${Regex.escape(speakerBot.name)}(?:\\s*->[^\\]]+)?\\]\\s*:?\\s*", RegexOption.IGNORE_CASE)
-        val hadDone = Regex("\\[\\[DONE\\]\\]", RegexOption.IGNORE_CASE).containsMatchIn(parsed.replyText)
-        val stripped = parsed.replyText.replace(Regex("\\s*\\[\\[DONE\\]\\]\\s*", RegexOption.IGNORE_CASE), " ")
+        val hadDone = DONE_TOKEN_REGEX.containsMatchIn(parsed.replyText)
+        val stripped = parsed.replyText.replace(DONE_TOKEN_STRIP_REGEX, " ")
         val cleaned = stripped.replaceFirst(prefixPattern, "").trim().ifBlank { parsed.replyText }
         parsed.copy(
           replyText = cleaned,
@@ -1970,6 +2037,28 @@ class OpenClawClient(
         }
       }
     }
+  }
+
+  /**
+   * Prepares an old chat turn for replay: replaces inline base64 data-URLs (screenshots the bot
+   * echoed back, often 100 KB+) with a short marker and caps the length. Cheap fast path when the
+   * text has no data-URL.
+   */
+  internal fun compactHistoryText(raw: String, maxChars: Int): String {
+    val trimmed = raw.trim()
+    val noBlobs = if (trimmed.contains("base64,", ignoreCase = true)) {
+      INLINE_DATA_URL_REGEX.replace(trimmed, "[inline image omitted]")
+    } else {
+      trimmed
+    }
+    return if (noBlobs.length > maxChars) noBlobs.take(maxChars) + " …" else noBlobs
+  }
+
+  /** Squeezes runs of blank lines / trailing spaces out of extracted document text (often 10–20% of PDF dumps). */
+  private fun compactDocText(raw: String): String {
+    val t = raw.trim()
+    if (t.isEmpty()) return t
+    return TRAILING_SPACES_REGEX.replace(t, "\n").let { EXTRA_BLANK_LINES_REGEX.replace(it, "\n\n") }
   }
 
   private fun buildUserMessageContent(
@@ -2643,6 +2732,18 @@ class OpenClawClient(
     const val PARTIAL_EMIT_INTERVAL_MS = 40L
     const val GENERAL_HISTORY_TURNS = 6
     const val GENERAL_HISTORY_CHARS = 2_000
+    const val BOT_HISTORY_TURNS = 8
+    const val BOT_HISTORY_CHARS = 2_000
+    const val CONTEXT_HISTORY_TURNS = 8
+    const val CONTEXT_HISTORY_CHARS = 1_500
+    const val CONTEXT_DECK_MAX_CHARS = 38_000
+    const val CONTEXT_DECK_MAX_TEXT_DOCS = 12
+    const val CAFE_ENTRY_CHARS = 3_000
+    private val INLINE_DATA_URL_REGEX = Regex("data:[a-zA-Z0-9.+/-]+;base64,[A-Za-z0-9+/=]+")
+    private val TRAILING_SPACES_REGEX = Regex("[ \t]+\n")
+    private val EXTRA_BLANK_LINES_REGEX = Regex("\n{3,}")
+    private val DONE_TOKEN_REGEX = Regex("\\[\\[DONE\\]\\]", RegexOption.IGNORE_CASE)
+    private val DONE_TOKEN_STRIP_REGEX = Regex("\\s*\\[\\[DONE\\]\\]\\s*", RegexOption.IGNORE_CASE)
 
     private const val MEDIA_SYSTEM_INSTRUCTION =
       "When sharing, finding, or creating an image or document for the user, " +

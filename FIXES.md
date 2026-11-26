@@ -122,3 +122,72 @@ fewer injected skills, or a faster model via `x-openclaw-model`.
 - **The 10 s connect timeout is per endpoint.** A genuinely very slow cold 5G-to-tailnet handshake
   above 10 s would now fail over or error instead of waiting. Raise `SSE_CONNECT_TIMEOUT_SECONDS` if
   that turns up in practice.
+
+## Per-mode audit
+
+This pass covers each chat mode's own payload, context and loops. The network layer from the
+previous commit (no probes, cached endpoint, fast fail, stall watchdog) was **not touched**.
+
+Sizes are worked out by hand from the code (chars; about 4 chars per token), not measured on a phone.
+
+| Mode | Per-request payload (before → after) | Issue | Fix | Win |
+|---|---|---|---|---|
+| **General chat** (`sendGeneralChat`) | ≤ 6 × 2 000 + media hint (unchanged) | An old reply holding an inline `data:image/...;base64` screenshot was replayed as up to 2 000 chars of base64 junk | `compactHistoryText()` swaps the data-URL for `[inline image omitted]` | Up to 2 000 chars (~500 tok) per image-bearing turn; otherwise re-verified, unchanged |
+| **Bot dispatch** (`dispatchInstruction`) | system ~0.6–1.2 k + history ≤ 8 × 2 500 = **20 k** → ≤ 8 × 2 000 = **16 k** | `takeLast(8)` ran *before* filtering, so PARSING/DISPATCHED placeholders took slots; FAILED error banners were replayed as bot speech; base64 blobs replayed | Filter (also FAILED) → `takeLast(BOT_HISTORY_TURNS=8)` → `compactHistoryText(…, 2 000)` | ≤ 4 k chars per turn, plus no junk turns; better context quality |
+| **Bot spawn** (`spawnBackgroundTask`) | system + one user turn, no history | — | Not changed | — |
+| **Captain Context** (`sendCaptainContextChat` + deck) | deck: `max(1 800, 38 000/N)` per doc, so **N × 1 800, unbounded** for N > 21 docs. History 12 × 3 000 = **36 k**. → deck **≤ 38 k text** (≤ 12 docs inlined, rest listed by name) + history 8 × 1 500 = **12 k** | (1) the 1 800 floor broke the 38 k "total"; (2) a short doc's unused share was wasted while long docs got truncated; (3) duplicate docs (same ref, or same name + text) were sent twice, and so were their **images**; (4) blank-line padding from PDF extraction; (5) history re-sent 36 k although the deck already rides on every turn; (6) FAILED banners replayed | Water-fill `fairShareBudgets()` (sum ≤ total; short docs keep all their text); `CONTEXT_DECK_MAX_TEXT_DOCS = 12`; `dedupeContextDocs()` for both the deck and image payloads; `compactDocText()`; history filter → 8 × 1 500 | Typical 3-doc case: deck the same, history **−24 k chars (~6 k tok) per turn** once the thread is long. 30-doc vault: 54 k → 38 k deck. Duplicate image: one fewer 100–300 KB image_url |
+| **Captain Context – Gemini direct** (ViewModel) | **N × 12 000** doc text, unbounded | Separate hand-built vault with no total cap | Uses the same `buildCaptainContextPromptDeck()` | 5 docs: 60 k → ≤ 38 k; 10 docs: 120 k → ≤ 38 k |
+| **Cafe** (`dispatchCafeBotTurn` + `selectTranscriptWindow`) | system ~1.5–2.5 k + window ≤ 14 entries / 14 k chars (already bounded) | Base64 in transcript entries; `[[DONE]]` regexes compiled on every turn | `compactHistoryText(…, 3 000)` (same cap as before); hoisted `DONE_TOKEN_*` regexes to companion | Small CPU win; blob-heavy turns shrink. Window logic unchanged (CafeOrchestratorTest 14/14) |
+| **Chat Rooms** (`dispatchChatRoomTurn`) | ≤ 8 msgs, **uncapped per msg** | No length cap. **It has no callers**: rooms run through Cafe, and the offline path uses `refinerService.runChatRoomTurn` | Per-message cap (3 000 + base64 strip) as a guard | No effect on today's runtime (dead code) |
+| **Host control** (`sendControlAction`) | ~200–600 chars | — | Not changed | — |
+| **pingHost** | `GET /v1/models`, no body | Already tuned last pass | Not changed | — |
+| **syncBotProfile** | ~1–1.5 k chars, runs only on save, mission edit or manual sync | Full chat round-trip just to "register", but that is the host contract | Not changed | — |
+
+### ClawPalViewModel loops and jobs
+
+- **Elapsed timers (before)**
+  - Each busy lane (bot, general, context, background sub-agent) ran its own
+    `while(true){ delay(1000) }` coroutine.
+  - They did **not** run forever: each was cancelled in the lifecycle `finally`/abort.
+  - But N parallel lanes meant N coroutines and N StateFlow map rebuilds and emissions per second.
+- **Elapsed timers (after)**
+  - **One shared ticker** (`startElapsed`/`stopElapsed`/`tickElapsed`).
+  - It exits by itself once no lane is running.
+  - It derives seconds from `SystemClock.elapsedRealtime()`, so there is no drift.
+  - It only updates the flows whose lanes are live.
+  - Result: with 3 bots plus 1 sub-agent busy, 4 coroutines and 4 emissions/s become 1 coroutine and ≤ 2 emissions/s. Idle cost is 0.
+- **`onCleared()` added**
+  - It aborts in-flight OkHttp calls and force-releases wake locks when the ViewModel dies.
+  - Before, `viewModelScope` cancelled the coroutines, but a blocking SSE read and its wake lock
+    could outlive them until the socket noticed.
+
+### Not changed, and why
+
+- **Requests keep running when you switch tabs.** This is intended: jobs are ViewModel-scoped, so a
+  reply still lands in Firestore if you leave the screen. The screens already use
+  `collectAsStateWithLifecycle` and `WhileSubscribed(5000)`, so UI collection stops on exit.
+- **Per-keystroke work.**
+  - The composer state is local to each screen.
+  - The bot draft persistence is already debounced (400 ms, `ChatWorkspaceScreen:211`).
+  - Message sanitising is `remember(msg.rawText)`.
+  - Nothing to fix.
+- **Per-token work.**
+  - The OpenClaw SSE path is already coalesced (first token instant, then ≤ every 40 ms).
+  - The Gemini `streamGeminiChat` stream emits per chunk, but Gemini chunks are coarse
+    (sentence-sized), so it was left alone.
+- **The elapsed counter recomposes the live bubble once a second.** Only the single live bubble reads
+  it, so this is negligible.
+- **The 38 k deck total and the 45 k per-file extraction cap were kept.** Lowering them would trade
+  grounding accuracy for tokens, which is a product decision.
+- **The server-side ~12.5 k-token agent bootstrap is still the dominant cost** for short turns (see above).
+
+### Verification (this pass)
+
+- `sh gradlew --offline assembleDebug`: **BUILD SUCCESSFUL**.
+- `testDebugUnitTest --tests OpenClawIntegrationTest`: 13/14 pass. The single failure is the same
+  pre-existing one, `tailscaleMode_neverFallsBackToLan_failsFast_andResolvesGeminiFlashWheel`
+  (`fallbackBaseUrl` assertion, line 1284).
+  - This includes the Captain Context multi-turn payload test.
+- New `PerModePayloadTest`: 5/5 pass. It checks the deck bound with 40 × 50 k docs, water-fill
+  budgets, dedupe, and base64 stripping.
+- `CafeOrchestratorTest`: 14/14 pass.
