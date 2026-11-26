@@ -39,9 +39,16 @@ import javax.net.SocketFactory
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Dispatcher
@@ -154,13 +161,93 @@ class OpenClawClient(
     .retryOnConnectionFailure(true)
     .build()
 
+  // Shares the connection pool with [client], so a ping/prewarm leaves a warm keep-alive socket
+  // that the next chat request reuses (no fresh TCP/TLS handshake on the send path).
   private val pingClient = client.newBuilder()
-    .connectTimeout(12, TimeUnit.SECONDS)
-    .readTimeout(15, TimeUnit.SECONDS)
+    .connectTimeout(PING_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    .readTimeout(10, TimeUnit.SECONDS)
     .build()
+
+  /** Background work (prewarm, primary re-checks) that must never block a send. */
+  private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+  /** Fires the "no response headers yet" watchdog for stalled chat requests. */
+  private val stallWatchdog: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
+    Thread(r, "openclaw-stall-watchdog").apply { isDaemon = true }
+  }
+
+  /**
+   * Last endpoint (primary or LAN<->Tailscale fallback) that actually answered for a host, keyed by the
+   * host's primary base URL. Sends connect straight to it instead of running a speculative TCP probe first.
+   */
+  private data class EndpointMemo(val goodBase: String, val atMs: Long)
+  private val lastGoodEndpoint = ConcurrentHashMap<String, EndpointMemo>()
+  private val lastPrewarmAt = ConcurrentHashMap<String, Long>()
+  private val primaryRecheckInFlight = ConcurrentHashMap.newKeySet<String>()
+
+  private fun endpointKey(primaryBase: String) = primaryBase.trim().trimEnd('/').lowercase(Locale.US)
+
+  private fun rememberGoodEndpoint(primaryBase: String, goodBase: String) {
+    if (primaryBase.isBlank() || goodBase.isBlank()) return
+    lastGoodEndpoint[endpointKey(primaryBase)] = EndpointMemo(goodBase, System.currentTimeMillis())
+  }
+
+  private fun forgetEndpoint(primaryBase: String, badBase: String) {
+    val key = endpointKey(primaryBase)
+    val memo = lastGoodEndpoint[key] ?: return
+    if (memo.goodBase.equals(badBase, ignoreCase = true)) lastGoodEndpoint.remove(key, memo)
+  }
+
+  /** The base URL a send should try first: the remembered good endpoint if fresh, else the primary. */
+  private fun preferredBase(primaryBase: String, alternateBase: String): String {
+    val memo = lastGoodEndpoint[endpointKey(primaryBase)] ?: return primaryBase
+    val fresh = System.currentTimeMillis() - memo.atMs <= ENDPOINT_MEMO_TTL_MS
+    return if (fresh && alternateBase.isNotBlank() && memo.goodBase.equals(alternateBase, ignoreCase = true)) {
+      alternateBase
+    } else {
+      primaryBase
+    }
+  }
+
+  /**
+   * We are riding the fallback because the primary failed earlier. Quietly re-check the primary off the
+   * send path; once it answers again, drop the memo so the next send goes back to it.
+   */
+  private fun schedulePrimaryRecheck(primaryBase: String) {
+    val key = endpointKey(primaryBase)
+    if (!primaryRecheckInFlight.add(key)) return
+    backgroundScope.launch {
+      try {
+        if (probeTcpReachable(primaryBase, FAST_TCP_PROBE_TIMEOUT_MS) == null) {
+          lastGoodEndpoint.remove(key)
+        }
+      } finally {
+        primaryRecheckInFlight.remove(key)
+      }
+    }
+  }
+
+  /**
+   * Non-blocking warm-up: resolves which endpoint answers and leaves a pooled keep-alive connection
+   * so the first chat send skips connection setup. Throttled per host; safe to call often.
+   */
+  fun prewarm(host: OpenClawHost, deviceId: String = MediaSaveHelper.DEFAULT_DEVICE_ID) {
+    val primary = host.effectiveBaseUrl
+    if (primary.isBlank()) return
+    val key = endpointKey(primary)
+    val now = System.currentTimeMillis()
+    val last = lastPrewarmAt[key] ?: 0L
+    if (now - last < PREWARM_THROTTLE_MS) return
+    lastPrewarmAt[key] = now
+    backgroundScope.launch {
+      runCatching { pingHost(host, deviceId) }
+    }
+  }
 
   /** Shuts down the OkHttp dispatcher so test processes can exit cleanly. */
   fun shutdown() {
+    runCatching { backgroundScope.cancel() }
+    runCatching { stallWatchdog.shutdownNow() }
     runCatching { httpDispatcher.executorService.shutdown() }
     runCatching { client.connectionPool.evictAll() }
   }
@@ -413,11 +500,14 @@ class OpenClawClient(
     if (primaryBase.isBlank()) {
       return@withContext OpenClawPingResult(false, 0, 0L, "Host URL is empty.")
     }
+    // No speculative TCP probes: the real GET (short connect timeout) *is* the probe. Try the
+    // last-known-good endpoint first, and only move to the other one on an actual connect failure.
+    val fallback = host.fallbackBaseUrl
+    val firstBase = preferredBase(primaryBase, fallback)
     val basesToTry = buildList {
-      add(primaryBase to false)
-      val fallback = host.fallbackBaseUrl
+      add(firstBase to !firstBase.equals(primaryBase, ignoreCase = true))
       if (fallback.isNotBlank()) {
-        add(fallback to true)
+        if (firstBase.equals(primaryBase, ignoreCase = true)) add(fallback to true) else add(primaryBase to false)
       }
     }
     val start = System.currentTimeMillis()
@@ -425,18 +515,6 @@ class OpenClawClient(
     var lastStatus = 0
     for ((base, isFallback) in basesToTry) {
       val modelsUrl = "$base/v1/models"
-      if (FAST_PROBE_ENABLED && !isFallback) {
-        val probeErr = probeTcpReachable(base, FAST_TCP_PROBE_TIMEOUT_MS)
-        if (probeErr != null) {
-          Log.w(TAG, "pingHost TCP probe failed for $base (${probeErr.message})")
-          val fallback = host.fallbackBaseUrl
-          if (fallback.isNotBlank() && probeTcpReachable(fallback, FAST_TCP_PROBE_TIMEOUT_MS) == null) {
-            val elapsed = System.currentTimeMillis() - start
-            lastErr = formatNetworkThrowable(probeErr, base, elapsed).message
-            continue
-          }
-        }
-      }
       try {
         val reqBuilder = Request.Builder().url(modelsUrl).get()
           .addHeader("x-openclaw-device-id", deviceId.trim().ifBlank { MediaSaveHelper.DEFAULT_DEVICE_ID })
@@ -448,6 +526,8 @@ class OpenClawClient(
           val latency = System.currentTimeMillis() - start
           val bodyStr = resp.body?.string().orEmpty()
           lastStatus = resp.code
+          // Any HTTP answer proves this endpoint is reachable; remember it for sends.
+          rememberGoodEndpoint(primaryBase, base)
           if (resp.isSuccessful) {
             val parsedTargets = parseDiscoveredModelTargets(bodyStr)
             if (parsedTargets.isNotEmpty()) {
@@ -477,6 +557,7 @@ class OpenClawClient(
         throw e
       } catch (e: Exception) {
         val elapsed = System.currentTimeMillis() - start
+        forgetEndpoint(primaryBase, base)
         lastErr = formatNetworkThrowable(e, base, elapsed).message
       }
     }
@@ -839,12 +920,21 @@ class OpenClawClient(
             .put("role", "system")
             .put("content", MEDIA_SYSTEM_INSTRUCTION)
         )
-        history.takeLast(12).forEach { msg ->
-          val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
-          if (msg.rawText.isNotBlank()) {
-            put(JSONObject().put("role", role).put("content", msg.rawText))
+        // The gateway already keeps this thread's agent session (stable `user` key), so the replayed
+        // history is only a safety net. Keep it short, and never replay placeholders/error banners
+        // ("Thinking / running tools on host...", "Could not connect...") as if the bot had said them.
+        history
+          .filter { msg ->
+            msg.rawText.isNotBlank() &&
+              msg.statusEnum != com.example.model.MessageStatus.PARSING &&
+              msg.statusEnum != com.example.model.MessageStatus.DISPATCHED &&
+              msg.statusEnum != com.example.model.MessageStatus.FAILED
           }
-        }
+          .takeLast(GENERAL_HISTORY_TURNS)
+          .forEach { msg ->
+            val role = if (msg.senderEnum == MessageSender.USER) "user" else "assistant"
+            put(JSONObject().put("role", role).put("content", msg.rawText.trim().take(GENERAL_HISTORY_CHARS)))
+          }
         put(JSONObject().put("role", "user").put("content", buildUserMessageContent(enrichedPrompt, attachmentPayloads)))
       }
       if (providerKeys.bridgeEnabled && providerKeys.bridgeFolderUri.isNotBlank() && driveBridgeManager != null) {
@@ -1121,31 +1211,38 @@ class OpenClawClient(
     var triedFallbackHost = false
     var serverRetriesLeft = 1
 
-    // Best-effort pre-flight TCP check: only switches early when a reachable fallback exists;
-    // otherwise lets the real OkHttp request (60s connect timeout) proceed.
-    if (FAST_PROBE_ENABLED) {
-      val primaryTcpErr = probeTcpReachable(activeBase, FAST_TCP_PROBE_TIMEOUT_MS)
-      if (primaryTcpErr != null) {
-        val fallbackBase = host.fallbackBaseUrl
-        if (fallbackBase.isNotBlank() && probeTcpReachable(fallbackBase, FAST_TCP_PROBE_TIMEOUT_MS) == null) {
-          triedFallbackHost = true
-          val oldUrl = activeReq.url.toString()
-          val newUrl = if (oldUrl.startsWith(activeBase, ignoreCase = true)) {
-            fallbackBase + oldUrl.substring(activeBase.length)
-          } else {
-            "$fallbackBase/v1/chat/completions"
-          }
-          activeBase = fallbackBase
-          activeHost = host.copy(
-            baseUrl = fallbackBase,
-            lanUrl = fallbackBase,
-            tailscaleUrl = host.effectiveTailscaleUrl,
-          )
-          activeReq = activeReq.newBuilder().url(newUrl).build()
-        } else {
-          Log.w(TAG, "Pre-flight TCP probe failed for $activeBase (${primaryTcpErr.message}); proceeding with OkHttp request")
-        }
+    // Snappy path: NO blocking pre-flight probe. Connect straight to the last endpoint that worked
+    // (primary, or the LAN<->Tailscale fallback); fail over only on a real connect error below.
+    val primaryBase = cleanBase
+    val alternateBase = host.fallbackBaseUrl
+
+    fun hostFor(base: String): OpenClawHost =
+      if (base.equals(primaryBase, ignoreCase = true)) {
+        host
+      } else {
+        host.copy(
+          baseUrl = base,
+          lanUrl = base,
+          tailscaleUrl = host.effectiveTailscaleUrl,
+        )
       }
+
+    fun retarget(from: String, to: String) {
+      val oldUrl = activeReq.url.toString()
+      val newUrl = if (oldUrl.startsWith(from, ignoreCase = true)) {
+        to + oldUrl.substring(from.length)
+      } else {
+        "$to/v1/chat/completions"
+      }
+      activeBase = to
+      activeHost = hostFor(to)
+      activeReq = activeReq.newBuilder().url(newUrl).build()
+    }
+
+    val startBase = preferredBase(primaryBase, alternateBase)
+    if (!startBase.equals(activeBase, ignoreCase = true)) {
+      retarget(activeBase, startBase)
+      schedulePrimaryRecheck(primaryBase)
     }
 
     while (true) {
@@ -1154,8 +1251,28 @@ class OpenClawClient(
       activeCallsBySession[callTrackingKey] = call
       var streamedAnyText = false
 
+      // Stall watchdog: the gateway writes SSE headers + a role chunk *before* the agent runs, so if
+      // no response headers arrive within a short window the request is stuck in transit. Cancel it
+      // instead of hanging on the 180s read timeout (the old "~2 min then timeout" experience).
+      val headersReceived = AtomicBoolean(false)
+      val stalled = AtomicBoolean(false)
+      val bodyBytes = runCatching { activeReq.body?.contentLength() ?: 0L }.getOrDefault(0L).coerceAtLeast(0L)
+      val headerDeadlineMs = HEADERS_STALL_TIMEOUT_MS + (bodyBytes / UPLOAD_ALLOWANCE_BYTES_PER_SEC) * 1000L
+      val watchdog = runCatching {
+        stallWatchdog.schedule({
+          if (!headersReceived.get()) {
+            stalled.set(true)
+            call.cancel()
+          }
+        }, headerDeadlineMs, TimeUnit.MILLISECONDS)
+      }.getOrNull()
+
       try {
         val attemptResult: Result<OpenClawDispatchResult>? = call.execute().use { resp ->
+          headersReceived.set(true)
+          watchdog?.cancel(false)
+          // The endpoint answered over HTTP: remember it so the next send connects straight to it.
+          rememberGoodEndpoint(primaryBase, activeBase)
           if (!resp.isSuccessful) {
             val errBody = resp.body?.string().orEmpty()
             val formattedErr = formatHttpErrorMessage(resp.code, errBody, activeBase)
@@ -1183,6 +1300,8 @@ class OpenClawClient(
             source.timeout().clearDeadline()
             source.timeout().timeout(SSE_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             val textBuilder = StringBuilder()
+            var lastPartialEmitMs = 0L
+            var pendingPartial = false
             var structuredMediaUrl: String? = null
             var structuredMediaType: GeneratedMediaType? = null
             var streamModel = fallbackModel
@@ -1227,9 +1346,19 @@ class OpenClawClient(
                   ""
                 }
                 if (deltaText.isNotEmpty()) {
+                  val isFirstToken = !streamedAnyText
                   streamedAnyText = true
                   textBuilder.append(deltaText)
-                  onPartialText(stripInlineBase64MarkdownForPreview(textBuilder.toString()))
+                  // First token renders immediately; later ones are coalesced (~1 frame budget) so we
+                  // don't re-run preview regexes + recompose on every single token.
+                  val nowMs = System.currentTimeMillis()
+                  if (isFirstToken || nowMs - lastPartialEmitMs >= PARTIAL_EMIT_INTERVAL_MS) {
+                    lastPartialEmitMs = nowMs
+                    pendingPartial = false
+                    onPartialText(previewText(textBuilder))
+                  } else {
+                    pendingPartial = true
+                  }
                 }
                 val chunkMediaUrl = delta?.optString("image_url")?.takeIf { it.isNotBlank() }
                   ?: delta?.optString("media_url")?.takeIf { it.isNotBlank() }
@@ -1240,6 +1369,7 @@ class OpenClawClient(
               }
             }
 
+            if (pendingPartial) onPartialText(previewText(textBuilder))
             val fullStreamed = textBuilder.toString()
             val syntheticJson = JSONObject().apply {
               put("model", streamModel)
@@ -1326,6 +1456,18 @@ class OpenClawClient(
         throw e
       } catch (e: IOException) {
         val elapsed = System.currentTimeMillis() - attemptStartMs
+        if (stalled.get() && !headersReceived.get()) {
+          // Watchdog fired: the gateway never started answering. Don't auto-resend: the request may
+          // already have reached the agent and a resend would run the turn twice. Forget the endpoint
+          // so the user's retry re-resolves LAN vs Tailscale.
+          forgetEndpoint(primaryBase, activeBase)
+          return Result.failure(
+            OpenClawFormattedException(
+              "OpenClaw at $activeBase didn't start replying within ${headerDeadlineMs / 1000}s — the link looks stalled. Check Tailscale/LAN and tap retry.",
+              isFastConnectFailure = true,
+            )
+          )
+        }
         val isUserCanceled = call.isCanceled() || e.message?.contains("Canceled", ignoreCase = true) == true
         if (isUserCanceled) {
           return Result.failure(formatNetworkThrowable(e, activeBase, elapsed))
@@ -1340,26 +1482,18 @@ class OpenClawClient(
           e is UnknownHostException ||
           isConnectTimeout
 
-        // Section 1: Automatic LAN -> Tailscale (or secondary) failover if primary host is unreachable
-        val fallbackBase = host.fallbackBaseUrl
-        if (isConnectUnreachable && !triedFallbackHost && fallbackBase.isNotBlank() &&
-          (!FAST_PROBE_ENABLED || probeTcpReachable(fallbackBase, FAST_TCP_PROBE_TIMEOUT_MS) == null)
-        ) {
+        // Section 1: Automatic LAN <-> Tailscale failover, triggered by a *real* connect failure (no
+        // speculative probe). Works in both directions when we started on the remembered fallback.
+        if (isConnectUnreachable) forgetEndpoint(primaryBase, activeBase)
+        if (isConnectUnreachable && !triedFallbackHost && alternateBase.isNotBlank()) {
           triedFallbackHost = true
-          val oldUrl = activeReq.url.toString()
-          val newUrl = if (oldUrl.startsWith(activeBase, ignoreCase = true)) {
-            fallbackBase + oldUrl.substring(activeBase.length)
-          } else {
-            "$fallbackBase/v1/chat/completions"
-          }
-          activeBase = fallbackBase
-          activeHost = host.copy(
-            baseUrl = fallbackBase,
-            lanUrl = fallbackBase,
-            tailscaleUrl = host.effectiveTailscaleUrl,
-          )
-          activeReq = activeReq.newBuilder().url(newUrl).build()
+          val other = if (activeBase.equals(primaryBase, ignoreCase = true)) alternateBase else primaryBase
+          retarget(activeBase, other)
           continue
+        }
+        // Retrying the same unreachable host just doubles the dead air — surface it right away.
+        if (isConnectUnreachable) {
+          return Result.failure(formatNetworkThrowable(e, activeBase, elapsed))
         }
 
         // Section 10: On ClientDisconnectError / socket abort (not a full 180s read timeout) -> evict stale pool & retry once
@@ -1373,6 +1507,7 @@ class OpenClawClient(
 
         return Result.failure(formatNetworkThrowable(e, activeBase, elapsed))
       } finally {
+        watchdog?.cancel(false)
         activeCallsBySession.remove(callTrackingKey, call)
       }
     }
@@ -2428,6 +2563,15 @@ class OpenClawClient(
       .trim()
   }
 
+  /** Cheap preview: only run the media-stripping regexes when the text can actually contain media. */
+  private fun previewText(sb: StringBuilder): String {
+    val text = sb.toString()
+    val mayContainMedia = text.contains("data:", ignoreCase = true) ||
+      text.contains("MEDIA:", ignoreCase = true) ||
+      text.contains("PATH=", ignoreCase = true)
+    return if (mayContainMedia) stripInlineBase64MarkdownForPreview(text) else text
+  }
+
   private fun stripInlineBase64MarkdownForPreview(text: String): String {
     return text
       .replace(Regex("!\\[[^\\]]*\\]\\(\\s*data:[^)]*\\)?", RegexOption.IGNORE_CASE), "[Receiving image...]")
@@ -2484,9 +2628,21 @@ class OpenClawClient(
     const val APK_WIRE_MODEL = "openclaw/apk"
     const val MEDIA_ROUTE_AGENT_ID = "main"
     const val FAST_PROBE_ENABLED = true
-    const val FAST_TCP_PROBE_TIMEOUT_MS = 10_000
-    const val SSE_CONNECT_TIMEOUT_SECONDS = 60L
+    /** Only used by the background primary re-check now — never on the send path. */
+    const val FAST_TCP_PROBE_TIMEOUT_MS = 2_500
+    /** Real TCP connect budget per endpoint. Tailnet/LAN connects finish in < 1-2s when the host is up. */
+    const val SSE_CONNECT_TIMEOUT_SECONDS = 10L
+    /** Mid-stream idle allowance: the gateway sends no keepalives while tools run, so keep this generous. */
     const val SSE_READ_TIMEOUT_SECONDS = 180L
+    const val PING_CONNECT_TIMEOUT_SECONDS = 5L
+    /** Gateway sends SSE headers before running the agent; no headers by then means a stalled link. */
+    const val HEADERS_STALL_TIMEOUT_MS = 30_000L
+    const val UPLOAD_ALLOWANCE_BYTES_PER_SEC = 64_000L
+    const val ENDPOINT_MEMO_TTL_MS = 10 * 60_000L
+    const val PREWARM_THROTTLE_MS = 45_000L
+    const val PARTIAL_EMIT_INTERVAL_MS = 40L
+    const val GENERAL_HISTORY_TURNS = 6
+    const val GENERAL_HISTORY_CHARS = 2_000
 
     private const val MEDIA_SYSTEM_INSTRUCTION =
       "When sharing, finding, or creating an image or document for the user, " +

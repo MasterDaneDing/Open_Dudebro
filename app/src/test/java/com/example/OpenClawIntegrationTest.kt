@@ -196,10 +196,10 @@ class OpenClawIntegrationTest {
       )
       val client = OpenClawClient(appFilesDir = tempFilesDir)
 
-      // CRITICAL v2 Section 0 & 10: connectTimeout >= 60s, readTimeout >= 120s (180s), callTimeout == 0
-      assertTrue(OpenClawClient.SSE_CONNECT_TIMEOUT_SECONDS >= 60L)
+      // Snappy: short connect budget (fail over fast), generous mid-stream idle (180s), callTimeout == 0
+      assertTrue(OpenClawClient.SSE_CONNECT_TIMEOUT_SECONDS in 5L..15L)
       assertTrue(OpenClawClient.SSE_READ_TIMEOUT_SECONDS in 120L..180L)
-      assertTrue(client.sseConnectTimeoutMillis >= 60_000L)
+      assertTrue(client.sseConnectTimeoutMillis <= 15_000L)
       assertTrue(client.sseReadTimeoutMillis >= 120_000L)
       assertEquals(0L, client.sseCallTimeoutMillis)
 
@@ -1314,7 +1314,7 @@ class OpenClawIntegrationTest {
   @Test
   fun slowButReachableHost_probeTimesOut_stillAttemptsRequestAndSucceeds() = runTest {
     assertTrue(OpenClawClient.FAST_PROBE_ENABLED)
-    assertEquals(10_000, OpenClawClient.FAST_TCP_PROBE_TIMEOUT_MS)
+    assertTrue(OpenClawClient.FAST_TCP_PROBE_TIMEOUT_MS <= 3_000)
 
     val requestHits = AtomicInteger(0)
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -1340,8 +1340,10 @@ class OpenClawIntegrationTest {
       )
       val client = OpenClawClient()
       // Simulate pre-flight probe timing out on cold mobile-data handshake while socket is actually reachable
-      client.tcpProbeOverride = { _, timeoutMs ->
-        assertEquals(10_000, timeoutMs)
+      // The send path must not run a blocking pre-flight probe at all.
+      val probeCalls = AtomicInteger(0)
+      client.tcpProbeOverride = { _, _ ->
+        probeCalls.incrementAndGet()
         java.net.SocketTimeoutException("connect timed out")
       }
 
@@ -1357,6 +1359,7 @@ class OpenClawIntegrationTest {
       assertTrue("Expected OkHttp request to still run and succeed, got: ${result.exceptionOrNull()}", result.isSuccess)
       assertEquals(1, requestHits.get())
       assertEquals("Connected after cold start!", result.getOrThrow().replyText)
+      assertEquals(0, probeCalls.get())
     } finally {
       server.stop(0)
     }

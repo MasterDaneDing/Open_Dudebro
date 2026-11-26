@@ -392,6 +392,16 @@ class ClawPalViewModel(
           }
         }
     }
+    // Snappiness: as soon as the host list is known, warm up the gateway connection in the background
+    // (resolves LAN vs Tailscale + leaves a pooled keep-alive socket) so the first "hello" doesn't pay
+    // for connection setup. Non-blocking and throttled inside the client.
+    viewModelScope.launch {
+      hostsState.collect { state ->
+        (state as? UiState.Success)?.data?.firstOrNull()?.let { host ->
+          openClawClient.prewarm(host, deviceId = localPrefs.value.devicePairingId)
+        }
+      }
+    }
     viewModelScope.launch {
       botsState.collect { state ->
         if (state is UiState.Success && state.data.isNotEmpty()) {
